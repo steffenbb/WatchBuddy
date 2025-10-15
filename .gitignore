@@ -60,3 +60,21 @@ desktop.ini
 # Large CSV datasets (mount as volumes instead)
 TMDB_movie_dataset_v11.csv
 TMDB_tv_dataset_v3.csv
+
+# Exclude local workspace/ide and GitHub configs
+.vscode/
+.github/
+WatchBuddy.code-workspace
+
+# Exclude example/override compose files
+docker-compose.override.yml.example
+
+# Exclude internal docs and reports not needed on remote
+SETUP_FLOW_ENHANCEMENT.md
+SYNC_ANALYSIS_REPORT.md
+TRAKT_SYNC_FIX.md
+TRAKT_SYNC_GUIDE.md
+IMPLEMENTATION_SUMMARY.md
+IMPLEMENTATION_UPDATES.md
+IMPORT_COMPLETE.md
+PERSISTENT_POOL_GUIDE.md
