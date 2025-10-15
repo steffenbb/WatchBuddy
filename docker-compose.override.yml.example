@@ -1,0 +1,31 @@
+# Example local override: copy to docker-compose.override.yml (git-ignored) and edit values
+# This allows 'docker-compose up' to work without extra steps.
+
+version: '3.9'
+services:
+  db:
+    environment:
+      # Replace with local test credentials; keep this file out of git by using docker-compose.override.yml
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    # Optionally, mount a local secrets file (git-ignored) instead of env vars
+    # volumes:
+    #   - ./secrets/db_creds.txt:/run/secrets/db_creds.txt:ro
+
+  backend:
+    environment:
+      # Backend will use DATABASE_URL or POSTGRES_* envs
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    volumes:
+      - ./backend/app:/app/app
+
+  celery:
+    environment:
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    volumes:
+      - ./backend/app:/app/app

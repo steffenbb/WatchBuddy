@@ -1,0 +1,63 @@
+# Environment
+.env
+.env.local
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+watchbuddy.db
+
+# Frontend build
+node_modules/
+dist/
+.vite/
+
+# Docker volumes
+redis_data/
+db_data/
+db_data_v2/
+
+# Secrets and local configs
+.env
+.env.local
+.env.*
+/run/secrets/
+db_creds/
+db_creds
+db_creds/*
+
+# Docker build artifacts
+.dockerignore
+
+# Local compose overrides (may contain local credentials)
+docker-compose.override.yml
+
+# IDE
+.vscode/settings.json
+.vscode/.ropeproject
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+
+# Large CSV datasets (mount as volumes instead)
+# Uncomment if you don't want to commit the datasets
+# *.csv
+# TMDB_*.csv

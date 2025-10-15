@@ -1,0 +1,93 @@
+services:
+
+
+
+
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - db_data_v2:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U watchbuddy -d watchbuddy"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: on-failure
+
+  redis:
+    image: redis:alpine
+    restart: always
+
+
+  backend:
+    image: lsdking101/watchbuddy:latest
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: on-failure
+    environment:
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    healthcheck:
+      test: ["CMD-SHELL", "python3 - << 'PY'\nimport http.client\nconn = http.client.HTTPConnection('127.0.0.1', 8000, timeout=2)\ntry:\n    conn.request('GET', '/health')\n    resp = conn.getresponse()\n    print(resp.status)\n    exit(0 if resp.status == 200 else 1)\nexcept Exception as e:\n    print(e)\n    exit(1)\nPY"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+
+  celery:
+    image: lsdking101/watchbuddy:latest
+    command: celery -A app.core.celery_app.celery_app worker --loglevel=info
+    depends_on:
+      backend:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: on-failure
+    environment:
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    volumes:
+      - ./backend/app:/app/app
+
+  celery-beat:
+    image: lsdking101/watchbuddy:latest
+    command: celery -A app.core.celery_app.celery_app beat --loglevel=info
+    depends_on:
+      backend:
+        condition: service_started
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    restart: on-failure
+    environment:
+      POSTGRES_USER: watchbuddy
+      POSTGRES_PASSWORD: watchbuddy
+      POSTGRES_DB: watchbuddy
+    volumes:
+      - ./backend/app:/app/app
+
+
+  frontend:
+    image: lsdking101/watchbuddy-frontend:latest
+    ports:
+      - "5173:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+
+volumes:
+  db_data_v2:
