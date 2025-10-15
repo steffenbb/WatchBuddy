@@ -8,10 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import Dict, Any
 import logging
+from datetime import datetime
+from pydantic import BaseModel
 
 from app.core.database import get_db
 from app.core.celery_app import celery_app
 from app.services.metadata_builder import MetadataBuilder
+from app.core.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,12 +42,16 @@ async def get_metadata_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
         "build_status": build_status
     }
 
+class BuildRequest(BaseModel):
+    force: bool = False
+    user_id: int = 1
+
+
 @router.post("/build/start")
 async def start_metadata_build(
-    force: bool = False,
-    user_id: int = 1,
+    req: BuildRequest,
     db: Session = Depends(get_db)
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """
     Start metadata building process using Celery task.
     
@@ -60,16 +67,28 @@ async def start_metadata_build(
     # Check current status
     current_status = await builder.get_build_status()
     
-    if current_status["status"] == "running" and not force:
-        return {
-            "message": "Metadata build already in progress",
-            "progress_percent": current_status.get("progress_percent", 0)
-        }
+    if current_status["status"] == "running" and not req.force:
+        # Stale detection: if no update for > 120s, allow restart
+        updated_at = current_status.get("updated_at")
+        is_stale = False
+        if updated_at:
+            try:
+                last = datetime.fromisoformat(updated_at)
+                age = (datetime.utcnow() - last).total_seconds()
+                if age > 120:
+                    is_stale = True
+            except Exception:
+                is_stale = True
+        if not is_stale:
+            return {
+                "message": "Metadata build already in progress",
+                "progress_percent": current_status.get("progress_percent", 0)
+            }
     
     # Start build via Celery using the configured app (Redis broker)
     celery_app.send_task(
         "app.services.tasks.build_metadata",
-        kwargs={"user_id": user_id, "force": force}
+        kwargs={"user_id": req.user_id, "force": req.force}
     )
     
     return {
@@ -103,7 +122,8 @@ async def skip_metadata_build() -> Dict[str, str]:
     builder = MetadataBuilder()
     
     # Set completion flag
-    await builder.redis.set("metadata_build:scan_completed", "true")
+    r = get_redis()
+    await r.set("metadata_build:scan_completed", "true")
     
     logger.info("Metadata build skipped by user - marked as completed")
     

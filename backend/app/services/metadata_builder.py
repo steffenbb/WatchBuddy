@@ -20,11 +20,15 @@ class MetadataBuilder:
     """Builds metadata for persistent candidates with progress tracking."""
     
     def __init__(self):
-        self.redis = get_redis()
+        # Do not cache an asyncio Redis connection across event loop lifecycles.
+        # Always grab a fresh client within each method to avoid 'Event loop is closed' errors
+        # after worker restarts or Windows host reboots.
+        pass
         
     async def get_build_status(self) -> Dict[str, Any]:
         """Get current metadata build status from Redis."""
-        status_json = await self.redis.get("metadata_build:status")
+        r = get_redis()
+        status_json = await r.get("metadata_build:status")
         if status_json:
             try:
                 return json.loads(status_json)
@@ -45,7 +49,8 @@ class MetadataBuilder:
         """Update metadata build status in Redis."""
         status["updated_at"] = datetime.utcnow().isoformat()
         try:
-            await self.redis.setex(
+            r = get_redis()
+            await r.setex(
                 "metadata_build:status",
                 86400,  # 24 hour expiry
                 json.dumps(status)
@@ -65,7 +70,8 @@ class MetadataBuilder:
         from sqlalchemy import func
         
         # First check if we have a completion flag set
-        completed_flag = await self.redis.get("metadata_build:scan_completed")
+        r = get_redis()
+        completed_flag = await r.get("metadata_build:scan_completed")
         if completed_flag:
             return True
         
@@ -82,7 +88,7 @@ class MetadataBuilder:
         percent = (with_trakt / total) * 100
         if percent >= 80.0:
             # Set completion flag so we don't show the screen again
-            await self.redis.set("metadata_build:scan_completed", "true")
+            await r.set("metadata_build:scan_completed", "true")
             return True
         
         return False
@@ -101,19 +107,33 @@ class MetadataBuilder:
         from app.models import PersistentCandidate
         from sqlalchemy import func
         
-        # Check if already in progress
+        # Check if already in progress and detect stale runs
         current_status = await self.get_build_status()
         if current_status["status"] == "running" and not force:
-            logger.info("Metadata build already in progress")
-            return
+            # Consider a job stale if status hasn't been updated in the last 120 seconds
+            updated_at = current_status.get("updated_at")
+            is_stale = False
+            if updated_at:
+                try:
+                    last = datetime.fromisoformat(updated_at)
+                    age = (datetime.utcnow() - last).total_seconds()
+                    if age > 120:
+                        is_stale = True
+                except Exception:
+                    # If parsing fails, treat as stale to be safe
+                    is_stale = True
+            if not is_stale:
+                logger.info("Metadata build already in progress")
+                return
+            logger.warning("Detected stale metadata build status (no heartbeat >120s). Resuming work.")
         
         # Get total count and candidates without Trakt IDs
         total_count = db.query(func.count(PersistentCandidate.id)).scalar() or 0
         logger.info(f"Total candidates in database: {total_count}")
         
-        # Use Redis to track retry counts for each candidate
+        # Use Redis to track retry counts for each candidate (fresh client per call)
         retry_key_prefix = "metadata_build:retry:"
-        redis = self.redis
+        redis = get_redis()
         
         # Count candidates without Trakt IDs (don't load all into memory)
         if not force:
@@ -267,7 +287,8 @@ class MetadataBuilder:
                 })
                 # Set completion flag so UI doesn't show metadata screen on reload
                 # Periodic retry task will continue trying to map remaining items
-                await self.redis.set("metadata_build:scan_completed", "true")
+                r_done = get_redis()
+                await r_done.set("metadata_build:scan_completed", "true")
             else:
                 # Mark as complete if all mapped
                 logger.info(f"Metadata build complete: all {processed} candidates processed")
@@ -280,7 +301,8 @@ class MetadataBuilder:
                     "errors": errors
                 })
                 # Set completion flag
-                await self.redis.set("metadata_build:scan_completed", "true")
+                r_done = get_redis()
+                await r_done.set("metadata_build:scan_completed", "true")
             
             logger.info(f"Metadata build complete: {processed} processed, {errors} errors")
             
