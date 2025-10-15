@@ -21,14 +21,14 @@ WatchBuddy is a smart recommendation system that syncs with your Trakt watch his
 - **Trakt Integration**: Two-way sync with your Trakt lists
 
 ### 🌍 Content Discovery
-- **≈280,000 Pre-Loaded Titles**: Instant recommendations from TMDB CSV datasets (≈266K movies + 13K shows)
+- **~1.47 Million Pre-Loaded Titles**: Instant recommendations from TMDB CSV datasets (~1.3M movies + 165K shows)
 - **Multi-Language Support**: Discover content in 20+ languages with smart fallback
 - **Ultra Discovery Mode**: Find hidden gems and obscure titles
 - **Genre Blending**: Mix multiple genres for unique recommendations
 
 ### ⚡ Zero-Config Setup
 - **Docker-First Architecture**: One command to start everything
-- **Auto-Init Database**: Pre-populates ≈280K candidates on first startup
+- **Auto-Init Database**: Pre-populates ~1.47M candidates on first startup
 - **Persistent Storage**: All data survives container restarts
 - **Background Tasks**: Celery workers handle syncs and updates automatically
 
@@ -57,7 +57,7 @@ docker compose up -d
 
 That's it! WatchBuddy will automatically:
 - ✅ Create the database
-- ✅ Load ≈280,000 titles (≈266K movies + 13K shows)
+- ✅ Load ~1.47 million titles (~1.3M movies + 165K shows)
 - ✅ Start the API, frontend, Redis, and background workers
 - ✅ Initialize all required services
 

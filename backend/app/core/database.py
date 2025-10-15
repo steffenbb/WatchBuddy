@@ -2,6 +2,9 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine, text
 import asyncio
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Read DB credentials from environment variables (set in docker-compose.yml)
 user = os.getenv("POSTGRES_USER", "watchbuddy")
@@ -111,7 +114,14 @@ async def init_db():
     await loop.run_in_executor(None, _create_default_user)
 
     # Bootstrap persistent candidate pool from bundled CSVs if empty
+    _bootstrap_lock = {'done': False}
+    
     def _bootstrap_candidates_if_needed():
+        """Bootstrap persistent_candidates from CSV files in /app/data if table is empty."""
+        # Check lock first to prevent duplicate runs in same process
+        if _bootstrap_lock['done']:
+            return
+            
         try:
             from app.models import PersistentCandidate
             from pathlib import Path
@@ -119,29 +129,44 @@ async def init_db():
             with SessionLocal() as db:
                 count = db.query(PersistentCandidate).limit(1).count()
                 if count > 0:
+                    logger.info("Persistent candidates already bootstrapped, skipping CSV import")
+                    _bootstrap_lock['done'] = True
                     return  # Already bootstrapped
                 data_dir = Path('/app/data')
                 if not data_dir.exists():
+                    logger.warning("Data directory /app/data does not exist, skipping CSV import")
                     return
                 # Accept multiple CSVs (movies/shows). Import using simplified inline parser to avoid circular imports.
                 csv_files = list(data_dir.glob('*.csv'))
                 if not csv_files:
+                    logger.warning("No CSV files found in /app/data, skipping bootstrap")
                     return
+                
+                logger.info(f"Starting CSV bootstrap from {len(csv_files)} file(s)")
+                total_imported = 0
+                
                 for csv_path in csv_files:
+                    logger.info(f"Processing CSV file: {csv_path.name}")
+                    file_imported = 0
+                    seen_ids = set()  # Track (tmdb_id, media_type) to avoid duplicates
                     try:
                         with csv_path.open('r', encoding='utf-8', newline='') as f:
                             reader = csv.DictReader(f)
                             batch = []
                             for row in reader:
-                                # Basic required fields: id, title/name, media_type or infer
+                                # Basic required fields: id, title/name, language
                                 tmdb_id = row.get('id')
                                 title = row.get('title') or row.get('name')
-                                if not tmdb_id or not title:
+                                language = (row.get('original_language') or '').lower()[:5]
+                                
+                                # Skip items without required fields
+                                if not tmdb_id or not title or not language:
                                     continue
                                 try:
                                     tmdb_id_int = int(tmdb_id)
                                 except Exception:
                                     continue
+                                    
                                 # Infer media type from filename or columns
                                 if 'name' in row and 'first_air_date' in row:
                                     media_type = 'show'
@@ -151,7 +176,13 @@ async def init_db():
                                     media_type = 'show'
                                 else:
                                     media_type = 'movie'
-                                language = (row.get('original_language') or '').lower()[:5]
+                                
+                                # Skip duplicates within CSV
+                                dup_key = (tmdb_id_int, media_type)
+                                if dup_key in seen_ids:
+                                    continue
+                                seen_ids.add(dup_key)
+                                
                                 release_date = row.get('release_date') or row.get('first_air_date')
                                 year = None
                                 if release_date and len(release_date) >= 4:
@@ -214,17 +245,27 @@ async def init_db():
                                 if len(batch) >= 500:
                                     db.bulk_save_objects(batch)
                                     db.commit()
+                                    file_imported += len(batch)
                                     batch = []
                             if batch:
                                 db.bulk_save_objects(batch)
                                 db.commit()
-                        # Continue with next CSV
-                    except Exception:
+                                file_imported += len(batch)
+                        
+                        total_imported += file_imported
+                        logger.info(f"Successfully imported {file_imported} items from {csv_path.name}")
+                        
+                    except Exception as e:
+                        logger.error(f"Failed to import {csv_path.name}: {str(e)}", exc_info=True)
                         db.rollback()
                         continue
-        except Exception:
-            # Silent failure to avoid blocking startup
-            pass
+                
+                logger.info(f"CSV bootstrap complete. Total items imported: {total_imported}")
+                _bootstrap_lock['done'] = True
+                
+        except Exception as e:
+            logger.error(f"Critical error during CSV bootstrap: {str(e)}", exc_info=True)
+            _bootstrap_lock['done'] = True
 
     await loop.run_in_executor(None, _bootstrap_candidates_if_needed)
 

@@ -109,32 +109,21 @@ class MetadataBuilder:
         
         # Get total count and candidates without Trakt IDs
         total_count = db.query(func.count(PersistentCandidate.id)).scalar() or 0
+        logger.info(f"Total candidates in database: {total_count}")
         
         # Use Redis to track retry counts for each candidate
         retry_key_prefix = "metadata_build:retry:"
         redis = self.redis
         
+        # Count candidates without Trakt IDs (don't load all into memory)
         if not force:
-            candidates = db.query(PersistentCandidate).filter(
+            candidates_count = db.query(func.count(PersistentCandidate.id)).filter(
                 PersistentCandidate.trakt_id.is_(None)
-            ).all()
+            ).scalar() or 0
         else:
-            candidates = db.query(PersistentCandidate).all()
+            candidates_count = total_count
         
-        # Filter out candidates that have reached retry limit
-        candidates_to_process = []
-        for c in candidates:
-            retry_count = 0
-            try:
-                val = await redis.get(f"{retry_key_prefix}{c.id}")
-                if val is not None:
-                    retry_count = int(val)
-            except Exception:
-                pass
-            if c.trakt_id is None and retry_count < retry_limit:
-                candidates_to_process.append(c)
-        
-        candidates_count = len(candidates_to_process)
+        logger.info(f"Candidates without Trakt IDs: {candidates_count}")
         
         if candidates_count == 0:
             logger.info("All candidates already have Trakt IDs or reached retry limit")
@@ -164,16 +153,28 @@ class MetadataBuilder:
             # Initialize Trakt client
             trakt_client = TraktClient(user_id=user_id)
             
-            # Process sequentially to respect Trakt API rate limits
+            # Process using pagination to avoid loading all into memory
             # Trakt API limits: ~1000 requests per 5 minutes = ~3 requests/second max
-            batch_size = 100  # Commit after this many updates
+            batch_size = 100  # Fetch and process in batches of 100
             processed = 0
             errors = 0
             unmapped_ids = []
+            offset = 0
             
-            # Use batching for large datasets
-            for i in range(0, len(candidates_to_process), batch_size):
-                batch = candidates_to_process[i:i+batch_size]
+            # Use pagination instead of loading all candidates
+            while offset < candidates_count:
+                # Fetch batch from database
+                if not force:
+                    batch = db.query(PersistentCandidate).filter(
+                        PersistentCandidate.trakt_id.is_(None)
+                    ).limit(batch_size).offset(offset).all()
+                else:
+                    batch = db.query(PersistentCandidate).limit(batch_size).offset(offset).all()
+                
+                if not batch:
+                    break
+                
+                logger.info(f"Processing batch at offset {offset}, got {len(batch)} candidates")
                 
                 for candidate in batch:
                     try:
@@ -233,9 +234,16 @@ class MetadataBuilder:
                 # Commit after each batch
                 try:
                     db.commit()
+                    logger.info(f"Committed batch at offset {offset}")
                 except Exception as e:
                     logger.error(f"Failed to commit batch: {e}")
                     db.rollback()
+                
+                # Move to next batch
+                offset += batch_size
+                
+                # Clear session to free memory
+                db.expunge_all()
             
             # Final commit
             try:
@@ -277,12 +285,12 @@ class MetadataBuilder:
             logger.info(f"Metadata build complete: {processed} processed, {errors} errors")
             
         except Exception as e:
-            logger.error(f"Metadata build failed: {e}")
+            logger.error(f"Metadata build failed: {e}", exc_info=True)
             await self.set_build_status({
                 "status": "error",
-                "total": candidates_to_process,
+                "total": candidates_count,
                 "processed": processed,
-                "progress_percent": round((processed / candidates_to_process) * 100, 2) if candidates_to_process > 0 else 0,
+                "progress_percent": round((processed / candidates_count) * 100, 2) if candidates_count > 0 else 0,
                 "started_at": current_status.get("started_at"),
                 "errors": errors,
                 "error_message": str(e)

@@ -162,6 +162,22 @@ async def set_tmdb_key(request: TMDBKeyRequest):
             if resp.status_code != 200:
                 raise HTTPException(status_code=400, detail="Invalid TMDB API key")
         await _settings_set("tmdb_api_key", request.api_key)
+        
+        # Trigger metadata builder if this is initial setup
+        from app.services.metadata_builder import MetadataBuilder
+        from app.core.database import SessionLocal
+        builder = MetadataBuilder()
+        db = SessionLocal()
+        try:
+            # Check if metadata needs to be built
+            is_ready = await builder.check_metadata_ready(db)
+            if not is_ready:
+                # Start metadata build in background
+                from app.services.tasks import build_metadata
+                build_metadata.delay(user_id=1)
+        finally:
+            db.close()
+        
         return {"success": True}
     except httpx.RequestError as e:
         msg = extract_error_message(e)

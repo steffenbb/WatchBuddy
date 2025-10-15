@@ -92,9 +92,7 @@ class PersistentCandidate(Base):
     We'll compute an "obscurity_score" heuristically (popularity and votes inverted) when inserting/updating.
     """
     __tablename__ = "persistent_candidates"
-    __table_args__ = (
-        UniqueConstraint('tmdb_id', 'media_type', name='uq_persistent_candidates_tmdb_media'),
-    )
+    
     id = Column(Integer, primary_key=True)
     trakt_id = Column(Integer, unique=True, nullable=True, index=True)  # May be null if unmapped yet
     tmdb_id = Column(Integer, nullable=False, index=True)  # UNIQUE with media_type via __table_args__
@@ -126,7 +124,7 @@ class PersistentCandidate(Base):
     active = Column(Boolean, default=True, index=True)
 
     __table_args__ = (
-        UniqueConstraint('tmdb_id', name='uq_persistent_candidates_tmdb'),
+        UniqueConstraint('tmdb_id', 'media_type', name='uq_persistent_candidates_tmdb_media'),
         {'comment': 'Persistent combined TMDB/Trakt candidate pool'}
     )
 
