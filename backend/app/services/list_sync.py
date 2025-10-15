@@ -507,6 +507,17 @@ class ListSyncService:
 
     async def _enrich_with_watched_status(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Add watched status information to candidates."""
+        # Check if any candidates have Trakt IDs - no point fetching if none do
+        has_trakt_ids = any(candidate.get("trakt_id") for candidate in candidates)
+        
+        if not has_trakt_ids:
+            logger.debug("Skipping watched status enrichment - no candidates have Trakt IDs")
+            # Mark all as not watched and return
+            for candidate in candidates:
+                candidate["is_watched"] = False
+                candidate["watched_at"] = None
+            return candidates
+        
         # Get all watched status in bulk for efficiency
         watched_movies = await self.trakt_client.get_watched_status("movies")
         watched_shows = await self.trakt_client.get_watched_status("shows")

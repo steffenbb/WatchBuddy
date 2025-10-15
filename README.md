@@ -45,7 +45,7 @@ WatchBuddy is a smart recommendation system that syncs with your Trakt watch his
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/watchbuddy.git
+git clone https://github.com/steffenbb/WatchBuddy.git
 cd watchbuddy
 
 # Start all services
@@ -60,6 +60,54 @@ That's it! WatchBuddy will automatically:
 - ✅ Load 20,000+ movies and shows
 - ✅ Start the API, frontend, Redis, and background workers
 - ✅ Initialize all required services
+
+### Alternative Installation (no git clone)
+
+Want to run WatchBuddy without cloning the repo? You can use Docker Compose directly:
+
+Steps (Windows PowerShell):
+
+```powershell
+# 1) Create a folder (optional) and enter it
+New-Item -ItemType Directory -Force .\watchbuddy | Out-Null; Set-Location .\watchbuddy
+
+# 2) Download the compose file into this folder
+Invoke-WebRequest -UseBasicParsing \
+    -Uri https://raw.githubusercontent.com/steffenbb/WatchBuddy/main/docker-compose.yml \
+    -OutFile docker-compose.yml
+
+# 3) Pull the required images
+docker compose pull
+
+# 4) Start the stack in the background
+docker compose up -d
+
+# 5) Open the app (after ~2 minutes on first run)
+# http://localhost:5173
+```
+
+Handy commands:
+
+```powershell
+# Update to latest images and restart
+docker compose pull; docker compose up -d
+
+# Check status and recent logs
+docker compose ps
+docker logs --tail 100 watchbuddy-backend-1
+docker logs --tail 100 watchbuddy-frontend-1
+
+# Stop the stack (keep data)
+docker compose down
+
+# Reset everything (DESTRUCTIVE)
+docker compose down -v
+```
+
+Notes:
+- First startup seeds the database and may take a couple of minutes.
+- Data is persisted in Docker volumes (PostgreSQL, Redis). Removing volumes resets the app.
+- Configure Trakt OAuth and TMDB API key from the in-app Settings once the UI is up.
 
 ### First-Time Setup
 

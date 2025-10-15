@@ -84,7 +84,19 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
       const data = await response.json();
       
       if (data.valid) {
-        addToast({ message: 'Setup complete! Redirecting...', type: 'success' });
+        addToast({ message: 'Setup complete! Initializing metadata...', type: 'success' });
+        
+        // Trigger metadata build
+        try {
+          await fetch('/api/metadata/build/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ user_id: 1 })
+          });
+        } catch (error) {
+          console.error('Failed to start metadata build:', error);
+        }
+        
         setTimeout(() => {
           if (onTraktConnect) onTraktConnect();
           if (navigate) navigate("/dashboard");

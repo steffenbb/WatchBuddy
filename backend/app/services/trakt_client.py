@@ -25,6 +25,7 @@ import asyncio
 import httpx
 import json
 from typing import Any, Dict, Optional, List
+from datetime import datetime, timedelta
 from app.core.redis_client import get_redis
 
 TRAKT_API_URL = "https://api.trakt.tv"
@@ -286,7 +287,24 @@ class TraktClient:
         return await self._request("GET", endpoint)
 
     async def get_watched_status(self, media_type: str = "movies") -> Dict[int, Dict]:
-        """Get watched status for all items of a media type, indexed by Trakt ID."""
+        """Get watched status for all items of a media type, indexed by Trakt ID.
+        
+        Implements Redis caching with 5-minute TTL to reduce API calls.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Check cache first
+        cache_key = f"trakt_watched:{self.user_id}:{media_type}"
+        cached_data = await self._redis.get(cache_key)
+        if cached_data:
+            try:
+                logger.debug(f"Using cached watched status for {media_type} (user {self.user_id})")
+                return json.loads(cached_data)
+            except Exception as e:
+                logger.warning(f"Failed to parse cached watched status: {e}")
+        
+        # Fetch from API if not cached
         if media_type == "movies":
             watched_items = await self.get_watched_movies()
         else:
@@ -310,6 +328,14 @@ class TraktClient:
                         "watched_at": item.get("last_watched_at"),
                         "seasons": item.get("seasons", [])
                     }
+        
+        # Cache for 5 minutes (300 seconds)
+        try:
+            await self._redis.setex(cache_key, 300, json.dumps(watched_dict))
+            logger.debug(f"Cached watched status for {media_type} (user {self.user_id}, {len(watched_dict)} items)")
+        except Exception as e:
+            logger.warning(f"Failed to cache watched status: {e}")
+        
         return watched_dict
 
     async def check_item_watched(self, trakt_id: int, media_type: str = "movies") -> tuple[bool, Optional[str]]:

@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db
-from app.api import lists, smartlists, settings, status, trakt_auth, suggested, ratings
+from app.api import lists, smartlists, settings, status, trakt_auth, suggested, ratings, metadata
 from app.api.recommendations import router as recommendations_router
 from app.api.notifications import router as notifications_router
 
@@ -24,6 +24,7 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["Not
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
 app.include_router(suggested.router, prefix="/api/suggested", tags=["Suggested Lists"])
 app.include_router(ratings.router, prefix="/api/ratings", tags=["Ratings"])
+app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
 
 
 @app.on_event("startup")

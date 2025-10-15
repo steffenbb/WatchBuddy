@@ -366,3 +366,30 @@ def refresh_recent_votes_shows():
         except Exception as e:
             logger.error(f"refresh_recent_votes_shows failed: {e}")
     asyncio.run(_run())
+
+@shared_task(bind=True)
+def build_metadata(self, user_id: int = 1, force: bool = False):
+    """
+    Build Trakt IDs for persistent candidates with progress tracking.
+    
+    Args:
+        user_id: User ID for Trakt authentication
+        force: Force rebuild even if already complete
+    """
+    async def _run():
+        from app.core.database import SessionLocal
+        from app.services.metadata_builder import MetadataBuilder
+        
+        db = SessionLocal()
+        try:
+            builder = MetadataBuilder()
+            logger.info(f"Starting metadata build (user_id={user_id}, force={force})")
+            await builder.build_trakt_ids(db, user_id=user_id, force=force)
+            logger.info("Metadata build completed successfully")
+        except Exception as e:
+            logger.error(f"Metadata build failed: {e}")
+            raise
+        finally:
+            db.close()
+    
+    asyncio.run(_run())

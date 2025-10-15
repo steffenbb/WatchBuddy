@@ -13,7 +13,20 @@ if os.getenv("POSTGRES_HOST_AUTH_METHOD") == "trust":
 else:
     DATABASE_URL = f"postgresql://{user}:{password}@db:5432/{db}"
 
-engine = create_engine(DATABASE_URL)
+# Increase connection pool to handle concurrent operations
+# pool_size: base connections (default 5 -> 20)
+# max_overflow: additional connections allowed (default 10 -> 30)
+# pool_timeout: seconds to wait for connection (default 30)
+# pool_recycle: recycle connections after N seconds to prevent stale connections
+# pool_pre_ping: verify connections before using them
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=20,
+    max_overflow=30,
+    pool_timeout=30,
+    pool_recycle=3600,
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def get_db():
