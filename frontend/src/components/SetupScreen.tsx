@@ -28,6 +28,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
   const [hasTmdbKey, setHasTmdbKey] = useState(false);
   const { addToast } = useToast();
 
+  const [backendDown, setBackendDown] = useState(false);
   useEffect(() => {
     checkSetupStatus();
   }, []);
@@ -63,7 +64,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
       const authResponse = await fetch('/api/trakt/status');
       const authData = await authResponse.json();
       setAuthStatus(authData);
-      
+
       // Determine which step to show
       if (!hasCredentials) {
         setStep('credentials');
@@ -73,6 +74,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
         setStep('oauth');
       }
     } catch (error) {
+      setBackendDown(true);
       console.error('Failed to check setup status:', error);
     }
   };
@@ -240,6 +242,21 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
   return (
     <div className="min-h-screen bg-gradient-to-br from-fuchsia-200 via-indigo-100 to-blue-200 flex items-center justify-center p-2 md:p-8">
       <div className="relative w-full max-w-2xl">
+        {backendDown && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 w-full max-w-lg">
+            <div className="bg-red-100 border border-red-300 text-red-800 rounded-lg px-4 py-3 shadow text-center">
+              <div className="font-bold mb-1">Backend Unavailable</div>
+              <div className="mb-2">The WatchBuddy backend API is currently unreachable. You can still access the dashboard, but some features may not work until the backend is restored.</div>
+              <button
+                className="mt-2 px-4 py-2 bg-fuchsia-500 text-white rounded hover:bg-fuchsia-600 font-semibold"
+                onClick={() => {
+                  if (onTraktConnect) onTraktConnect();
+                  if (navigate) navigate("/dashboard");
+                }}
+              >Continue to Dashboard Anyway</button>
+            </div>
+          </div>
+        )}
         {/* Animated background blobs */}
         <div className="absolute -top-16 -left-16 w-72 h-72 bg-gradient-to-tr from-fuchsia-400 via-indigo-300 to-blue-400 opacity-30 rounded-full blur-3xl animate-pulse" />
         <div className="absolute -bottom-16 -right-16 w-72 h-72 bg-gradient-to-br from-blue-400 via-indigo-200 to-fuchsia-300 opacity-20 rounded-full blur-3xl animate-pulse" />

@@ -448,21 +448,65 @@ class SuggestedListsService:
         db = SessionLocal()
         
         try:
+            filters = suggestion.get("filters", {})
+            
             # Create the list
             user_list = UserList(
                 user_id=self.user_id,
                 title=suggestion["title"],
-                filters=json.dumps(suggestion.get("filters", {})),
+                filters=json.dumps(filters),
                 item_limit=suggestion.get("item_limit", 20),
                 list_type="suggested",
                 sync_interval=24,  # Auto-sync daily (hours)
                 sync_watched_status=True,
-                exclude_watched=suggestion.get("filters", {}).get("exclude_watched", False)
+                exclude_watched=filters.get("exclude_watched", False),
+                sync_status="queued"  # Mark as queued for population
             )
             
             db.add(user_list)
             db.commit()
             db.refresh(user_list)
+            
+            # Create corresponding Trakt list (best-effort)
+            try:
+                trakt = TraktClient(self.user_id or 1)
+                trakt_result = await trakt.create_list(
+                    name=user_list.title,
+                    description="Suggested list managed by WatchBuddy",
+                    privacy="private"
+                )
+                trakt_list_id = trakt_result.get("ids", {}).get("trakt")
+                if trakt_list_id:
+                    user_list.trakt_list_id = str(trakt_list_id)
+                    db.commit()
+                    logger.info(f"Created Trakt list {trakt_list_id} for suggested list {user_list.id}")
+                    # Notify success
+                    from app.api.notifications import send_notification
+                    try:
+                        await send_notification(self.user_id or 1, f"Created Trakt list for '{user_list.title}'", "success")
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.warning(f"Failed to create Trakt list for suggested list {user_list.id}: {e}")
+                from app.api.notifications import send_notification
+                try:
+                    await send_notification(self.user_id or 1, f"List '{user_list.title}' created locally, but Trakt list creation failed", "warning")
+                except Exception:
+                    pass
+            
+            # Queue async population task
+            from app.services.tasks import populate_new_list_async
+            task = populate_new_list_async.delay(
+                list_id=user_list.id,
+                user_id=self.user_id,
+                discovery=filters.get("discovery", "balanced"),
+                media_types=filters.get("media_types", ["movies", "shows"]),
+                items_per_list=suggestion.get("item_limit", 20),
+                fusion_mode=filters.get("fusion_mode", False),
+                list_type="suggested"
+            )
+            
+            logger.info(f"Queued population task {task.id} for suggested list {user_list.id}")
             
             return {
                 "id": user_list.id,
@@ -471,7 +515,8 @@ class SuggestedListsService:
                 "type": suggestion.get("type", "suggested"),
                 "icon": suggestion.get("icon", "📋"),
                 "color": suggestion.get("color", "blue"),
-                "status": "created"
+                "status": "populating",
+                "task_id": task.id
             }
             
         except Exception as e:

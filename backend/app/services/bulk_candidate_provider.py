@@ -45,7 +45,6 @@ class BulkCandidateProvider:
         # Create hash of parameters
         cache_str = json.dumps(cache_params, sort_keys=True)
         return hashlib.md5(cache_str.encode()).hexdigest()
-    
     async def _get_cached_candidates(self, cache_key: str) -> Optional[List[Dict[str, Any]]]:
         """Retrieve candidates from cache if available and not expired."""
         try:
@@ -57,21 +56,19 @@ class BulkCandidateProvider:
                 )
                 .first()
             )
+            if not cached:
+                return None
+
+            # Update last accessed
+            cached.last_accessed = datetime.datetime.utcnow()
+            self.db.commit()
             
-            if cached:
-                # Update last accessed
-                cached.last_accessed = datetime.datetime.utcnow()
-                self.db.commit()
-                
-                # Parse and return cached data
-                candidates = json.loads(cached.candidate_data)
-                logger.info(f"Using cached candidates: {len(candidates)} items from {cached.created_at}")
-                return candidates
-            
+            # Parse and return cached data
+            return json.loads(cached.candidate_data)
         except Exception as e:
             logger.warning(f"Failed to retrieve cached candidates: {e}")
-        
-        return None
+            self.db.rollback()
+            return None
     
     async def _cache_candidates(self, cache_key: str, media_type: str, discovery: str, 
                                candidates: List[Dict[str, Any]], cache_hours: int = 6):
@@ -126,6 +123,10 @@ class BulkCandidateProvider:
         filtered = self._apply_filters(
             candidates, exclude_ids, genres, languages, min_year, max_year, min_rating, genre_mode=genre_mode
         )
+        # Strict media_type filter: only allow items matching the first candidate's media_type (movie/show)
+        if filtered:
+            expected_type = candidates[0].get('media_type', 'movie') if candidates else 'movie'
+            filtered = [item for item in filtered if item.get('media_type') == expected_type]
         
         # Prefer new content if existing list provided
         if existing_list_ids:
@@ -184,30 +185,48 @@ class BulkCandidateProvider:
         try:
             for it in items or []:
                 try:
-                    # Ensure trakt_id
+                    # Support nested Trakt search result structure
+                    inner = None
+                    if isinstance(it, dict):
+                        inner = it.get('movie') or it.get('show')
+                    
+                    # Ensure trakt_id: only set when a real numeric Trakt ID is present
                     if 'trakt_id' not in it or it.get('trakt_id') is None:
                         trakt_id = None
                         ids = it.get('ids') if isinstance(it.get('ids'), dict) else None
+                        if not ids and inner and isinstance(inner, dict):
+                            ids = inner.get('ids') if isinstance(inner.get('ids'), dict) else None
                         if ids:
                             trakt_id = ids.get('trakt')
-                        if trakt_id is not None:
+                        # Only propagate valid integer trakt_id values
+                        if isinstance(trakt_id, int):
                             it['trakt_id'] = trakt_id
+                        elif isinstance(trakt_id, str) and trakt_id.isdigit():
+                            it['trakt_id'] = int(trakt_id)
                         else:
-                            # For TMDB-only items, use tmdb_id as surrogate (prefix with 'tmdb-' to distinguish)
-                            tmdb_id = (ids or {}).get('tmdb')
-                            if tmdb_id:
-                                it['trakt_id'] = f"tmdb-{tmdb_id}"
+                            # Do not set a surrogate string into trakt_id; leave None and rely on tmdb_id/item_id downstream
+                            pass
                     # Ensure media_type
                     mt = it.get('media_type') or it.get('type')
+                    if not mt and inner and isinstance(inner, dict):
+                        # Fall back to provided media_type context
+                        mt = singular_type
                     if mt not in ('movie', 'show'):
                         mt = singular_type
                     it['media_type'] = mt
                     # Ensure title
                     title = it.get('title')
+                    if not title and inner and isinstance(inner, dict):
+                        title = inner.get('title')
+                        if title:
+                            it['title'] = title
                     if not title:
                         # Try to fetch from MediaMetadata
                         trakt_id = it.get('trakt_id')
-                        tmdb_id = (it.get('ids') or {}).get('tmdb') if isinstance(it.get('ids'), dict) else None
+                        ids_for_lookup = it.get('ids') if isinstance(it.get('ids'), dict) else None
+                        if not ids_for_lookup and inner and isinstance(inner, dict):
+                            ids_for_lookup = inner.get('ids') if isinstance(inner.get('ids'), dict) else None
+                        tmdb_id = (ids_for_lookup or {}).get('tmdb')
                         meta = None
                         if trakt_id:
                             meta = db.query(MediaMetadata).filter_by(trakt_id=trakt_id).first()
@@ -331,7 +350,9 @@ class BulkCandidateProvider:
         genre_mode: str = "any",  # "any" (OR) or "all" (AND)
         existing_list_ids: Optional[Set[int]] = None,  # trakt_ids already in the list, for freshness
         list_title: Optional[str] = None,  # List title for fusion mode genre extraction
-        fusion_mode: bool = False  # Enable fusion mode logic
+        fusion_mode: bool = False,  # Enable fusion mode logic
+        exclude_ids: Optional[Set] = None,  # NEW: Exclude these trakt/tmdb/item_ids from candidates
+        persistent_only: bool = False  # NEW: Only use persistent DB, skip TMDB fallback
     ) -> List[Dict[str, Any]]:
         """
         Fetch enhanced candidates with mood-based filtering and search.
@@ -349,8 +370,10 @@ class BulkCandidateProvider:
             genre_mode: "any" (OR) or "all" (AND) for genre filtering
             list_title: Title of the list (for genre extraction in fusion mode)
             fusion_mode: Whether this is a fusion-powered list
+            exclude_ids: Set of trakt_ids or tmdb_ids to exclude from candidates for diversity filtering
         """
         from app.services.trakt_client import TraktAPIError, TraktAuthError, TraktNetworkError, TraktUnavailableError
+        logger.warning(f"[MEDIA_TYPE_DIAGNOSTIC] get_candidates CALLED for media_type={media_type}, limit={limit}, languages={languages}, genres={genres}")
         try:
             # Attempt primary sourcing from PersistentCandidate store for speed.
             try:
@@ -373,6 +396,10 @@ class BulkCandidateProvider:
                         q = q.filter(PersistentCandidate.vote_average >= float(min_rating))
                     except Exception:
                         pass
+
+                # Diversity: exclude items present in other lists
+                if exclude_ids:
+                    q = q.filter(~PersistentCandidate.trakt_id.in_(exclude_ids))
                 # Discovery weighting: adjust ordering heuristics
                 if discovery in ("popular","mainstream"):
                     q = q.order_by(PersistentCandidate.mainstream_score.desc(), PersistentCandidate.popularity.desc())
@@ -383,12 +410,55 @@ class BulkCandidateProvider:
                     from sqlalchemy import desc
                     q = q.order_by(desc(PersistentCandidate.freshness_score), desc(PersistentCandidate.mainstream_score))
 
-                # Helper: normalize genres for in-memory check
+                # Helper: normalize genres for in-memory check (handles both TMDB and user input formats)
                 def _norm(g: str) -> str:
                     if not g:
                         return ''
                     g = g.strip().lower()
-                    return {'sci-fi': 'science fiction', 'scifi': 'science fiction'}.get(g, g)
+                    # TMDB-style genres → simplified forms (comprehensive mapping)
+                    mappings = {
+                        # Action variants
+                        'action & adventure': 'action',
+                        'action and adventure': 'action',
+                        'action/adventure': 'action',
+                        'adventure': 'action',
+                        
+                        # Sci-Fi variants
+                        'sci-fi & fantasy': 'sci-fi',
+                        'sci-fi and fantasy': 'sci-fi',
+                        'sci-fi/fantasy': 'sci-fi',
+                        'science fiction': 'sci-fi',
+                        'scifi': 'sci-fi',
+                        'fantasy': 'sci-fi',
+                        
+                        # War & Politics → Drama/Thriller
+                        'war & politics': 'drama',
+                        'war and politics': 'drama',
+                        'war/politics': 'drama',
+                        'war': 'drama',
+                        'politics': 'drama',
+                        
+                        # Crime → Mystery/Thriller
+                        'crime': 'mystery',
+                        
+                        # Kids & Family → Family/Animation
+                        'kids': 'family',
+                        'family': 'family',
+                        
+                        # News & Documentary
+                        'news': 'documentary',
+                        
+                        # Soap → Drama
+                        'soap': 'drama',
+                        
+                        # Reality & Talk shows
+                        'reality': 'documentary',
+                        'talk': 'documentary',
+                        
+                        # Western → Action/Drama
+                        'western': 'action',
+                    }
+                    return mappings.get(g, g)
 
                 required_genres = [_norm(g) for g in (genres or [])]
 
@@ -398,6 +468,17 @@ class BulkCandidateProvider:
                     have = set(_norm(x) for x in parsed if isinstance(x, str))
                     if not have:
                         return False
+                    
+                    # Expand "crime" to also match "thriller" and "mystery" searches
+                    if 'crime' in have:
+                        have.add('thriller')
+                        have.add('mystery')
+                    
+                    # Allow "thriller" or "mystery" filter to match "crime" genre
+                    if any(g in required_genres for g in ['thriller', 'mystery']):
+                        if 'crime' in have:
+                            return True
+                    
                     if genre_mode == 'all':
                         return all(r in have for r in required_genres)
                     return any(r in have for r in required_genres)
@@ -423,6 +504,10 @@ class BulkCandidateProvider:
                             continue
                         # STRICT: skip if title is missing/null/empty
                         if not row.title or not isinstance(row.title, str) or not row.title.strip():
+                            continue
+                        # Exclude items in exclude_ids
+                        cid = row.trakt_id or row.tmdb_id or row.id
+                        if exclude_ids and cid in exclude_ids:
                             continue
                         item = {
                             'title': row.title,
@@ -469,13 +554,8 @@ class BulkCandidateProvider:
                         (PersistentCandidate.is_adult == False)
                     )
                     if languages:
-                        # Nordic fallback broadening
-                        langs = set(l.lower() for l in languages)
-                        if 'da' in langs:
-                            langs.update(['sv','no'])
-                        if 'sv' in langs or 'no' in langs:
-                            langs.update(['da'])
-                        q2 = q2.filter(PersistentCandidate.language.in_(list(langs)))
+                        # Keep language filter strict - no automatic broadening
+                        q2 = q2.filter(PersistentCandidate.language.in_([l.lower() for l in languages]))
                     if min_year:
                         q2 = q2.filter(PersistentCandidate.year >= max(1900, min_year - 5))
                     if max_year:
@@ -533,9 +613,17 @@ class BulkCandidateProvider:
                         except Exception:
                             continue
                 if stored_candidates:
-                    return stored_candidates[:limit]
+                    logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
+                    # If we have enough from persistent store, return them
+                    if len(stored_candidates) >= limit:
+                        logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (sufficient)")
+                        return stored_candidates[:limit]
+                    else:
+                        logger.info(f"Persistent store has {len(stored_candidates)}/{limit} candidates, will supplement with TMDB discovery")
+                        # DON'T return early - continue to TMDB discovery to fill the gap
             except Exception as e_pc:
                 logger.debug(f"PersistentCandidate sourcing failed or not available: {e_pc}")
+                stored_candidates = []  # Ensure it's defined for later merge
             # For fusion mode lists without explicit genres, extract from title
             if fusion_mode and list_title and not genres:
                 title_genres = self._extract_genres_from_title(list_title)
@@ -569,14 +657,49 @@ class BulkCandidateProvider:
             excluded_ids = await self._get_excluded_ids(media_type, include_watched)
             logger.info(f"Excluding {len(excluded_ids)} items based on filters")
 
-            # Aggressively fetch candidates until we have at least 5x the requested limit for better filtering
-            target_candidates = min(5 * limit, 8000) # Cap at 8000 to prevent excessive API usage
+            # If we have language filters, prioritize TMDB discover API for targeted search
+            # This is much more efficient than generic searches
+            candidates = list(stored_candidates) if stored_candidates else []
+            # Defensive filter: ensure only correct media_type is returned
+            expected_type = "movie" if media_type == "movies" else "show"
+            candidates = [c for c in candidates if c.get("media_type") == expected_type]
+            
+            # Track if we used language-specific discovery (to avoid generic searches later)
+            used_language_discovery = False
+            
+            # Only fetch from TMDB if persistent_only is False
+            if not persistent_only and languages and len(candidates) < limit:
+                needed = limit - len(candidates)
+                logger.info(f"Using TMDB discover API for media_type={media_type}, language={languages}, need {needed} more candidates")
+                tmdb_candidates = await self._fetch_tmdb_first_candidates(
+                    media_type, languages, genres, search_keywords, needed * 3  # Fetch 3x for filtering margin
+                )
+                candidates.extend(tmdb_candidates)
+                candidates = self._deduplicate(candidates)
+                logger.info(f"After TMDB language discovery for {media_type}: {len(candidates)} total candidates")
+                used_language_discovery = True
+                
+                # If we have enough now, skip the generic discovery
+                if len(candidates) >= limit:
+                    logger.info(f"TMDB language discovery provided sufficient candidates ({len(candidates)}/{limit}), skipping generic discovery")
+                else:
+                    logger.info(f"Still need more candidates from language discovery ({len(candidates)}/{limit})")
+
+            # When language filters are active and we used language discovery, skip generic searches
+            # This prevents mixing non-Danish content into Danish lists, etc.
+            if used_language_discovery and languages:
+                logger.info(f"Language-specific filters active ({languages}), skipping generic discovery to maintain language purity")
+                target_candidates = len(candidates)  # Don't fetch more
+            else:
+                # Aggressively fetch candidates until we have at least 5x the requested limit for better filtering
+                target_candidates = max(len(candidates), min(5 * limit, 8000))  # Don't reduce if we already have some
             
             # Auto-upgrade to ultra_discovery for large candidate pools
             if limit >= 1000 or target_candidates >= 3000:
                 logger.info(f"Large candidate pool requested ({limit} items, {target_candidates} target), upgrading to ultra_discovery")
                 discovery_mode = "ultra_discovery"
-            candidates = []
+            
+            # Only do generic discovery if we don't have enough candidates yet
             attempts = 0
             max_attempts = 8 if discovery_mode == "ultra_discovery" else 6  # More attempts for ultra mode
             
@@ -688,23 +811,22 @@ class BulkCandidateProvider:
                             final_filtered = lenient_filtered
                             logger.info(f"Lenient post-enrichment filtering increased to {len(final_filtered)} candidates")
 
-                    # If strict language filtering yields too few, broaden for Nordic fallback (e.g., Danish lists)
-                    if languages and len(final_filtered) < max(5, limit // 3):
-                        lang_set = set(languages)
-                        broadened = list(lang_set)
-                        if 'da' in lang_set:
-                            broadened.extend([l for l in ['sv', 'no'] if l not in lang_set])
-                        if 'sv' in lang_set or 'no' in lang_set:
-                            broadened.extend([l for l in ['da'] if l not in lang_set])
-                        if len(broadened) > len(lang_set):
-                            logger.info(f"Broadened language filter from {list(lang_set)} -> {broadened} due to low results ({len(final_filtered)})")
-                            broadened_filtered = self._apply_post_enrichment_filters(enriched, genres, broadened, genre_mode=genre_mode)
-                            if len(broadened_filtered) > len(final_filtered):
-                                final_filtered = broadened_filtered
+                    # Strict language filtering: do NOT broaden to other Nordic languages unless explicitly configured
+                    # This preserves language purity for lists like Danish-only.
+                    # If a future list needs fallback, it should pass explicit languages in filters.
 
                     # Ensure downstream fields exist
                     final_result = self._ensure_downstream_fields(final_filtered[:limit], media_type)
                     logger.info(f"Phase: final_result count={len(final_result)} (limit={limit})")
+                    
+                    # Save newly discovered candidates to persistent DB for future use
+                    # This includes both selected and unselected candidates from TMDB
+                    try:
+                        saved_count = await self._save_discovered_candidates_to_db(enriched, media_type)
+                        if saved_count > 0:
+                            logger.info(f"Added {saved_count} new candidates to persistent pool")
+                    except Exception as e:
+                        logger.warning(f"Could not save discovered candidates: {e}")
                     
                     # Cache the raw candidates (before final limit) for expensive operations
                     if use_cache and len(candidates) >= 1000:
@@ -1658,16 +1780,32 @@ class BulkCandidateProvider:
         return normalized
     
     def _deduplicate(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Remove duplicate items based on Trakt ID."""
+        """Remove duplicate items based on Trakt ID or TMDB ID (fallback)."""
         seen = set()
         filtered = []
         
         for item in items:
+            # Check for IDs at root level first (for backward compatibility)
             trakt_id = item.get('ids', {}).get('trakt')
-            if not trakt_id or trakt_id in seen:
+            tmdb_id = item.get('ids', {}).get('tmdb')
+            
+            # If not found, check inside nested movie/show structure (Trakt API format)
+            if not trakt_id and not tmdb_id:
+                if 'movie' in item and isinstance(item.get('movie'), dict):
+                    trakt_id = item['movie'].get('ids', {}).get('trakt')
+                    tmdb_id = item['movie'].get('ids', {}).get('tmdb')
+                elif 'show' in item and isinstance(item.get('show'), dict):
+                    trakt_id = item['show'].get('ids', {}).get('trakt')
+                    tmdb_id = item['show'].get('ids', {}).get('tmdb')
+            
+            # Use Trakt ID if available, otherwise use TMDB ID
+            # Prefix TMDB IDs with 't' to avoid collision with Trakt IDs
+            unique_id = trakt_id if trakt_id else f"tmdb_{tmdb_id}" if tmdb_id else None
+            
+            if not unique_id or unique_id in seen:
                 continue
             
-            seen.add(trakt_id)
+            seen.add(unique_id)
             filtered.append(item)
         
         return filtered
@@ -1687,16 +1825,34 @@ class BulkCandidateProvider:
         filtered = []
         
         for item in items:
-            trakt_id = item.get('ids', {}).get('trakt')
-            if not trakt_id:
+            # Support both flat and nested Trakt structures from search results
+            inner = None
+            if isinstance(item, dict):
+                inner = item.get('movie') or item.get('show')
+
+            # IDs (prefer flat, then nested)
+            ids_obj = item.get('ids') if isinstance(item.get('ids'), dict) else None
+            trakt_id = ids_obj.get('trakt') if ids_obj else None
+            tmdb_id = ids_obj.get('tmdb') if ids_obj else None
+            if (trakt_id is None and tmdb_id is None) and inner and isinstance(inner, dict):
+                inner_ids = inner.get('ids') if isinstance(inner.get('ids'), dict) else None
+                if inner_ids:
+                    trakt_id = inner_ids.get('trakt')
+                    tmdb_id = inner_ids.get('tmdb')
+            
+            # Accept items with either Trakt ID or TMDB ID
+            if not trakt_id and not tmdb_id:
                 continue
             
-            # Skip excluded items
-            if trakt_id in excluded_ids:
-                continue
+            # Skip excluded items (check both Trakt and TMDB IDs)
+            if excluded_ids:
+                if trakt_id in excluded_ids or tmdb_id in excluded_ids:
+                    continue
             
             # Apply year filters
             year = item.get('year')
+            if year is None and inner and isinstance(inner, dict):
+                year = inner.get('year')
             if min_year and (not year or year < min_year):
                 continue
             if max_year and (not year or year > max_year):
@@ -1704,12 +1860,16 @@ class BulkCandidateProvider:
             
             # Apply rating filter (using Trakt rating if available)
             rating = item.get('rating')
+            if rating is None and inner and isinstance(inner, dict):
+                rating = inner.get('rating')
             if min_rating and (not rating or rating < min_rating):
                 continue
             
             # Apply language filters
             if languages:
                 item_language = item.get('language')
+                if not item_language and inner and isinstance(inner, dict):
+                    item_language = inner.get('language')
                 # Be lenient: if no language info, don't exclude (could be Danish content without proper tagging)
                 if item_language and item_language not in languages:
                     continue
@@ -1717,6 +1877,8 @@ class BulkCandidateProvider:
             # Apply genre filters (basic check - enhanced with TMDB data later)
             if genres:
                 item_genres = item.get('genres', [])
+                if (not item_genres) and inner and isinstance(inner, dict):
+                    item_genres = inner.get('genres', [])
                 # If no matching genres found in basic check, still include item for metadata enhancement
                 # We'll be aggressive about finding metadata for items missing genre info
                 if not item_genres:
@@ -1777,15 +1939,15 @@ class BulkCandidateProvider:
                     if isinstance(nested_tmdb, dict):
                         tmdb_language = nested_tmdb.get('original_language') or nested_tmdb.get('language')
                 
-                # Item passes if either language matches OR no language info available (lenient)
+                # Item passes if either language matches
+                # STRICT MODE: If we have language filters, items MUST match
                 language_match = False
                 if item_language and item_language in languages:
                     language_match = True
                 elif tmdb_language and tmdb_language in languages:
                     language_match = True
-                elif not item_language and not tmdb_language:
-                    # No language info - be lenient and include
-                    language_match = True
+                # REMOVED: Lenient fallback when no language info
+                # Items without language metadata are now excluded when filters are active
                 
                 if not language_match:
                     continue
@@ -1858,9 +2020,10 @@ class BulkCandidateProvider:
                     continue
                 
                 # Second check: ensure item has required genres
+                # STRICT MODE: Items without genre metadata are excluded when genre filters are active
                 if not all_genres:
-                    # Allow items with no genre metadata if they passed language check; they'll rank lower later
-                    pass
+                    # No genre metadata - exclude when filters are active
+                    continue
                 else:
                     if genre_mode == "all":
                         if not filter_set.issubset(all_genres):
@@ -2123,7 +2286,8 @@ class BulkCandidateProvider:
         Searches TMDB first for better results, then maps back to Trakt for consistency.
         """
         from app.services.tmdb_client import discover_movies, discover_tv, search_multi, search_movies, search_tv
-        
+        logger.info(f"[TMDB-FIRST] Enter for media_type={media_type}, languages={languages}, limit={limit}")
+
         candidates = []
         seen_tmdb_ids = set()
         
@@ -2172,11 +2336,18 @@ class BulkCandidateProvider:
                             
                             trakt_item = await self._tmdb_to_trakt_format(item, media_type)
                             if not trakt_item:
+                                logger.warning(f"CONVERSION FAILED: TMDB {tmdb_id} ({item.get('title') or item.get('name')}) returned None from _tmdb_to_trakt_format")
                                 continue
 
                             # Normalize language (redundant safety; _tmdb_to_trakt_format should handle this)
-                            self._normalize_language(trakt_item)
-
+                            try:
+                                self._normalize_language(trakt_item)
+                                has_trakt = bool(trakt_item.get('movie', {}).get('ids', {}).get('trakt') or trakt_item.get('show', {}).get('ids', {}).get('trakt'))
+                                logger.debug(f"CONVERSION SUCCESS: TMDB {tmdb_id} → Trakt format, has_trakt_id={has_trakt}")
+                            except Exception as e:
+                                logger.warning(f"NORMALIZATION FAILED for TMDB {tmdb_id}: {e}")
+                                continue
+                            
                             seen_tmdb_ids.add(tmdb_id)
                             candidates.append(trakt_item)
 
@@ -2306,7 +2477,12 @@ class BulkCandidateProvider:
         # per user directive. Instead, we rely solely on expanded, language-aware strategies above.
 
         logger.info(f"TMDB-first search gathered {len(candidates)} raw candidates (target={target}, final limit={limit})")
-        return candidates[:limit]
+        final_candidates = candidates[:limit]
+        logger.warning(f"_fetch_tmdb_first_candidates RETURNING {len(final_candidates)} candidates for {media_type}")
+        if final_candidates:
+            sample = final_candidates[0]
+            logger.warning(f"Sample candidate structure: keys={list(sample.keys())}, has_movie={bool(sample.get('movie'))}, has_show={bool(sample.get('show'))}")
+        return final_candidates
 
     async def _tmdb_to_trakt_format(self, tmdb_item: Dict[str, Any], media_type: str) -> Optional[Dict[str, Any]]:
         """
@@ -2315,12 +2491,20 @@ class BulkCandidateProvider:
         """
         try:
             tmdb_id = tmdb_item.get("id")
+            title = tmdb_item.get("title") or tmdb_item.get("name", "Unknown")
+            logger.warning(f"_tmdb_to_trakt_format START: {media_type} ID={tmdb_id} title={title} has_genre_ids={bool(tmdb_item.get('genre_ids'))} has_genres={bool(tmdb_item.get('genres'))}")
+            
             if not tmdb_id:
+                logger.warning(f"_tmdb_to_trakt_format ABORT: No tmdb_id for {title}")
                 return None
             
             # Try to find the corresponding Trakt item
             search_type = "movie" if media_type == "movies" else "show"
-            trakt_results = await self.trakt_client.search_by_tmdb_id(tmdb_id, search_type)
+            trakt_results = []
+            try:
+                trakt_results = await self.trakt_client.search_by_tmdb_id(tmdb_id, search_type)
+            except Exception as e:
+                logger.debug(f"Trakt search failed for TMDB {tmdb_id}: {e}, will create TMDB-only item")
             
             if trakt_results:
                 # Use the Trakt result as base (has proper IDs)
@@ -2342,12 +2526,40 @@ class BulkCandidateProvider:
             else:
                 # If no Trakt mapping found, create a minimal Trakt-like structure
                 # This allows us to use TMDB-only content if needed
+                logger.debug(f"No Trakt mapping for TMDB {tmdb_id}, creating TMDB-only item")
                 title = tmdb_item.get("title") or tmdb_item.get("name", "Unknown")
                 year = None
-                if tmdb_item.get("release_date"):
-                    year = int(tmdb_item["release_date"][:4])
-                elif tmdb_item.get("first_air_date"):
-                    year = int(tmdb_item["first_air_date"][:4])
+                try:
+                    if tmdb_item.get("release_date"):
+                        year = int(tmdb_item["release_date"][:4])
+                    elif tmdb_item.get("first_air_date"):
+                        year = int(tmdb_item["first_air_date"][:4])
+                except (ValueError, TypeError, IndexError):
+                    pass  # Year parsing failed, leave as None
+                
+                # Handle genres: TMDB discover returns genre_ids, not genre objects
+                genres = []
+                try:
+                    if tmdb_item.get('genres'):
+                        # Full TMDB API response has genre objects
+                        genres = [g.get('name') for g in tmdb_item.get('genres', []) if isinstance(g, dict) and g.get('name')]
+                    elif tmdb_item.get('genre_ids'):
+                        # TMDB discover response has genre_ids - map them to names
+                        # We'll use a simplified mapping for common genre IDs
+                        genre_id_map = {
+                            # Movies
+                            28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime",
+                            99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History",
+                            27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction",
+                            10770: "TV Movie", 53: "Thriller", 10752: "War", 37: "Western",
+                            # TV
+                            10759: "Action & Adventure", 10762: "Kids", 10763: "News", 10764: "Reality",
+                            10765: "Sci-Fi & Fantasy", 10766: "Soap", 10767: "Talk", 10768: "War & Politics"
+                        }
+                        genres = [genre_id_map.get(gid, f"Genre_{gid}") for gid in tmdb_item.get('genre_ids', [])]
+                except Exception as e:
+                    logger.debug(f"Genre processing failed for TMDB {tmdb_id}: {e}")
+                    genres = []
                 
                 base_item = {
                     "title": title,
@@ -2358,7 +2570,8 @@ class BulkCandidateProvider:
                     },
                     "tmdb_popularity": tmdb_item.get("popularity", 0),
                     "tmdb_vote_average": tmdb_item.get("vote_average", 0),
-                    "overview": tmdb_item.get("overview", "")
+                    "overview": tmdb_item.get("overview", ""),
+                    "language": tmdb_item.get("original_language")
                 }
                 
                 if search_type == "movie":
@@ -2370,16 +2583,17 @@ class BulkCandidateProvider:
                 wrapper[wrapper_key]['tmdb_data'] = {
                     'id': tmdb_id,
                     'original_language': tmdb_item.get('original_language'),
-                    'genres': [g.get('name') for g in tmdb_item.get('genres', []) if isinstance(g, dict) and g.get('name')],
+                    'genres': genres,  # Use the mapped genres
                     'popularity': tmdb_item.get('popularity'),
                     'vote_average': tmdb_item.get('vote_average'),
                     'vote_count': tmdb_item.get('vote_count')
                 }
                 self._normalize_language(wrapper)
+                logger.debug(f"Created TMDB-only item: {title} ({year}), genres={genres}, lang={tmdb_item.get('original_language')}")
                 return wrapper
                     
         except Exception as e:
-            logger.debug(f"Failed to convert TMDB item {tmdb_item.get('id', 'unknown')}: {e}")
+            logger.warning(f"Failed to convert TMDB item {tmdb_item.get('id', 'unknown')}: {e}")
             return None
 
     async def _enrich_with_aggressive_metadata(
@@ -2512,6 +2726,172 @@ class BulkCandidateProvider:
         
         logger.info(f"Aggressive enhancement completed for {len(enhanced)} items")
         return enhanced
+
+    async def _save_discovered_candidates_to_db(self, candidates: List[Dict[str, Any]], media_type: str) -> int:
+        """Save TMDB-discovered candidates that don't exist in persistent DB yet.
+        
+        This ensures we build up the persistent candidate pool over time with newly
+        discovered content from TMDB searches. Returns number of candidates saved.
+        """
+        saved_count = 0
+        try:
+            from app.models import PersistentCandidate
+            import datetime as dt
+            import json
+            
+            for candidate in candidates:
+                # Skip if it came from persistent store (already in DB)
+                if candidate.get('_from_persistent_store'):
+                    continue
+                
+                # Get TMDB ID
+                tmdb_id = candidate.get('ids', {}).get('tmdb')
+                if not tmdb_id:
+                    continue
+                
+                # Check if already exists
+                existing = self.db.query(PersistentCandidate).filter_by(tmdb_id=tmdb_id).first()
+                if existing:
+                    continue
+                
+                # Extract metadata from candidate
+                title = candidate.get('title')
+                if not title:
+                    continue
+                
+                year = candidate.get('year')
+                language = candidate.get('language', '').lower()
+                trakt_id = candidate.get('ids', {}).get('trakt')
+                
+                # Extract TMDB data
+                tmdb_data = candidate.get('tmdb_data') or {}
+                genres = tmdb_data.get('genres', [])
+                if genres and isinstance(genres, list):
+                    genres_json = json.dumps(genres)
+                else:
+                    genres_json = None
+                
+                # Determine release date and year
+                release_date = None
+                if media_type == 'movies' and tmdb_data.get('release_date'):
+                    release_date = tmdb_data['release_date']
+                elif media_type in ('shows', 'show') and tmdb_data.get('first_air_date'):
+                    release_date = tmdb_data['first_air_date']
+                
+                if not year and release_date:
+                    try:
+                        year = int(release_date[:4])
+                    except:
+                        pass
+                
+                # Create new persistent candidate
+                pc = PersistentCandidate(
+                    tmdb_id=tmdb_id,
+                    trakt_id=trakt_id,
+                    media_type='movie' if media_type == 'movies' else 'show',
+                    title=title,
+                    original_title=tmdb_data.get('original_title') or tmdb_data.get('original_name'),
+                    year=year,
+                    release_date=release_date,
+                    language=language,
+                    popularity=tmdb_data.get('popularity', 0.0),
+                    vote_average=tmdb_data.get('vote_average', 0.0),
+                    vote_count=tmdb_data.get('vote_count', 0),
+                    overview=tmdb_data.get('overview') or candidate.get('overview'),
+                    poster_path=tmdb_data.get('poster_path'),
+                    backdrop_path=tmdb_data.get('backdrop_path'),
+                    genres=genres_json,
+                    manual=False,
+                    active=True
+                )
+                
+                # Compute scores
+                pc.compute_scores()
+                
+                # Add to session
+                self.db.add(pc)
+                saved_count += 1
+                
+                # Commit in batches of 50 to avoid memory issues
+                if saved_count % 50 == 0:
+                    self.db.commit()
+                    logger.info(f"Saved batch of 50 discovered candidates (total: {saved_count})")
+            
+            # Final commit for remaining items
+            if saved_count > 0:
+                self.db.commit()
+                logger.info(f"Saved {saved_count} newly discovered candidates to persistent DB")
+            
+        except Exception as e:
+            logger.warning(f"Failed to save discovered candidates to DB: {e}")
+            self.db.rollback()
+        
+        return saved_count
+
+    async def _map_trakt_ids_for_saved_candidates(self, limit: int = 50) -> int:
+        """Background task: Map Trakt IDs for persistent candidates that don't have them yet.
+        
+        This runs asynchronously after discovery to avoid blocking sync operations.
+        Returns number of candidates updated with Trakt IDs.
+        """
+        updated_count = 0
+        try:
+            from app.models import PersistentCandidate
+            
+            # Find candidates without Trakt IDs (limit to avoid overwhelming Trakt API)
+            candidates_without_trakt = self.db.query(PersistentCandidate).filter(
+                PersistentCandidate.active == True,
+                PersistentCandidate.trakt_id == None,
+                PersistentCandidate.tmdb_id != None
+            ).limit(limit).all()
+            
+            if not candidates_without_trakt:
+                return 0
+            
+            logger.info(f"Mapping Trakt IDs for {len(candidates_without_trakt)} candidates...")
+            
+            for candidate in candidates_without_trakt:
+                try:
+                    # Search Trakt by TMDB ID
+                    search_type = "movie" if candidate.media_type == "movie" else "show"
+                    trakt_results = await self.trakt_client.search_by_tmdb_id(candidate.tmdb_id, search_type)
+                    
+                    if trakt_results and len(trakt_results) > 0:
+                        trakt_item = trakt_results[0]
+                        # Extract Trakt ID from result
+                        if search_type == "movie" and "movie" in trakt_item:
+                            trakt_id = trakt_item["movie"].get("ids", {}).get("trakt")
+                        elif search_type == "show" and "show" in trakt_item:
+                            trakt_id = trakt_item["show"].get("ids", {}).get("trakt")
+                        else:
+                            trakt_id = trakt_item.get("ids", {}).get("trakt")
+                        
+                        if trakt_id:
+                            candidate.trakt_id = trakt_id
+                            updated_count += 1
+                            
+                            # Commit in small batches
+                            if updated_count % 10 == 0:
+                                self.db.commit()
+                                logger.debug(f"Mapped {updated_count} Trakt IDs so far...")
+                    
+                    # Rate limiting
+                    await asyncio.sleep(0.1)
+                    
+                except Exception as e:
+                    logger.debug(f"Failed to map Trakt ID for TMDB {candidate.tmdb_id}: {e}")
+                    continue
+            
+            # Final commit
+            if updated_count > 0:
+                self.db.commit()
+                logger.info(f"Successfully mapped {updated_count} Trakt IDs")
+            
+        except Exception as e:
+            logger.warning(f"Trakt ID mapping failed: {e}")
+            self.db.rollback()
+        
+        return updated_count
     
     async def _get_trakt_item_details(self, trakt_id: int, item_type: str) -> Optional[Dict[str, Any]]:
         """Get detailed item information from Trakt API."""

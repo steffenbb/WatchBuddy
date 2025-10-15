@@ -21,6 +21,24 @@ interface SystemHealth {
   trakt_api: boolean;
   tmdb_api: boolean;
 }
+
+interface WorkerStatus {
+  movie: {
+    status: string;
+    last_run: string | null;
+    next_run: string | null;
+    items_processed: number;
+    error: string | null;
+  };
+  show: {
+    status: string;
+    last_run: string | null;
+    next_run: string | null;
+    items_processed: number;
+    error: string | null;
+  };
+}
+
 interface FusionStatus {
   enabled: boolean;
   weights: Record<string, number>;
@@ -43,6 +61,7 @@ async function setFusionSettings(settings: { enabled?: boolean; weights?: Record
 export const StatusWidgets: React.FC = () => {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [workerStatus, setWorkerStatus] = useState<WorkerStatus | null>(null);
   const [fusionStatus, setFusionStatus] = useState<FusionStatus | null>(null);
   const [fusionAggressiveness, setFusionAggressiveness] = useState<number>(1);
   const [fusionLoading, setFusionLoading] = useState(false);
@@ -54,9 +73,10 @@ export const StatusWidgets: React.FC = () => {
   const fetchStatus = async () => {
     try {
       setRefreshing(true);
-      const [syncResponse, healthResponse, fusionResponse, fusionSettings] = await Promise.all([
+      const [syncResponse, healthResponse, workerResponse, fusionResponse, fusionSettings] = await Promise.all([
         fetch('/api/status/sync'),
         fetch('/api/status/health'),
+        fetch('/api/status/workers'),
         fetch('/api/recommendations/fusion/status'),
         getFusionSettings().catch(()=>({ aggressiveness: 1 }))
       ]);
@@ -69,6 +89,11 @@ export const StatusWidgets: React.FC = () => {
       if (healthResponse.ok) {
         const healthData = await healthResponse.json();
         setHealth(healthData);
+      }
+
+      if (workerResponse.ok) {
+        const workerData = await workerResponse.json();
+        setWorkerStatus(workerData);
       }
 
       if (fusionResponse.ok) {
@@ -287,6 +312,90 @@ export const StatusWidgets: React.FC = () => {
                 {getHealthIcon(health.tmdb_api)} {health.tmdb_api ? 'Online' : 'Offline'}
               </span>
             </div>
+            
+            {/* Worker Status Section */}
+            {workerStatus && (
+              <>
+                <div className="border-t border-gray-200 my-2"></div>
+                <div className="text-xs font-semibold text-gray-700 mb-1">Background Workers</div>
+                
+                {/* Movie Worker */}
+                <div className="bg-gray-50 rounded-lg p-2 space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-gray-700">Movie Ingestion</span>
+                    <span className={`font-medium ${
+                      workerStatus.movie.status === 'running' ? 'text-blue-600' :
+                      workerStatus.movie.status === 'completed' ? 'text-green-600' :
+                      workerStatus.movie.status === 'error' ? 'text-red-600' :
+                      'text-gray-500'
+                    }`}>
+                      {workerStatus.movie.status === 'running' && '⏳ Running'}
+                      {workerStatus.movie.status === 'completed' && '✓ Completed'}
+                      {workerStatus.movie.status === 'error' && '✕ Error'}
+                      {workerStatus.movie.status === 'idle' && '○ Idle'}
+                    </span>
+                  </div>
+                  {workerStatus.movie.last_run && (
+                    <div className="text-xs text-gray-600">
+                      Last: {workerStatus.movie.last_run}
+                    </div>
+                  )}
+                  {workerStatus.movie.next_run && (
+                    <div className="text-xs text-gray-600">
+                      Next: {workerStatus.movie.next_run}
+                    </div>
+                  )}
+                  {workerStatus.movie.items_processed > 0 && (
+                    <div className="text-xs text-gray-600">
+                      Processed: {workerStatus.movie.items_processed} items
+                    </div>
+                  )}
+                  {workerStatus.movie.error && (
+                    <div className="text-xs text-red-600 truncate" title={workerStatus.movie.error}>
+                      Error: {workerStatus.movie.error}
+                    </div>
+                  )}
+                </div>
+                
+                {/* TV Show Worker */}
+                <div className="bg-gray-50 rounded-lg p-2 space-y-1">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-medium text-gray-700">TV Show Ingestion</span>
+                    <span className={`font-medium ${
+                      workerStatus.show.status === 'running' ? 'text-blue-600' :
+                      workerStatus.show.status === 'completed' ? 'text-green-600' :
+                      workerStatus.show.status === 'error' ? 'text-red-600' :
+                      'text-gray-500'
+                    }`}>
+                      {workerStatus.show.status === 'running' && '⏳ Running'}
+                      {workerStatus.show.status === 'completed' && '✓ Completed'}
+                      {workerStatus.show.status === 'error' && '✕ Error'}
+                      {workerStatus.show.status === 'idle' && '○ Idle'}
+                    </span>
+                  </div>
+                  {workerStatus.show.last_run && (
+                    <div className="text-xs text-gray-600">
+                      Last: {workerStatus.show.last_run}
+                    </div>
+                  )}
+                  {workerStatus.show.next_run && (
+                    <div className="text-xs text-gray-600">
+                      Next: {workerStatus.show.next_run}
+                    </div>
+                  )}
+                  {workerStatus.show.items_processed > 0 && (
+                    <div className="text-xs text-gray-600">
+                      Processed: {workerStatus.show.items_processed} items
+                    </div>
+                  )}
+                  {workerStatus.show.error && (
+                    <div className="text-xs text-red-600 truncate" title={workerStatus.show.error}>
+                      Error: {workerStatus.show.error}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <div className="text-gray-500 text-sm py-2">Unable to check health</div>

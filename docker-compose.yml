@@ -46,7 +46,7 @@ services:
 
   celery:
     image: lsdking101/watchbuddy:latest
-    command: celery -A app.core.celery_app.celery_app worker --loglevel=info
+    command: celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=celery,maintenance,ingestion,scoring,sync
     depends_on:
       backend:
         condition: service_started

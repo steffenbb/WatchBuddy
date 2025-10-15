@@ -54,9 +54,20 @@ class MetadataBuilder:
             logger.error(f"Failed to update build status: {e}")
     
     async def check_metadata_ready(self, db: Session) -> bool:
-        """Check if metadata has been built (Trakt IDs populated)."""
+        """
+        Check if metadata has been built (Trakt IDs populated) or if the build has completed.
+        
+        Returns True if:
+        1. At least 80% of candidates have Trakt IDs, OR
+        2. A metadata scan has been marked as completed (even if below 80%)
+        """
         from app.models import PersistentCandidate
         from sqlalchemy import func
+        
+        # First check if we have a completion flag set
+        completed_flag = await self.redis.get("metadata_build:scan_completed")
+        if completed_flag:
+            return True
         
         # Check if we have candidates with Trakt IDs
         total = db.query(func.count(PersistentCandidate.id)).scalar() or 0
@@ -69,16 +80,23 @@ class MetadataBuilder:
             return False
         
         percent = (with_trakt / total) * 100
-        return percent >= 80.0
+        if percent >= 80.0:
+            # Set completion flag so we don't show the screen again
+            await self.redis.set("metadata_build:scan_completed", "true")
+            return True
+        
+        return False
     
-    async def build_trakt_ids(self, db: Session, user_id: int = 1, force: bool = False):
+    async def build_trakt_ids(self, db: Session, user_id: int = 1, force: bool = False, retry_limit: int = 3):
         """
         Bulk lookup and populate Trakt IDs for persistent candidates.
+        Retries candidates with missing trakt_id up to retry_limit times.
         
         Args:
             db: Database session
             user_id: User ID for Trakt authentication
             force: Force rebuild even if already complete
+            retry_limit: Max number of attempts for each candidate
         """
         from app.models import PersistentCandidate
         from sqlalchemy import func
@@ -92,17 +110,34 @@ class MetadataBuilder:
         # Get total count and candidates without Trakt IDs
         total_count = db.query(func.count(PersistentCandidate.id)).scalar() or 0
         
+        # Use Redis to track retry counts for each candidate
+        retry_key_prefix = "metadata_build:retry:"
+        redis = self.redis
+        
         if not force:
-            candidates_query = db.query(PersistentCandidate).filter(
+            candidates = db.query(PersistentCandidate).filter(
                 PersistentCandidate.trakt_id.is_(None)
-            )
+            ).all()
         else:
-            candidates_query = db.query(PersistentCandidate)
+            candidates = db.query(PersistentCandidate).all()
         
-        candidates_to_process = candidates_query.count()
+        # Filter out candidates that have reached retry limit
+        candidates_to_process = []
+        for c in candidates:
+            retry_count = 0
+            try:
+                val = await redis.get(f"{retry_key_prefix}{c.id}")
+                if val is not None:
+                    retry_count = int(val)
+            except Exception:
+                pass
+            if c.trakt_id is None and retry_count < retry_limit:
+                candidates_to_process.append(c)
         
-        if candidates_to_process == 0:
-            logger.info("All candidates already have Trakt IDs")
+        candidates_count = len(candidates_to_process)
+        
+        if candidates_count == 0:
+            logger.info("All candidates already have Trakt IDs or reached retry limit")
             await self.set_build_status({
                 "status": "complete",
                 "total": total_count,
@@ -113,12 +148,12 @@ class MetadataBuilder:
             })
             return
         
-        logger.info(f"Starting Trakt ID lookup for {candidates_to_process} candidates (out of {total_count} total)")
+        logger.info(f"Starting Trakt ID lookup for {candidates_count} candidates (out of {total_count} total)")
         
         # Initialize status
         await self.set_build_status({
             "status": "running",
-            "total": candidates_to_process,
+            "total": candidates_count,
             "processed": 0,
             "progress_percent": 0,
             "started_at": datetime.utcnow().isoformat(),
@@ -129,17 +164,16 @@ class MetadataBuilder:
             # Initialize Trakt client
             trakt_client = TraktClient(user_id=user_id)
             
-            # Process in batches to avoid memory issues
-            batch_size = 100
+            # Process sequentially to respect Trakt API rate limits
+            # Trakt API limits: ~1000 requests per 5 minutes = ~3 requests/second max
+            batch_size = 100  # Commit after this many updates
             processed = 0
             errors = 0
+            unmapped_ids = []
             
-            # Use pagination for large datasets
-            offset = 0
-            while True:
-                batch = candidates_query.limit(batch_size).offset(offset).all()
-                if not batch:
-                    break
+            # Use batching for large datasets
+            for i in range(0, len(candidates_to_process), batch_size):
+                batch = candidates_to_process[i:i+batch_size]
                 
                 for candidate in batch:
                     try:
@@ -154,35 +188,54 @@ class MetadataBuilder:
                             if trakt_id:
                                 candidate.trakt_id = trakt_id
                                 db.add(candidate)
+                                # Reset retry count on success
+                                await redis.delete(f"{retry_key_prefix}{candidate.id}")
+                            else:
+                                # Increment retry count for failed lookup
+                                current_retry = 0
+                                try:
+                                    val = await redis.get(f"{retry_key_prefix}{candidate.id}")
+                                    if val is not None:
+                                        current_retry = int(val)
+                                except Exception:
+                                    pass
+                                await redis.set(f"{retry_key_prefix}{candidate.id}", str(current_retry + 1), ex=86400)  # 24h TTL
+                                unmapped_ids.append(candidate.id)
                             
                     except Exception as e:
                         logger.warning(f"Failed to lookup Trakt ID for candidate {candidate.id} (TMDB: {candidate.tmdb_id}): {e}")
                         errors += 1
+                        # Increment retry count for errors
+                        current_retry = 0
+                        try:
+                            val = await redis.get(f"{retry_key_prefix}{candidate.id}")
+                            if val is not None:
+                                current_retry = int(val)
+                        except Exception:
+                            pass
+                        await redis.set(f"{retry_key_prefix}{candidate.id}", str(current_retry + 1), ex=86400)
+                        unmapped_ids.append(candidate.id)
                     
                     processed += 1
                     
-                    # Update progress every 10 items
-                    if processed % 10 == 0:
-                        progress_percent = (processed / candidates_to_process) * 100
+                    # Update progress every 20 items
+                    if processed % 20 == 0:
+                        progress_percent = (processed / candidates_count) * 100
                         await self.set_build_status({
                             "status": "running",
-                            "total": candidates_to_process,
+                            "total": candidates_count,
                             "processed": processed,
                             "progress_percent": round(progress_percent, 2),
                             "started_at": current_status.get("started_at") or datetime.utcnow().isoformat(),
                             "errors": errors
                         })
-                        
-                        # Commit periodically
-                        try:
-                            db.commit()
-                        except Exception as e:
-                            logger.error(f"Failed to commit batch: {e}")
-                            db.rollback()
                 
-                # Rate limiting: small delay between batches
-                await asyncio.sleep(1)
-                offset += batch_size
+                # Commit after each batch
+                try:
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to commit batch: {e}")
+                    db.rollback()
             
             # Final commit
             try:
@@ -191,15 +244,35 @@ class MetadataBuilder:
                 logger.error(f"Failed to commit final batch: {e}")
                 db.rollback()
             
-            # Mark as complete
-            await self.set_build_status({
-                "status": "complete",
-                "total": candidates_to_process,
-                "processed": processed,
-                "progress_percent": 100,
-                "started_at": current_status.get("started_at"),
-                "errors": errors
-            })
+            # Determine completion status
+            if unmapped_ids and len(unmapped_ids) > 0:
+                # Mark as partial if there are still unmapped items
+                logger.info(f"Metadata build partial: {len(unmapped_ids)} items still unmapped (will retry later)")
+                await self.set_build_status({
+                    "status": "partial",
+                    "total": candidates_count,
+                    "processed": processed,
+                    "progress_percent": 100,
+                    "started_at": current_status.get("started_at"),
+                    "errors": errors,
+                    "unmapped_ids": unmapped_ids[:100]  # Store first 100 for debugging
+                })
+                # Set completion flag so UI doesn't show metadata screen on reload
+                # Periodic retry task will continue trying to map remaining items
+                await self.redis.set("metadata_build:scan_completed", "true")
+            else:
+                # Mark as complete if all mapped
+                logger.info(f"Metadata build complete: all {processed} candidates processed")
+                await self.set_build_status({
+                    "status": "complete",
+                    "total": candidates_count,
+                    "processed": processed,
+                    "progress_percent": 100,
+                    "started_at": current_status.get("started_at"),
+                    "errors": errors
+                })
+                # Set completion flag
+                await self.redis.set("metadata_build:scan_completed", "true")
             
             logger.info(f"Metadata build complete: {processed} processed, {errors} errors")
             

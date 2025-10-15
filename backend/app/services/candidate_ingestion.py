@@ -14,18 +14,38 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.core.database import SessionLocal
+from app.core.redis_client import get_redis_sync
 from app.models import PersistentCandidate, CandidateIngestionState
 from app.utils.logger import logger
 
-from app.services.tmdb_client import discover_movies, discover_tv, get_tmdb_details
+from app.services.tmdb_client import discover_movies, discover_tv, fetch_tmdb_metadata, search_multi
+from app.services.trakt_client import TraktClient
 
 MIN_YEAR = 2024
 RECENT_DAYS_REFRESH = 90
+
+def _update_worker_status(media_type: str, status: str, error: Optional[str] = None, items_processed: int = 0):
+    """Update worker status in Redis."""
+    try:
+        redis = get_redis_sync()
+        # Normalize media_type to singular form for consistency with API
+        normalized_type = "movie" if "movie" in media_type else "show"
+        key = f"worker_status:{normalized_type}"
+        data = {
+            "status": status,  # "running", "completed", "error"
+            "last_run": dt.datetime.utcnow().isoformat(),
+            "items_processed": items_processed,
+            "error": error
+        }
+        redis.set(key, json.dumps(data), ex=86400)  # Expire after 24 hours
+    except Exception as e:
+        logger.warning(f"Failed to update worker status: {e}")
 
 async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_page: int = 20) -> int:
     """Ingest new TMDB content newer than last checkpoint (or MIN_YEAR baseline).
@@ -33,6 +53,8 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
     Returns number of upserted rows.
     """
     assert media_type in ('movies','shows')
+    _update_worker_status(media_type, "running")
+    
     db: Session = SessionLocal()
     inserted = 0
     
@@ -135,6 +157,9 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
         db.commit()
         logger.info(f"Ingested {inserted} new {media_type} candidates (checkpoint={state.last_release_date})")
         
+        # Update worker status to completed
+        _update_worker_status(media_type, "completed", items_processed=inserted)
+        
         # Send completion notification
         from app.api.notifications import send_notification
         if inserted > 0:
@@ -146,6 +171,9 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
     except Exception as e:
         logger.warning(f"ingest_new_content failed for {media_type}: {e}")
         db.rollback()
+        
+        # Update worker status to error
+        _update_worker_status(media_type, "error", error=str(e), items_processed=inserted)
         
         # Send error notification
         from app.api.notifications import send_notification
@@ -183,7 +211,7 @@ async def refresh_recent_votes(media_type: str = 'movies', days: int = RECENT_DA
         rows: List[PersistentCandidate] = q.all()
         for row in rows:
             try:
-                details = await get_tmdb_details(row.tmdb_id, 'movie' if row.media_type=='movie' else 'tv')
+                details = await fetch_tmdb_metadata(row.tmdb_id, 'movie' if row.media_type=='movie' else 'tv')
                 if not details:
                     continue
                 changed = False
@@ -213,5 +241,161 @@ async def refresh_recent_votes(media_type: str = 'movies', days: int = RECENT_DA
         logger.warning(f"refresh_recent_votes failed: {e}")
         db.rollback()
         return updated
+    finally:
+        db.close()
+
+
+async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: int = 12, language: str = 'en-US') -> int:
+    """Time-boxed ingestion using TMDB search/multi.
+
+    Strategy:
+    - Iterate across alphabet letters and pages using a Redis cursor (per media_type)
+    - For each result (movie/tv): if not in DB by tmdb_id, attempt to resolve Trakt ID via TraktClient.search_by_tmdb_id
+    - Insert minimal PersistentCandidate rows and compute scores
+    - Time-boxed to avoid blocking sync pipeline (default ~12 minutes)
+    """
+    assert media_type in ('movies', 'shows')
+    _update_worker_status(media_type, "running")
+
+    db: Session = SessionLocal()
+    inserted = 0
+    start_time = dt.datetime.utcnow()
+    deadline = start_time + dt.timedelta(minutes=duration_minutes)
+
+    # Redis cursor state
+    r = get_redis_sync()
+    cursor_key = f"ingest_cursor:{media_type}"
+    try:
+        cursor_raw = r.get(cursor_key)
+        cursor = json.loads(cursor_raw) if cursor_raw else {"letter_index": 0, "page": 1}
+    except Exception:
+        cursor = {"letter_index": 0, "page": 1}
+
+    letters = [chr(c) for c in range(ord('a'), ord('z') + 1)]
+    # Helper to advance cursor
+    def advance_cursor(cur: dict):
+        cur["page"] += 1
+        if cur["page"] > 50:  # sane upper bound
+            cur["page"] = 1
+            cur["letter_index"] = (cur["letter_index"] + 1) % len(letters)
+        return cur
+
+    try:
+        # Notify start
+        from app.api.notifications import send_notification
+        try:
+            await send_notification(1, f"Ingesting new {media_type} via search...", "info")
+        except Exception:
+            pass
+
+        while dt.datetime.utcnow() < deadline:
+            query = letters[cursor["letter_index"]]
+            page = cursor["page"]
+
+            data = await search_multi(query=query, page=page, language=language)
+            results = (data or {}).get('results') or []
+            if not results:
+                # Advance and continue
+                cursor = advance_cursor(cursor)
+                continue
+
+            # Filter only movies or tv per current run
+            desired_tmdb_items = []
+            tmdb_type = 'movie' if media_type == 'movies' else 'tv'
+            for item in results:
+                if item.get('media_type') != tmdb_type:
+                    continue
+                tmdb_id = item.get('id')
+                if not tmdb_id:
+                    continue
+                desired_tmdb_items.append((tmdb_id, item))
+
+            if not desired_tmdb_items:
+                cursor = advance_cursor(cursor)
+                continue
+
+            # Dedup against DB in bulk
+            tmdb_ids = [tid for tid, _ in desired_tmdb_items]
+            existing = db.query(PersistentCandidate.tmdb_id).filter(PersistentCandidate.tmdb_id.in_(tmdb_ids)).all()
+            existing_ids = {row[0] for row in existing}
+
+            # Resolve Trakt IDs and build new candidates
+            client = TraktClient(user_id=1)
+            new_objs: List[PersistentCandidate] = []
+            for tmdb_id, item in desired_tmdb_items:
+                if tmdb_id in existing_ids:
+                    continue
+                # Resolve trakt id best-effort
+                trakt_id: Optional[int] = None
+                try:
+                    results = await client.search_by_tmdb_id(tmdb_id, media_type='movie' if tmdb_type == 'movie' else 'show')
+                    if results:
+                        if tmdb_type == 'movie':
+                            trakt_id = results[0].get('movie', {}).get('ids', {}).get('trakt')
+                        else:
+                            trakt_id = results[0].get('show', {}).get('ids', {}).get('trakt')
+                except Exception:
+                    trakt_id = None
+
+                title = item.get('title') or item.get('name') or ""
+                year = None
+                rd = item.get('release_date') or item.get('first_air_date')
+                if rd:
+                    try:
+                        year = int(rd[:4])
+                    except Exception:
+                        year = None
+
+                pc = PersistentCandidate(
+                    tmdb_id=tmdb_id,
+                    trakt_id=trakt_id,
+                    media_type='movie' if tmdb_type == 'movie' else 'show',
+                    title=title,
+                    original_title=item.get('original_title') or item.get('original_name'),
+                    year=year,
+                    release_date=rd,
+                    language=(item.get('original_language') or '').lower(),
+                    popularity=item.get('popularity') or 0.0,
+                    vote_average=item.get('vote_average') or 0.0,
+                    vote_count=item.get('vote_count') or 0,
+                    overview=item.get('overview'),
+                    poster_path=item.get('poster_path'),
+                    backdrop_path=item.get('backdrop_path'),
+                    manual=False
+                )
+                pc.compute_scores()
+                new_objs.append(pc)
+
+            if new_objs:
+                db.bulk_save_objects(new_objs)
+                db.commit()
+                inserted += len(new_objs)
+                _update_worker_status(media_type, "running", items_processed=inserted)
+
+            # Advance cursor for next page
+            cursor = advance_cursor(cursor)
+
+            # Small async yield
+            await asyncio.sleep(0.15)
+
+        # Save cursor state
+        try:
+            r.set(cursor_key, json.dumps(cursor), ex=60 * 60 * 24)
+        except Exception:
+            pass
+
+        logger.info(f"Search-multi ingest completed for {media_type}: inserted={inserted}, cursor={cursor}")
+        _update_worker_status(media_type, "completed", items_processed=inserted)
+
+        # Notify completion
+        from app.api.notifications import send_notification
+        if inserted:
+            await send_notification(1, f"Added {inserted} new {media_type} via search", "success")
+        return inserted
+    except Exception as e:
+        logger.warning(f"ingest_via_search_multi failed for {media_type}: {e}")
+        db.rollback()
+        _update_worker_status(media_type, "error", error=str(e), items_processed=inserted)
+        return inserted
     finally:
         db.close()

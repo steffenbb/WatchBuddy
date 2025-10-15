@@ -96,25 +96,18 @@ async def create_list(payload: ListCreate):
         # Create corresponding Trakt list for custom/manual lists (SmartLists handle this in their own flow)
         logger.info(f"List type for list {l.id}: '{l.list_type}'")
         if l.list_type in ("custom", "manual"):
-            # Only attempt Trakt creation if credentials are present to avoid timeouts after reset
+            # Attempt to create Trakt list; TraktClient handles token presence and refresh
+            logger.info(f"Attempting to create Trakt list for custom list {l.id}...")
             try:
-                r = get_redis()
-                client_id = await r.get("settings:global:trakt_client_id")
-                access = await r.get(f"settings:user:{user_id}:trakt_access_token")
-            except Exception:
-                client_id = None
-                access = None
-            if client_id and access:
-                logger.info(f"Attempting to create Trakt list for custom list {l.id}...")
-                try:
-                    from ..services.trakt_client import TraktClient
-                    trakt = TraktClient(user_id=user_id)
-                    trakt_result = await trakt.create_list(
-                        name=l.title,
-                        description=f"Custom list managed by WatchBuddy (ID: {l.id})",
-                        privacy="private"
-                    )
-                    trakt_list_id = str(trakt_result.get("ids", {}).get("trakt"))
+                from ..services.trakt_client import TraktClient
+                trakt = TraktClient(user_id=user_id)
+                trakt_result = await trakt.create_list(
+                    name=l.title,
+                    description=f"Custom list managed by WatchBuddy (ID: {l.id})",
+                    privacy="private"
+                )
+                trakt_list_id = str(trakt_result.get("ids", {}).get("trakt"))
+                if trakt_list_id and trakt_list_id != "None":
                     logger.info(f"Created Trakt list {trakt_list_id} for custom list {l.id}")
                     # Update the list with the Trakt ID
                     db = SessionLocal()
@@ -122,13 +115,34 @@ async def create_list(payload: ListCreate):
                         db.query(UserList).filter(UserList.id == l.id).update({"trakt_list_id": trakt_list_id})
                         db.commit()
                         logger.info(f"Updated list {l.id} with trakt_list_id: {trakt_list_id}")
+                        # Notify success
+                        await send_notification(user_id, f"Created Trakt list for '{l.title}'", "success")
                     finally:
                         db.close()
-                except Exception as trakt_err:
-                    logger.warning(f"Failed to create Trakt list for custom list {l.id}: {trakt_err}")
-                    # Non-fatal - list still created locally, just won't sync to Trakt
-            else:
-                logger.info(f"Skipping Trakt list creation for custom list {l.id}: Trakt not configured")
+            except Exception as trakt_err:
+                logger.warning(f"Failed to create Trakt list for custom list {l.id}: {trakt_err}")
+                # Non-fatal - list still created locally, just won't sync to Trakt
+                try:
+                    await send_notification(user_id, f"List '{l.title}' created locally, but Trakt list creation failed", "warning")
+                except Exception:
+                    pass
+
+            # Always queue population task for custom/manual lists
+            try:
+                from ..tasks import populate_new_list_async
+                # Use default discovery and media_types for custom lists
+                populate_new_list_async.delay(
+                    list_id=l.id,
+                    user_id=user_id,
+                    discovery="balanced",
+                    media_types=["movies", "shows"],
+                    items_per_list=payload.item_limit or 20,
+                    fusion_mode=False,
+                    list_type=l.list_type
+                )
+                logger.info(f"Queued populate_new_list_async for custom list {l.id}")
+            except Exception as pop_err:
+                logger.error(f"Failed to queue population task for custom list {l.id}: {pop_err}")
         else:
             logger.info(f"Skipping Trakt list creation for non-custom list type: {l.list_type}")
         
@@ -149,7 +163,28 @@ async def get_lists(user_id: int = 1):
         rows = crud.list_all()
         logger.info(f"Found {len(rows)} lists")
         out = []
+        from datetime import datetime, timedelta
+        now = datetime.utcnow()
+        
         for r in rows:
+            # Calculate cooldown information
+            cooldown_active = False
+            cooldown_remaining_minutes = 0
+            next_sync_available = None
+            
+            if r.last_sync_at:
+                sync_interval_hours = r.sync_interval if r.sync_interval is not None else 0.5  # Default 30 minutes
+                hours_since_sync = (now - r.last_sync_at).total_seconds() / 3600
+                
+                if hours_since_sync < sync_interval_hours:
+                    cooldown_active = True
+                    cooldown_remaining_seconds = (sync_interval_hours * 3600) - (hours_since_sync * 3600)
+                    cooldown_remaining_minutes = int(cooldown_remaining_seconds / 60)
+                    next_sync_available = format_datetime_in_timezone(
+                        r.last_sync_at + timedelta(hours=sync_interval_hours),
+                        user_timezone
+                    )
+            
             out.append({
                 "id": r.id,
                 "title": r.title,
@@ -160,7 +195,11 @@ async def get_lists(user_id: int = 1):
                 "exclude_watched": r.exclude_watched,
                 "sync_interval": r.sync_interval,
                 "last_error": r.last_error,
-                "filters": r.filters
+                "filters": r.filters,
+                # Cooldown information
+                "cooldown_active": cooldown_active,
+                "cooldown_remaining_minutes": cooldown_remaining_minutes,
+                "next_sync_available": next_sync_available
             })
         return out
     except Exception as e:

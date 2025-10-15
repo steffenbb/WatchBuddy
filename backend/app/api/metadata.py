@@ -91,3 +91,23 @@ async def get_build_status() -> Dict[str, Any]:
     """
     builder = MetadataBuilder()
     return await builder.get_build_status()
+
+@router.post("/skip")
+async def skip_metadata_build() -> Dict[str, str]:
+    """
+    Skip metadata building and mark as completed.
+    
+    This allows users to proceed even if Trakt ID mapping is incomplete.
+    The periodic retry task will continue trying to map remaining items in the background.
+    """
+    builder = MetadataBuilder()
+    
+    # Set completion flag
+    await builder.redis.set("metadata_build:scan_completed", "true")
+    
+    logger.info("Metadata build skipped by user - marked as completed")
+    
+    return {
+        "message": "Metadata build skipped - you can proceed to use the app",
+        "status": "completed"
+    }

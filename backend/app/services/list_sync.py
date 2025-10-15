@@ -158,7 +158,69 @@ class ListSyncService:
                     "total_items": 0
                 }
             
+            # Get previous items and validate they still match current filters
+            prev_items = db.query(ListItem).filter(ListItem.smartlist_id == user_list.id).all()
+            
+            # Check which previous items still match current filters
+            valid_prev_ids = set()
+            invalid_prev_ids = set()
+            filters = json.loads(user_list.filters) if user_list.filters else {}
+            filter_languages = filters.get("languages", [])
+            filter_genres = filters.get("genres", [])
+            
+            for item in prev_items:
+                item_id = item.trakt_id or item.item_id
+                if not item_id:
+                    continue
+                    
+                # Fetch metadata to validate against current filters
+                from app.models import PersistentCandidate
+                candidate = None
+                if item.trakt_id:
+                    candidate = db.query(PersistentCandidate).filter(
+                        PersistentCandidate.trakt_id == item.trakt_id
+                    ).first()
+                
+                # If we have candidate metadata, validate filters
+                if candidate:
+                    is_valid = True
+                    # Check language filter
+                    if filter_languages and candidate.language:
+                        if candidate.language.lower() not in [l.lower() for l in filter_languages]:
+                            is_valid = False
+                            logger.debug(f"[SYNC] Item {item.title} no longer matches language filter (has: {candidate.language}, need: {filter_languages})")
+                    
+                    # Check genre filter (basic check)
+                    if is_valid and filter_genres and candidate.genres:
+                        try:
+                            item_genres = json.loads(candidate.genres) if isinstance(candidate.genres, str) else candidate.genres
+                            if item_genres:
+                                genre_set = {g.lower() for g in item_genres if isinstance(g, str)}
+                                filter_set = {g.lower() for g in filter_genres}
+                                if not genre_set.intersection(filter_set):
+                                    is_valid = False
+                                    logger.debug(f"[SYNC] Item {item.title} no longer matches genre filter")
+                        except Exception as e:
+                            logger.debug(f"[SYNC] Could not parse genres for {item.title}: {e}")
+                    
+                    if is_valid:
+                        valid_prev_ids.add(item_id)
+                    else:
+                        invalid_prev_ids.add(item_id)
+                else:
+                    # No metadata found - if filters are strict (e.g., language), consider invalid
+                    # to ensure proper refresh. External content without metadata should be re-sourced.
+                    if filter_languages or filter_genres:
+                        invalid_prev_ids.add(item_id)
+                        logger.debug(f"[SYNC] Item {item.title} has no metadata and filters are active - marking for removal")
+                    else:
+                        # No filters, keep item
+                        valid_prev_ids.add(item_id)
+            
+            logger.info(f"[SYNC] List {user_list.id}: {len(valid_prev_ids)} items still match filters, {len(invalid_prev_ids)} will be removed")
+            
             # Generate new candidates based on list filters
+            # Note: _get_list_candidates already handles exclusion of recently shown items internally
             candidates = await self._get_list_candidates(user_list)
             logger.debug(f"[SYNC] List {user_list.id} generated {len(candidates)} raw candidates")
             
@@ -169,7 +231,10 @@ class ListSyncService:
                 else:
                     logger.info(f"[SYNC] Skipping watched-status filtering for list {user_list.id}: Trakt not configured")
             
-            # Score and limit candidates
+
+
+            # --- All Lists: Ensure 60% new recommendations and deduplication ---
+
             if not candidates:
                 logger.warning(f"[SYNC] No valid candidates found for list {user_list.id} ({user_list.title}) after filtering. Skipping update.")
                 from app.api.notifications import send_notification
@@ -189,17 +254,130 @@ class ListSyncService:
                     "items_updated": 0,
                     "total_items": 0
                 }
+
             scored_candidates = await self._score_candidates(candidates, user_list)
-            limited_candidates = scored_candidates[:user_list.item_limit or 50]
-            logger.debug(f"[SYNC] List {user_list.id} will persist {len(limited_candidates)} candidates (limit={user_list.item_limit})")
             
+            # Remove duplicates from candidates (based on IDs)
+            seen_ids = set()
+            deduped_candidates = []
+            skipped_no_id = 0
+            skipped_duplicate = 0
+            for c in scored_candidates:
+                # Try multiple ID extraction methods
+                trakt_id = c.get("trakt_id")
+                tmdb_id = c.get("tmdb_id")
+                item_id = c.get("item_id")
+                
+                # Also check nested ids dict
+                ids_dict = c.get("ids", {})
+                if not trakt_id and isinstance(ids_dict, dict):
+                    trakt_id = ids_dict.get("trakt")
+                if not tmdb_id and isinstance(ids_dict, dict):
+                    tmdb_id = ids_dict.get("tmdb")
+                
+                cid = trakt_id or tmdb_id or item_id
+                
+                if not cid:
+                    skipped_no_id += 1
+                    logger.warning(f"[DEDUP] Skipping candidate '{c.get('title', 'UNKNOWN')}' - no ID found (trakt={trakt_id}, tmdb={tmdb_id}, item={item_id}, ids={ids_dict})")
+                    continue
+                if cid in seen_ids:
+                    skipped_duplicate += 1
+                    logger.debug(f"[DEDUP] Skipping candidate '{c.get('title', 'UNKNOWN')}' - duplicate ID {cid}")
+                    continue
+                deduped_candidates.append(c)
+                seen_ids.add(cid)
+            
+            logger.warning(f"[DEDUP] List {user_list.id}: {len(scored_candidates)} scored → {len(deduped_candidates)} deduped (skipped: {skipped_no_id} no ID, {skipped_duplicate} duplicates)")
+
+            # Get IDs that are already on the list (to avoid duplicates)
+            existing_list_ids = set()
+            for item in prev_items:
+                item_id = item.trakt_id or item.item_id
+                if item_id:
+                    existing_list_ids.add(item_id)
+            
+            # Filter out candidates that are already on the list
+            # Check both direct fields and nested ids dict
+            fresh_candidates = []
+            already_on_list = 0
+            for c in deduped_candidates:
+                ids_dict = c.get("ids", {})
+                cid = (
+                    c.get("trakt_id") or 
+                    c.get("tmdb_id") or 
+                    c.get("item_id") or
+                    ids_dict.get("trakt") or 
+                    ids_dict.get("tmdb")
+                )
+                if cid not in existing_list_ids:
+                    fresh_candidates.append(c)
+                else:
+                    already_on_list += 1
+            
+            logger.warning(f"[FRESH_FILTER] List {user_list.id}: {len(deduped_candidates)} deduped → {len(fresh_candidates)} fresh (filtered {already_on_list} already on list, {len(existing_list_ids)} items on list)")
+            if fresh_candidates:
+                logger.warning(f"[FRESH_FILTER] First 10 fresh candidates: {[c.get('title') for c in fresh_candidates[:10]]}")
+            
+            # Take top N candidates by score up to item_limit
+            item_limit = user_list.item_limit or 50
+            
+            # For incremental sync: Keep some existing items if they still match filters (valid_prev_ids)
+            # For full sync: Replace everything with fresh candidates
+            if sync_type == "incremental" and valid_prev_ids:
+                # Keep up to 40% of existing valid items, fill rest with fresh candidates
+                num_fresh = int(item_limit * 0.6)
+                num_keep = item_limit - num_fresh
+                
+                # Get existing items that are still valid - check both direct fields and ids dict
+                keep_candidates = []
+                for c in deduped_candidates:
+                    ids_dict = c.get("ids", {})
+                    cid = (
+                        c.get("trakt_id") or 
+                        c.get("tmdb_id") or 
+                        c.get("item_id") or
+                        ids_dict.get("trakt") or 
+                        ids_dict.get("tmdb")
+                    )
+                    if cid in valid_prev_ids:
+                        keep_candidates.append(c)
+                        if len(keep_candidates) >= num_keep:
+                            break
+                
+                # Fill with fresh candidates
+                limited_candidates = fresh_candidates[:num_fresh] + keep_candidates
+                logger.debug(f"[SYNC] Incremental sync: {len(fresh_candidates[:num_fresh])} fresh + {len(keep_candidates)} kept = {len(limited_candidates)} total")
+            else:
+                # Full sync or no existing items: Just take top N fresh candidates
+                limited_candidates = fresh_candidates[:item_limit]
+                logger.debug(f"[SYNC] Full sync: taking top {len(limited_candidates)} fresh candidates")
+            
+            # Final deduplication (in case of overlap between fresh and keep)
+            final_ids = set()
+            final_candidates = []
+            for c in limited_candidates:
+                ids_dict = c.get("ids", {})
+                cid = (
+                    c.get("trakt_id") or 
+                    c.get("tmdb_id") or 
+                    c.get("item_id") or
+                    ids_dict.get("trakt") or 
+                    ids_dict.get("tmdb")
+                )
+                if cid and cid not in final_ids:
+                    final_candidates.append(c)
+                    final_ids.add(cid)
+            limited_candidates = final_candidates[:item_limit]
+            logger.debug(f"[SYNC][ALL] List {user_list.id} will persist {len(limited_candidates)} candidates (limit={item_limit})")
+
             # Get existing item count for calculating removed count
             existing_count = 0
             if sync_type == "incremental":
                 existing_count = db.query(ListItem).filter(
                     ListItem.smartlist_id == user_list.id
                 ).count()
-            
+
             # Debug: Log before update
             logger.warning(f"[DEBUG] About to call _update_list_items - user_list.id={user_list.id}, num_candidates={len(limited_candidates)}, is_full_sync={sync_type == 'full'}")
             logger.warning(f"[DEBUG] First few candidate titles: {[c.get('title', 'NO_TITLE') for c in limited_candidates[:5]]}")
@@ -387,22 +565,23 @@ class ListSyncService:
             if days_since_full >= max(1, full_sync_days):
                 return "full"
         
-        # Check sync interval preference
-        if user_list.sync_interval:
-            hours_since_sync = (datetime.utcnow() - user_list.last_sync_at).total_seconds() / 3600
-            if hours_since_sync >= user_list.sync_interval:
-                return "incremental"
+        # Check sync interval preference (default to 0.5 hours = 30 minutes if not set)
+        sync_interval_hours = user_list.sync_interval if user_list.sync_interval is not None else 0.5
+        hours_since_sync = (datetime.utcnow() - user_list.last_sync_at).total_seconds() / 3600
+        if hours_since_sync >= sync_interval_hours:
+            return "incremental"
 
         return "skip"
 
     async def _get_list_candidates(self, user_list: UserList) -> List[Dict[str, Any]]:
-        """Get candidate items based on list filters and type."""
         filters = {}
         if user_list.filters:
             try:
                 filters = json.loads(user_list.filters)
             except:
                 filters = {}
+        logger.warning(f"[DEBUG][CANDIDATE] List {user_list.id} filters: {filters}")
+        print(f"[DEBUG][CANDIDATE] List {user_list.id} filters: {filters}")
         
         # Default to mixed content if no specific type
         media_types = filters.get("media_types", ["movies", "shows"])
@@ -428,23 +607,23 @@ class ListSyncService:
         # Get candidates from bulk provider
         all_candidates = []
         for media_type in media_types:
-            # Use discovery strategy (obscure/popular/balanced). Maintain back-compat with legacy 'mood' value.
-            discovery = filters.get("discovery") or filters.get("mood") or "balanced"
-            search_keywords = filters.get("search_query")
-            search_keywords_list = search_keywords.split() if search_keywords else None
-            
-            # Extract filter parameters
+            # Extract filter parameters (must be before logger.warning)
             genres = filters.get("genres", [])
             languages = filters.get("languages", [])
             min_year = filters.get("year_from")
             max_year = filters.get("year_to")
             min_rating = filters.get("min_rating")
-            
-            # Enhanced candidate fetching for better recommendation quality
+            # Compute limits before logging
             base_limit = int(filters.get("candidate_limit", 200))
-            # Favor large-but-fast DB pools; cap per media type to 4000
             enhanced_limit = max(base_limit, 1600)
             enhanced_limit = min(enhanced_limit, 4000)
+            # Discovery/search inputs
+            discovery = filters.get("discovery") or filters.get("mood") or "balanced"
+            search_keywords = filters.get("search_query")
+            search_keywords_list = search_keywords.split() if search_keywords else None
+            logger.warning(f"[DEBUG][CANDIDATE] Fetching candidates for media_type={media_type}, genres={genres}, languages={languages}, min_year={min_year}, max_year={max_year}, limit={enhanced_limit}")
+            
+            # Enhanced candidate fetching for better recommendation quality (computed above)
             # Keep discovery balanced to rely on PersistentCandidate ordering heuristics
             enhanced_discovery = discovery or "balanced"
             
@@ -459,10 +638,14 @@ class ListSyncService:
                 min_rating=min_rating,
                 limit=enhanced_limit,
                 list_title=user_list.title,
-                fusion_mode=filters.get("fusion_mode", False)
+                fusion_mode=filters.get("fusion_mode", False),
+                persistent_only=True  # Only use persistent DB for syncs, no TMDB fallback
             )
             
             logger.warning(f"[DEBUG] Candidates from provider for {media_type} - sample titles: {[c.get('title', 'NO_TITLE') for c in candidates[:5]]}")
+            logger.warning(f"[DEBUG][CANDIDATE] Provider returned {len(candidates)} candidates for media_type={media_type}")
+            if candidates:
+                logger.warning(f"[DEBUG][CANDIDATE] Sample candidate: {candidates[0]}")
             
             # Filter out recently shown items for freshness
             fresh_candidates = []
@@ -475,6 +658,8 @@ class ListSyncService:
             all_candidates.extend(fresh_candidates)
             
         logger.info(f"Total fresh candidates gathered: {len(all_candidates)} from {len(media_types)} media types")
+        if not all_candidates:
+            logger.warning(f"[DEBUG][CANDIDATE] No candidates found after all filters for list {user_list.id}")
         
         # Add small random shuffle for variety (shuffle top 30% of results)
         if all_candidates and len(all_candidates) > 10:
@@ -542,6 +727,8 @@ class ListSyncService:
         return enriched
 
     async def _score_candidates(self, candidates: List[Dict[str, Any]], user_list: UserList) -> List[Dict[str, Any]]:
+        logger.warning(f"[DEBUG][SCORING] Scoring {len(candidates)} candidates for list {user_list.id}")
+        print(f"[DEBUG][SCORING] Scoring {len(candidates)} candidates for list {user_list.id}")
         """Score and sort candidates using the scoring engine."""
         scored_candidates = []
         
@@ -564,6 +751,7 @@ class ListSyncService:
                     filters=filters
                 )
                 candidate["score"] = score
+                logger.warning(f"[DEBUG][SCORING] Candidate '{candidate.get('title')}' scored {score}")
                 
                 # Generate explanation for the item using existing explanation service
                 try:
@@ -592,15 +780,20 @@ class ListSyncService:
         # Sort by score descending
         scored_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
         logger.warning(f"[DEBUG] Candidates after scoring for list {user_list.id}: {[c.get('title') for c in scored_candidates]}")
+        if not scored_candidates:
+            logger.warning(f"[DEBUG][SCORING] No candidates survived scoring for list {user_list.id}")
         return scored_candidates
 
     async def _resolve_trakt_id(self, candidate: Dict[str, Any]) -> Optional[int]:
         """Resolve Trakt ID from TMDB/IMDB IDs if missing."""
         # First check if trakt_id is already present in ids dict
         ids = candidate.get("ids", {})
-        trakt_id = ids.get("trakt") or candidate.get("trakt_id")
-        if trakt_id:
-            return trakt_id
+        raw_trakt = ids.get("trakt") or candidate.get("trakt_id")
+        # Normalize to integer if possible; ignore non-numeric placeholders
+        if isinstance(raw_trakt, int):
+            return raw_trakt
+        if isinstance(raw_trakt, str) and raw_trakt.isdigit():
+            return int(raw_trakt)
         
         # Try to look up via TMDB ID (check both locations)
         tmdb_id = ids.get("tmdb") or candidate.get("tmdb_id")
@@ -641,13 +834,41 @@ class ListSyncService:
         updated_count = 0
         
         try:
+            # Get the list's media_type filter to enforce strict filtering
+            user_list = db.query(UserList).filter(UserList.id == user_list_id).first()
+            allowed_media_types = set()
+            if user_list and user_list.filters:
+                filters = json.loads(user_list.filters)
+                # Check both "media_types" (plural) and "media_type" (singular) keys for compatibility
+                media_types = filters.get("media_types") or filters.get("media_type", ["movies", "shows"])
+                # Normalize to singular form: "movies" -> "movie", "shows" -> "show"
+                for mt in media_types:
+                    if mt == "movies":
+                        allowed_media_types.add("movie")
+                    elif mt == "shows":
+                        allowed_media_types.add("show")
+                    else:
+                        allowed_media_types.add(mt)
+            logger.warning(f"[MEDIA_TYPE_FILTER] List {user_list_id} allows media_types: {allowed_media_types}")
+            
             # Get existing items in this session
             existing_items = {}
+            items_to_refresh = set()  # Track items to be replaced with new content
+            
             if not is_full_sync:
                 current_items = db.query(ListItem).filter(
                     ListItem.smartlist_id == user_list_id
                 ).all()
                 existing_items = {item.trakt_id: item for item in current_items if item.trakt_id}
+                
+                # Implement 60% content refresh: randomly select 60% of items to replace
+                if existing_items and len(existing_items) > 5:  # Only refresh if we have enough items
+                    import random
+                    total_items = len(existing_items)
+                    num_to_refresh = int(total_items * 0.6)  # 60% refresh
+                    trakt_ids_list = list(existing_items.keys())
+                    items_to_refresh = set(random.sample(trakt_ids_list, min(num_to_refresh, len(trakt_ids_list))))
+                    logger.info(f"[CONTENT_REFRESH] Will refresh {len(items_to_refresh)} of {total_items} items (60%)")
             
             # If full sync, remove all existing items first
             if is_full_sync:
@@ -656,9 +877,11 @@ class ListSyncService:
                 ).delete()
                 db.commit()
                 existing_items = {}
+                items_to_refresh = set()
             
             # Track which items we're keeping
             processed_trakt_ids = set()
+            any_candidates_applied = False
             
             logger.warning(f"[DEBUG] Starting loop - total candidates: {len(candidates)}")
             for idx, candidate in enumerate(candidates):
@@ -666,35 +889,81 @@ class ListSyncService:
                     logger.warning(f"[DEBUG] First candidate keys: {list(candidate.keys())}")
                     logger.warning(f"[DEBUG] First candidate sample: {candidate}")
                 
+                # STRICT MEDIA_TYPE FILTER: Skip candidates that don't match the list's allowed media types
+                candidate_media_type = candidate.get("media_type", "movie")
+                if allowed_media_types and candidate_media_type not in allowed_media_types:
+                    logger.warning(f"[MEDIA_TYPE_FILTER] Skipping candidate '{candidate.get('title')}' - media_type '{candidate_media_type}' not in allowed {allowed_media_types}")
+                    continue
+                
                 # Resolve Trakt ID (from candidate or via lookup)
                 trakt_id = await self._resolve_trakt_id(candidate)
                 logger.warning(f"[DEBUG] Candidate {idx}: trakt_id={trakt_id} (title: {candidate.get('title')})")
                 
-                if not trakt_id:
-                    logger.warning(f"[DEBUG] Skipping candidate {idx} - could not resolve trakt_id")
+                # If we cannot resolve a numeric trakt_id, we skip setting trakt_id but may still be able to persist using item_id fallback
+                tmdb_id = (candidate.get('ids') or {}).get('tmdb') if isinstance(candidate.get('ids'), dict) else candidate.get('tmdb_id')
+                if not trakt_id and not tmdb_id and not candidate.get('item_id'):
+                    logger.warning(f"[DEBUG] Skipping candidate {idx} - no usable identifier (no trakt_id/tmdb_id/item_id)")
                     continue
                 
-                processed_trakt_ids.add(trakt_id)
+                if trakt_id:
+                    processed_trakt_ids.add(trakt_id)
                 
                 # Check if item already exists
-                existing_item = existing_items.get(trakt_id)
+                existing_item = existing_items.get(trakt_id) if trakt_id else None
                 
-                if existing_item:
-                    # Update existing item
+                # If item exists AND is NOT marked for refresh, update it
+                # If item exists AND IS marked for refresh, treat as new (replace it)
+                if existing_item and trakt_id not in items_to_refresh:
+                    # Update existing item (keep it)
                     existing_item.score = candidate.get("score", 0)
                     existing_item.is_watched = candidate.get("is_watched", False)
                     existing_item.watched_at = candidate.get("watched_at")
                     existing_item.title = candidate.get("title", "")
                     updated_count += 1
+                    any_candidates_applied = True
                 else:
-                    # Create new item
+                    # Create new item (either new or replacing old item marked for refresh)
+                    if existing_item and trakt_id in items_to_refresh:
+                        # Remove old item to replace it
+                        db.delete(existing_item)
+                        logger.debug(f"[CONTENT_REFRESH] Replacing item trakt_id={trakt_id}")
+                    
                     title_value = candidate.get("title", "")
                     logger.warning(f"[DEBUG] Creating ListItem - trakt_id={trakt_id}, title='{title_value}', media_type={candidate.get('media_type', 'movie')}")
                     
+                    # Determine safe item_id and trakt_id values
+                    # trakt_id MUST be int or None; item_id can be string surrogate (tmdb-<id>)
+                    safe_trakt: Optional[int] = trakt_id if isinstance(trakt_id, int) else None
+                    # Prefer trakt_id for item_id if available, else tmdb_id, else provided item_id
+                    if safe_trakt is not None:
+                        item_id_value = str(safe_trakt)
+                    elif tmdb_id is not None:
+                        item_id_value = f"tmdb-{tmdb_id}"
+                    else:
+                        item_id_value = str(candidate.get('item_id'))
+
+                    # If we don't have a trakt_id, try to upsert on item_id to avoid duplicates
+                    if safe_trakt is None and item_id_value:
+                        existing_by_item = db.query(ListItem).filter(
+                            ListItem.smartlist_id == user_list_id,
+                            ListItem.item_id == item_id_value
+                        ).first()
+                        if existing_by_item:
+                            # Update existing TMDB-only item
+                            existing_by_item.media_type = candidate.get("media_type", "movie")
+                            existing_by_item.title = title_value
+                            existing_by_item.score = candidate.get("score", 0)
+                            existing_by_item.is_watched = candidate.get("is_watched", False)
+                            existing_by_item.watched_at = candidate.get("watched_at")
+                            existing_by_item.explanation = candidate.get("explanation", "")
+                            updated_count += 1
+                            any_candidates_applied = True
+                            continue
+
                     new_item = ListItem(
                         smartlist_id=user_list_id,
-                        item_id=str(trakt_id),
-                        trakt_id=trakt_id,
+                        item_id=item_id_value,
+                        trakt_id=safe_trakt,
                         media_type=candidate.get("media_type", "movie"),
                         title=title_value,
                         score=candidate.get("score", 0),
@@ -704,9 +973,15 @@ class ListSyncService:
                     )
                     db.add(new_item)
                     updated_count += 1
+                    any_candidates_applied = True
             
             # Remove items that are no longer in the top candidates (for incremental sync)
             if not is_full_sync:
+                # If we didn't process any candidates, avoid destructive removal
+                if not any_candidates_applied:
+                    logger.info("[INCREMENTAL] No candidates applied; skipping removal of existing items to avoid wiping the list")
+                    db.commit()
+                    return updated_count
                 items_to_remove = [
                     item for trakt_id, item in existing_items.items() 
                     if trakt_id not in processed_trakt_ids

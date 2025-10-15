@@ -32,11 +32,104 @@ async def get_sync_status(user_id: int = 1):
         # Get user's timezone for timestamp formatting
         user_timezone = await get_user_timezone(user_id)
         
-        # Get active syncs from Redis
+        # Get active syncs from Redis (sync and populate operations)
         active_syncs = []
         redis = get_redis()
-        sync_keys = await redis.keys("sync_lock:*")
+        
+        # Check list_sync:{list_id}:status (manual sync operations)
+        list_sync_keys = await redis.keys("list_sync:*:status")
+        for key in list_sync_keys:
+            try:
+                status_json = await redis.get(key)
+                if not status_json:
+                    continue
+                status_data = json.loads(status_json)
+                
+                # Only include running syncs
+                if status_data.get("status") != "running":
+                    continue
+                
+                list_id = status_data.get("list_id")
+                if not list_id:
+                    # Extract from key: list_sync:{list_id}:status
+                    list_id = key.decode('utf-8').split(':')[1] if isinstance(key, bytes) else key.split(':')[1]
+                
+                # Get list title from database
+                db = SessionLocal()
+                try:
+                    watch_list = db.query(WatchList).filter(WatchList.id == int(list_id)).first()
+                finally:
+                    db.close()
 
+                if watch_list:
+                    started_at = status_data.get("started_at")
+                    try:
+                        started_iso = datetime.utcfromtimestamp(float(started_at)).isoformat() if started_at else ""
+                    except Exception:
+                        started_iso = str(started_at) if started_at else ""
+                    
+                    active_syncs.append({
+                        "list_id": int(list_id),
+                        "list_title": watch_list.title,
+                        "started_at": started_iso,
+                        "progress": status_data.get("progress", 0),
+                        "message": status_data.get("message", "Syncing..."),
+                        "operation": "sync",
+                        "sync_type": "async"
+                    })
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to parse list_sync status: {e}")
+                continue
+        
+        # Check list_populate:{list_id}:status (list population operations)
+        list_populate_keys = await redis.keys("list_populate:*:status")
+        for key in list_populate_keys:
+            try:
+                status_json = await redis.get(key)
+                if not status_json:
+                    continue
+                status_data = json.loads(status_json)
+                
+                # Only include running population tasks
+                if status_data.get("status") != "running":
+                    continue
+                
+                list_id = status_data.get("list_id")
+                if not list_id:
+                    # Extract from key: list_populate:{list_id}:status
+                    list_id = key.decode('utf-8').split(':')[1] if isinstance(key, bytes) else key.split(':')[1]
+                
+                # Get list title from database
+                db = SessionLocal()
+                try:
+                    watch_list = db.query(WatchList).filter(WatchList.id == int(list_id)).first()
+                finally:
+                    db.close()
+
+                if watch_list:
+                    started_at = status_data.get("started_at")
+                    try:
+                        started_iso = datetime.utcfromtimestamp(float(started_at)).isoformat() if started_at else ""
+                    except Exception:
+                        started_iso = str(started_at) if started_at else ""
+                    
+                    active_syncs.append({
+                        "list_id": int(list_id),
+                        "list_title": watch_list.title,
+                        "started_at": started_iso,
+                        "progress": status_data.get("progress", 0),
+                        "message": status_data.get("message", "Populating..."),
+                        "operation": "populate",
+                        "sync_type": "async"
+                    })
+            except Exception as e:
+                import logging
+                logging.warning(f"Failed to parse list_populate status: {e}")
+                continue
+        
+        # Check old format: sync_lock:* (legacy)
+        sync_keys = await redis.keys("sync_lock:*")
         for key in sync_keys:
             try:
                 lock_json = await redis.get(key)
@@ -47,6 +140,11 @@ async def get_sync_status(user_id: int = 1):
                 continue
 
             list_id = str(lock_data.get("list_id") or str(key).split(":")[-1])
+            
+            # Skip if already in active_syncs (avoid duplicates)
+            if any(s["list_id"] == int(list_id) for s in active_syncs):
+                continue
+            
             # Get list title from database
             db = SessionLocal()
             try:
@@ -64,7 +162,10 @@ async def get_sync_status(user_id: int = 1):
                     "list_id": int(list_id),
                     "list_title": watch_list.title,
                     "started_at": started_iso,
-                    "progress": None  # Could be enhanced with actual progress tracking
+                    "progress": None,
+                    "message": "Syncing...",
+                    "operation": "sync",
+                    "sync_type": "legacy"
                 })
 
         # Get statistics from database
@@ -217,3 +318,61 @@ async def get_system_metrics():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get metrics: {str(e)}")
+
+
+@router.get("/workers")
+async def get_worker_status(user_id: int = 1):
+    """
+    Get background worker status for ingestion tasks.
+    
+    Returns status for movie and TV show ingestion workers including:
+    - Current status (idle/running/completed/error)
+    - Last run timestamp
+    - Next scheduled run estimate
+    - Items processed in last run
+    - Error message if failed
+    """
+    try:
+        redis = get_redis()
+        user_timezone = await get_user_timezone(user_id)
+        
+        workers = {}
+        
+        for media_type in ["movie", "show"]:
+            status_json = await redis.get(f"worker_status:{media_type}")
+            
+            if status_json:
+                status_data = json.loads(status_json)
+                
+                # Format timestamps in user's timezone
+                last_run = None
+                next_run = None
+                if status_data.get("last_run"):
+                    last_run_dt = datetime.fromisoformat(status_data["last_run"])
+                    last_run = format_datetime_in_timezone(last_run_dt, user_timezone)
+                    
+                    # Estimate next run (workers run every 2 hours)
+                    next_run_dt = last_run_dt + timedelta(hours=2)
+                    next_run = format_datetime_in_timezone(next_run_dt, user_timezone)
+                
+                workers[media_type] = {
+                    "status": status_data.get("status", "idle"),
+                    "last_run": last_run,
+                    "next_run": next_run,
+                    "items_processed": status_data.get("items_processed", 0),
+                    "error": status_data.get("error")
+                }
+            else:
+                # No status data yet (first run pending)
+                workers[media_type] = {
+                    "status": "idle",
+                    "last_run": None,
+                    "next_run": None,
+                    "items_processed": 0,
+                    "error": None
+                }
+        
+        return workers
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get worker status: {str(e)}")

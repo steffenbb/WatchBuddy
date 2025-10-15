@@ -21,15 +21,23 @@ celery_app.conf.update(
     broker_connection_retry_on_startup=True,
     broker_pool_limit=10,
     
+    # RedBeat scheduler configuration
+    beat_scheduler='redbeat.schedulers:RedBeatScheduler',
+    redbeat_redis_url=settings.redis_url,
+    redbeat_key_prefix='celery:beat:',
+    
     # Task routing and concurrency
     task_routes={
         'app.services.tasks.score_smartlist': {'queue': 'scoring'},
         'app.services.tasks.sync_user_lists': {'queue': 'sync'},
+        'app.services.tasks.sync_single_list_async': {'queue': 'sync'},
+        'app.services.tasks.populate_new_list_async': {'queue': 'sync'},
         'app.services.tasks.cleanup_orphaned_items': {'queue': 'maintenance'},
         'app.services.tasks.ingest_new_movies': {'queue': 'ingestion'},
         'app.services.tasks.ingest_new_shows': {'queue': 'ingestion'},
         'app.services.tasks.refresh_recent_votes_movies': {'queue': 'ingestion'},
         'app.services.tasks.refresh_recent_votes_shows': {'queue': 'ingestion'},
+        'app.services.tasks.build_metadata': {'queue': 'maintenance'},
     },
     
     # Memory management
@@ -61,6 +69,11 @@ celery_app.conf.update(
         "refresh-recent-votes-shows": {
             "task": "app.services.tasks.refresh_recent_votes_shows",
             "schedule": 60 * 60 * 24,  # daily
+        },
+        "retry-metadata-mapping": {
+            "task": "app.services.tasks.build_metadata",
+            "schedule": 60 * 60 * 12,  # every 12 hours (retry failed Trakt ID mappings)
+            "kwargs": {"user_id": 1, "force": False}
         }
     },
     timezone='UTC',

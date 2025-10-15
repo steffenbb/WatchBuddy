@@ -21,14 +21,14 @@ WatchBuddy is a smart recommendation system that syncs with your Trakt watch his
 - **Trakt Integration**: Two-way sync with your Trakt lists
 
 ### 🌍 Content Discovery
-- **20,000+ Pre-Loaded Movies & Shows**: Instant recommendations from TMDB dataset
+- **≈280,000 Pre-Loaded Titles**: Instant recommendations from TMDB CSV datasets (≈266K movies + 13K shows)
 - **Multi-Language Support**: Discover content in 20+ languages with smart fallback
 - **Ultra Discovery Mode**: Find hidden gems and obscure titles
 - **Genre Blending**: Mix multiple genres for unique recommendations
 
 ### ⚡ Zero-Config Setup
 - **Docker-First Architecture**: One command to start everything
-- **Auto-Init Database**: Pre-populates 20K+ candidates on first startup
+- **Auto-Init Database**: Pre-populates ≈280K candidates on first startup
 - **Persistent Storage**: All data survives container restarts
 - **Background Tasks**: Celery workers handle syncs and updates automatically
 
@@ -57,7 +57,7 @@ docker compose up -d
 
 That's it! WatchBuddy will automatically:
 - ✅ Create the database
-- ✅ Load 20,000+ movies and shows
+- ✅ Load ≈280,000 titles (≈266K movies + 13K shows)
 - ✅ Start the API, frontend, Redis, and background workers
 - ✅ Initialize all required services
 
@@ -105,7 +105,7 @@ docker compose down -v
 ```
 
 Notes:
-- First startup seeds the database and may take a couple of minutes.
+- First startup seeds the database and may take a few minutes depending on your machine.
 - Data is persisted in Docker volumes (PostgreSQL, Redis). Removing volumes resets the app.
 - Configure Trakt OAuth and TMDB API key from the in-app Settings once the UI is up.
 
@@ -148,6 +148,14 @@ WatchBuddy automatically syncs with Trakt:
 - **Watched Status**: Items you've watched on Trakt are marked automatically
 - **Two-Way Sync**: Changes made in WatchBuddy update Trakt lists
 - **Background Updates**: Celery Beat refreshes lists every 24 hours
+
+### How Fetching and Enrichment Works (Plain-English)
+
+- Preloaded pool: WatchBuddy ships with a large, preloaded database of titles so your lists build fast without waiting on external APIs.
+- Offline-first syncs: Your SmartLists are created by querying the local database (language, genre, year, mood, etc.).
+- Background enrichment: Extra details (artwork, overviews, mappings) are fetched in the background from TMDB/Trakt when available.
+- Graceful failures: Some items don’t have perfect cross-service mappings (404s are normal). We keep those items and continue.
+- Freshness: Recent titles get vote/popularity refreshed periodically so recommendations stay up to date.
 
 ### Managing Lists
 
@@ -198,6 +206,23 @@ docker compose up -d
 
 ### Missing Recommendations?
 - First startup takes ~2 minutes to load candidates
+
+---
+
+## 🐳 Docker: Local vs Server and Versioning
+
+- Use `docker-compose.yml` for server/production; it points to published images (`lsdking101/*`).
+- Use `docker-compose.override.yml` locally to build images from source while keeping server deploys clean.
+- The override file is automatically picked up by `docker compose` when present locally and is ignored by remote builds via `.dockerignore`.
+
+### CI Releases
+- On pushes to `main`, GitHub Actions builds and pushes Docker images for backend and frontend with tags:
+    - `latest`
+    - date-based version (e.g., `v2025.10.15.123`)
+    - short commit SHA
+- Pushing a git tag like `v1.2.3` will use that semantic version for image tags.
+
+Images include labels `org.opencontainers.image.version` and `org.opencontainers.image.revision`, and both Dockerfiles accept `APP_VERSION` and `GIT_SHA` build args.
 - Check logs: `docker logs watchbuddy-backend-1 --tail 100`
 - Try forcing a full sync: Click list → "Sync" button
 
@@ -231,8 +256,8 @@ docker logs watchbuddy-backend-1
 ## 📜 Data Attribution
 
 **Contains information from:**
-- **Full TMDB Movies Dataset 2024 (1M Movies)** - made available under the [ODC Attribution License](https://opendatacommons.org/licenses/by/1-0/)
-- **Full TMDb TV Shows Dataset 2024 (150K Shows)** - made available under the [ODC Attribution License](https://opendatacommons.org/licenses/by/1-0/)
+- **TMDB Movies Dataset (2024)** – made available under the [ODC Attribution License](https://opendatacommons.org/licenses/by/1-0/)
+- **TMDB TV Shows Dataset (2024)** – made available under the [ODC Attribution License](https://opendatacommons.org/licenses/by/1-0/)
 
 TMDB data is used for metadata enrichment and recommendation scoring. Movie posters and metadata are fetched via the [TMDB API](https://www.themoviedb.org/documentation/api).
 

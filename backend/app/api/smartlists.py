@@ -85,19 +85,8 @@ async def create_smartlists(
     # Cap items per list
     items_per_list = min(items_per_list, max_items)
 
-    # Prepare engines
-    se = ScoringEngine()
-    fusion = FusionEngine(user_id=user_id) if fusion_mode else None
-
     # Build lists
     results = []
-    from ..services.tmdb_client import get_tmdb_api_key
-    tmdb_api_key = None
-    try:
-        tmdb_api_key = await get_tmdb_api_key()
-    except Exception:
-        pass
-    enrich_with_tmdb = bool(tmdb_api_key)
     
     # Check for duplicate lists (same config)
     import hashlib
@@ -140,73 +129,6 @@ async def create_smartlists(
         db_check.close()
 
     for i in range(max(1, min(count, 5))):
-        # Candidate sourcing across media types with enhanced discovery
-        provider = BulkCandidateProvider(user_id)
-        candidates: List[Dict[str, Any]] = []
-        try:
-            for mt in media_types or ["movies", "shows"]:
-                try:
-                    # Enhanced candidate fetching for better SmartList quality
-                    base_limit = max(50, items_per_list * 3)
-                    enhanced_limit = max(base_limit, 800)  # Minimum 800 candidates per media type
-                    enhanced_discovery = discovery or "balanced"
-                    
-                    # Use ultra_discovery for SmartLists to maximize candidate diversity
-                    if list_type == "smartlist" or enhanced_limit >= 500:
-                        enhanced_discovery = "ultra_discovery"
-                        enhanced_limit = min(enhanced_limit * 4, 3000)  # Scale up to 3000 per type
-                        logging.info(f"SmartList enhanced discovery: {enhanced_limit} candidates with {enhanced_discovery}")
-                    
-                    batch = await provider.get_candidates(
-                        media_type=mt,
-                        limit=enhanced_limit,
-                        discovery=enhanced_discovery,
-                        include_watched=False,
-                        enrich_with_tmdb=enrich_with_tmdb
-                    )
-                    candidates.extend(batch)
-                except RuntimeError as e:
-                    # Actionable error from candidate provider (Trakt/network/offline)
-                    raise HTTPException(status_code=503, detail=str(e))
-        finally:
-            # close provider db session
-            if hasattr(provider, 'db') and provider.db:
-                provider.db.close()
-
-        # Score candidates
-        scored: List[Dict[str, Any]] = []
-        if fusion:
-            # Fusion path returns advanced items with fusion_score
-            fused = await fusion.fuse(user={"id": user_id}, candidates=candidates, list_type="smartlist", media_type=(media_types[0] if media_types else "movies"), limit=items_per_list)
-            # Map to simple output
-            for it in fused:
-                scored.append({
-                    "trakt_id": it.get("trakt_id"),
-                    "tmdb_id": it.get("tmdb_id"),
-                    "media_type": it.get("media_type"),
-                    "score": it.get("fusion_score", it.get("final_score", 0)),
-                    "components": it.get("components", {}),
-                    "fusion": {
-                        "enabled": True,
-                        "breakdown": it.get("fusion_breakdown", {}),
-                        "weights": it.get("fusion_weights", {})
-                    }
-                })
-        else:
-            # Advanced smartlist scoring path
-            ranked = se.score_candidates(user={"id": user_id}, candidates=candidates, list_type="smartlist", item_limit=items_per_list)
-            for it in ranked:
-                scored.append({
-                    "trakt_id": it.get("trakt_id"),
-                    "tmdb_id": it.get("tmdb_id"),
-                    "media_type": it.get("media_type"),
-                    "score": it.get("final_score", 0),
-                    "components": it.get("components", {}),
-                    "explanation_text": it.get("explanation_text", ""),
-                    "fusion": {"enabled": False}
-                })
-
-        # Persist to DB: create UserList and ListItems
         db = SessionLocal()
         try:
             filters_payload = {
@@ -227,14 +149,15 @@ async def create_smartlists(
             else:
                 title = list_type.title()
             
-            logging.info(f"Creating smartlist: title={title}, user_id={user_id}, items={len(scored)}")
+            logging.info(f"Creating smartlist: title={title}, user_id={user_id}")
             user_list = UserList(
                 user_id=user_id,
                 title=title,
                 filters=json.dumps(filters_payload),
                 item_limit=items_per_list,
                 list_type=list_type,
-                sync_interval=6  # default 6 hours incremental cadence
+                sync_interval=6,  # default 6 hours incremental cadence
+                sync_status="queued"  # Mark as queued for population
             )
             db.add(user_list)
             try:
@@ -277,41 +200,36 @@ async def create_smartlists(
                 except Exception:
                     pass
 
-            to_write = scored[:items_per_list]
-            for it in to_write:
-                li = ListItem(
-                    smartlist_id=user_list.id,
-                    item_id=str(it.get("trakt_id")),
-                    trakt_id=it.get("trakt_id"),
-                    media_type=it.get("media_type") or "movie",
-                    score=it.get("score", 0.0),
-                    explanation=it.get("explanation_text", "") or f"Recommended with score: {it.get('score', 0.0):.2f}"
-                )
-                db.add(li)
-            try:
-                db.commit()
-                logging.info(f"Successfully inserted {len(to_write)} items for smartlist {user_list.id}")
-            except Exception as e:
-                db.rollback()
-                db.close()
-                logging.error(f"Failed to insert list items: {e}\n{traceback.format_exc()}")
-                raise HTTPException(status_code=500, detail=f"Failed to insert list items: {e}")
+            # Queue async population task instead of synchronous item creation
+            from app.services.tasks import populate_new_list_async
+            task = populate_new_list_async.delay(
+                list_id=user_list.id,
+                user_id=user_id,
+                discovery=discovery or "balanced",
+                media_types=media_types or ["movies", "shows"],
+                items_per_list=items_per_list,
+                fusion_mode=fusion_mode,
+                list_type=list_type
+            )
             
-            # Sync items to Trakt list if it was created
-            if trakt_list_id and to_write:
-                try:
-                    trakt_client = TraktClient(user_id=user_id)
-                    sync_result = await trakt_client.add_items_to_list(str(trakt_list_id), to_write)
-                    added_count = sync_result.get("added", {}).get("movies", 0) + sync_result.get("added", {}).get("shows", 0)
-                    logging.info(f"Added {added_count} items to Trakt list {trakt_list_id}")
-                except Exception as e:
-                    logging.warning(f"Failed to sync items to Trakt list: {e}")
+            logging.info(f"Queued population task {task.id} for smartlist {user_list.id}")
+            
+            # Send notification that list is being populated
+            from app.api.notifications import send_notification
+            try:
+                await send_notification(user_id, f"Populating '{title}' with recommendations...", "info")
+            except Exception:
+                pass
+            
+            # Items will be synced to Trakt after population completes
+            # The populate task will handle Trakt sync
 
             results.append({
                 "id": user_list.id,
                 "title": user_list.title,
                 "description": "Mood and semantic-aware recommendations",
-                "items": to_write,
+                "status": "populating",
+                "task_id": task.id,
                 "config": {
                     "fusion_mode": fusion_mode,
                     "list_type": list_type,
@@ -320,17 +238,16 @@ async def create_smartlists(
                     "items_per_list": items_per_list
                 }
             })
-            # Notify on success
-            try:
-                from app.api.notifications import send_notification
-                await send_notification(user_id, f"SmartList '{user_list.title}' created with {len(to_write)} items.", "success")
-            except Exception:
-                pass
         finally:
             db.close()
 
     # TODO: If auto_refresh, schedule a periodic task (Celery Beat or similar)
-    return {"smartlists": results, "auto_refresh": auto_refresh, "interval": interval}
+    return {
+        "smartlists": results,
+        "auto_refresh": auto_refresh,
+        "interval": interval,
+        "message": f"Created {len(results)} list(s), populating in background"
+    }
 
 @router.post("/sync")
 async def sync_all_lists(
@@ -353,37 +270,79 @@ async def sync_all_lists(
 @router.post("/sync/{list_id}")
 async def sync_single_list(
     list_id: int,
-    force_full: bool = Body(False),
+    force_full: bool = Body(True),
     watched_only: bool = Body(False)
 ):
-    """Sync a specific list or just its watched status."""
+    """Trigger async sync of a specific list or just its watched status."""
     db = SessionLocal()
     try:
         user_list = db.query(UserList).filter(UserList.id == list_id).first()
         if not user_list:
             raise HTTPException(status_code=404, detail="List not found")
         
-        sync_service = ListSyncService(user_list.user_id)
+        # Queue the sync task
+        from app.services.tasks import sync_single_list_async
+        task = sync_single_list_async.delay(list_id, force_full, watched_only)
         
-        if watched_only:
-            result = await sync_service.sync_watched_status_only(list_id)
-            return {
-                "status": "success",
-                "message": f"Updated watched status for {result['updated']}/{result['total']} items",
-                "result": result
-            }
-        else:
-            result = await sync_service._sync_single_list(user_list, force_full=force_full)
-            return {
-                "status": "success",
-                "message": f"Synced list: {result['sync_type']} sync, {result['items_updated']} items updated",
-                "result": result
-            }
+        return {
+            "status": "queued",
+            "message": f"List sync queued for list {list_id}",
+            "task_id": task.id,
+            "list_id": list_id
+        }
     except Exception as e:
-        logging.error(f"Sync failed: {e}\n{traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Sync failed: {str(e)}")
+        logging.error(f"Failed to queue sync: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to queue sync: {str(e)}")
     finally:
         db.close()
+
+
+@router.get("/sync/{list_id}/status")
+async def get_sync_status(list_id: int):
+    """Get the current sync status for a list."""
+    try:
+        from app.core.redis_client import get_redis
+        import json
+        
+        redis = get_redis()
+        status_key = f"list_sync:{list_id}:status"
+        status_data = await redis.get(status_key)
+        
+        if not status_data:
+            return {
+                "status": "idle",
+                "list_id": list_id,
+                "message": "No sync in progress"
+            }
+        
+        return json.loads(status_data)
+    except Exception as e:
+        logging.error(f"Failed to get sync status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get sync status: {str(e)}")
+
+
+@router.get("/populate/{list_id}/status")
+async def get_populate_status(list_id: int):
+    """Get the current population status for a list."""
+    try:
+        from app.core.redis_client import get_redis
+        import json
+        
+        redis = get_redis()
+        status_key = f"list_populate:{list_id}:status"
+        status_data = await redis.get(status_key)
+        
+        if not status_data:
+            return {
+                "status": "idle",
+                "list_id": list_id,
+                "message": "No population in progress"
+            }
+        
+        return json.loads(status_data)
+    except Exception as e:
+        logging.error(f"Failed to get populate status: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get populate status: {str(e)}")
 
 @router.get("/sync/stats")
 async def get_sync_stats(

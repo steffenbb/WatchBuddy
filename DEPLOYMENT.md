@@ -1,3 +1,36 @@
+# Deployment and Versioning
+
+This repository supports:
+- Local development via docker-compose + docker-compose.override.yml
+- Remote builds via GitHub Actions that build and push images with version tags
+
+## Local (dev) usage
+- docker-compose.yml references prebuilt images (lsdking101/*:latest)
+- docker-compose.override.yml adds `build:` sections for backend, celery, celery-beat, and frontend so you can build locally without affecting server deploys.
+- Compose automatically uses the override file when you run `docker compose ...` locally.
+
+You do NOT need to include docker-compose.override.yml in any image build context. It’s ignored by .dockerignore to keep remote builds clean.
+
+## Remote (server) usage
+- Use docker-compose.yml on the server. It will pull images by tag from Docker Hub.
+- GitHub Actions publishes images tagged as:
+    - latest
+    - vYYYY.MM.DD.RUN
+    - short SHA
+
+Update your server stack by pulling the desired tag (e.g., `lsdking101/watchbuddy:v2025.10.15.123`).
+
+## Versioning
+- The workflow writes a VERSION file during builds.
+- Docker images are labeled with org.opencontainers.image.version and revision.
+- Backend and frontend Dockerfiles accept build args APP_VERSION and GIT_SHA.
+
+## Bumping versions
+- On pushes to main, the CI generates a date-based version and tags/pushes images.
+- If you push a tag `vX.Y.Z`, the CI uses that tag for the image versions.
+
+## Environment variables
+- Provide DOCKERHUB_USERNAME and DOCKERHUB_TOKEN as GitHub secrets for CI.
 Note: This document has moved.
 
 Please see docs/DEPLOYMENT.md for the latest deployment guide.

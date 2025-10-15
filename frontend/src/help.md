@@ -282,3 +282,20 @@ docker compose up -d backend
 ---
 
 _Happy Watching! 🍿_
+
+---
+
+## 🆕 What’s New (Oct 2025)
+
+- Persistent-only list syncs: Syncs now read exclusively from the internal database for speed and reliability.
+- Background ingestion workers: Run every 2 hours (~12 minutes) using TMDB Search (multi) to discover new titles; resolves Trakt IDs by TMDB ID when possible.
+- System Health widget: Shows Movie/TV ingestion worker status (Running/Completed/Error), last/next run times, and items processed.
+- Trakt list creation:
+	- Custom, Suggested, and Smart lists create a corresponding Trakt list at creation time (if authenticated)
+	- Initial items are pushed to Trakt during the first population task (within seconds of creation)
+
+If your Trakt list is missing or empty after creation:
+- Check Settings → Trakt, ensure you’re authenticated
+- Check System Health → Trakt API “Online”
+- Wait 10–60 seconds for initial population to push items; then refresh
+- Use “Sync” on the list to retry

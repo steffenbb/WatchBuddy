@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { apiGet } from '../api/client';
 
 interface BuildStatus {
-  status: 'not_started' | 'running' | 'complete' | 'error';
+  status: 'not_started' | 'running' | 'complete' | 'partial' | 'error';
   total: number;
   processed: number;
   progress_percent: number;
@@ -19,6 +19,42 @@ interface MetadataBuildProgressProps {
 export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ onComplete }) => {
   const [buildStatus, setBuildStatus] = useState<BuildStatus | null>(null);
   const [timeElapsed, setTimeElapsed] = useState<string>('0s');
+  const [isSkipping, setIsSkipping] = useState<boolean>(false);
+  const hasStartedBuild = useRef<boolean>(false);
+
+  const handleSkip = async () => {
+    if (!confirm('Skip metadata building? The app will continue to map IDs in the background.')) {
+      return;
+    }
+
+    setIsSkipping(true);
+    try {
+      await fetch('/api/metadata/skip', { method: 'POST' });
+      if (onComplete) {
+        onComplete();
+      }
+    } catch (error) {
+      console.error('Failed to skip metadata build:', error);
+      setIsSkipping(false);
+    }
+  };
+
+  const startBuildIfNeeded = async (status: BuildStatus) => {
+    // If status is not_started or if we're showing the screen but nothing is running
+    if ((status.status === 'not_started' || status.status === 'error') && !hasStartedBuild.current) {
+      try {
+        console.log('Starting metadata build task...');
+        await fetch('/api/metadata/build/start', { 
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ user_id: 1, force: false })
+        });
+        hasStartedBuild.current = true;
+      } catch (error) {
+        console.error('Failed to start metadata build:', error);
+      }
+    }
+  };
 
   useEffect(() => {
     let interval: number;
@@ -28,8 +64,11 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
         const status = await apiGet('/metadata/build/status') as BuildStatus;
         setBuildStatus(status);
         
-        // If complete, notify parent
-        if (status.status === 'complete' && onComplete) {
+        // Auto-start build if needed
+        await startBuildIfNeeded(status);
+        
+        // If complete or partial (finished but not all mapped), notify parent
+        if ((status.status === 'complete' || status.status === 'partial') && onComplete) {
           setTimeout(() => onComplete(), 2000); // Small delay to show 100%
         }
       } catch (error) {
@@ -80,8 +119,9 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
   }
 
   const progressPercent = buildStatus.progress_percent || 0;
-  const isComplete = buildStatus.status === 'complete';
+  const isComplete = buildStatus.status === 'complete' || buildStatus.status === 'partial';
   const hasError = buildStatus.status === 'error';
+  const isRunning = buildStatus.status === 'running';
 
   // Calculate estimated time remaining
   let estimatedRemaining = '';
@@ -139,7 +179,7 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
 
           {/* Title */}
           <h1 className="text-4xl md:text-5xl font-bold text-white text-center mb-4">
-            {isComplete ? 'Build Complete!' : hasError ? 'Build Error' : 'Building Metadata'}
+            {isComplete ? 'Build Complete!' : hasError ? 'Build Error' : buildStatus.status === 'not_started' ? 'Initializing...' : 'Building Metadata'}
           </h1>
 
           {/* Subtitle */}
@@ -148,6 +188,8 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
               ? 'Your movie and TV show database is ready!'
               : hasError
               ? 'Something went wrong during the build process'
+              : buildStatus.status === 'not_started'
+              ? 'Starting metadata enrichment task...'
               : 'Enriching your movie and TV show catalog with Trakt IDs...'}
           </p>
 
@@ -230,6 +272,21 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
                 </svg>
                 <span className="font-semibold">Redirecting to dashboard...</span>
               </div>
+            </div>
+          )}
+
+          {/* Skip Button */}
+          {isRunning && !isSkipping && (
+            <div className="mt-6 text-center">
+              <button
+                onClick={handleSkip}
+                className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl border border-white/30 transition-all duration-200 hover:scale-105"
+              >
+                Skip and Continue
+              </button>
+              <p className="mt-2 text-white/50 text-sm">
+                Background tasks will continue mapping Trakt IDs
+              </p>
             </div>
           )}
         </div>

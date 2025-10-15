@@ -11,6 +11,10 @@ RUN apt-get update && apt-get install -y build-essential gcc libpq-dev \
 
 FROM python:3.11-slim
 
+# Build-time metadata (can be overridden by CI)
+ARG APP_VERSION="dev"
+ARG GIT_SHA="unknown"
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
@@ -23,5 +27,14 @@ RUN mkdir -p /app/data
 # Copy TMDB datasets from project root
 COPY TMDB_movie_dataset_v11.csv /app/data/
 COPY TMDB_tv_dataset_v3.csv /app/data/
+
+# Expose build metadata as labels and env
+LABEL org.opencontainers.image.title="WatchBuddy Backend" \
+          org.opencontainers.image.version="$APP_VERSION" \
+          org.opencontainers.image.revision="$GIT_SHA" \
+          org.opencontainers.image.source="https://github.com/steffenbb/WatchBuddy"
+
+ENV APP_VERSION=$APP_VERSION \
+        GIT_SHA=$GIT_SHA
 
 CMD export POSTGRES_PASSWORD=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $POSTGRES_PASSWORD) && export APP_KEY=$(cat ${APP_KEY_FILE:-/dev/null} 2>/dev/null || echo $APP_KEY) && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
