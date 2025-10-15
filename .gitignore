@@ -58,6 +58,5 @@ desktop.ini
 *.log
 
 # Large CSV datasets (mount as volumes instead)
-# Uncomment if you don't want to commit the datasets
-# *.csv
-# TMDB_*.csv
+TMDB_movie_dataset_v11.csv
+TMDB_tv_dataset_v3.csv
