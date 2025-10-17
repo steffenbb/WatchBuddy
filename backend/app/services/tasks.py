@@ -36,7 +36,6 @@ from celery.exceptions import Retry
 from app.core.redis_client import get_redis
 from app.services.scoring_engine import ScoringEngine
 from app.services.mood import get_user_mood
-from app.api.notifications import send_notification as persistent_send_notification
 from app.core.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -96,7 +95,12 @@ async def send_toast_notification(user_id: int, message: str, notification_type:
     }
     await redis.publish(f"notifications:{user_id}", json.dumps(notification))
     # Also persist notification so it shows up in the log
-    await persistent_send_notification(user_id, message, notification_type)
+    try:
+        # Lazy import to avoid circular dependency at module import time
+        from app.api.notifications import send_notification as _persist_notify
+        await _persist_notify(user_id, message, notification_type)
+    except Exception as e:
+        logger.warning(f"Failed to persist notification: {e}")
 
 def format_sync_notification(list_title: str, trigger: str, updated: int = 0, removed: int = 0, total: int = 0) -> str:
     msg = f"Sync ({trigger}) for '{list_title}': "

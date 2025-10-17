@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "../hooks/useApi";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 
-export default function SmartListsPanel({ onCreate }: { onCreate?: () => void }) {
+export default function SmartListsPanel({ onCreate }: { onCreate?: ()=>void }){
   const { account, loading: accountLoading } = useTraktAccount();
   const [count, setCount] = React.useState<number>(1);
   const [interval, setInterval] = React.useState<number>(0); // in minutes
@@ -32,9 +32,7 @@ export default function SmartListsPanel({ onCreate }: { onCreate?: () => void })
     }catch{}
   }
 
-  React.useEffect(() => {
-    refreshListCount();
-  }, []);
+  React.useEffect(()=>{ refreshListCount(); }, []);
 
   async function createSmart(){
     setMessage(""); setMessageType(""); setIsLoading(true);
@@ -72,14 +70,12 @@ export default function SmartListsPanel({ onCreate }: { onCreate?: () => void })
     }
   }
 
-  const listTypeDescriptions: Record<string, string> = {
+  const listTypeDescriptions = {
     smartlist: "AI-powered recommendations using advanced scoring algorithms, mood analysis, and semantic understanding",
-    traditional: "Simple recommendations based on genre preferences and ratings - faster but less personalized",
     discovery: "Explore hidden gems and obscure content you might have missed",
     trending: "Currently popular content across the Trakt community"
   };
 
-  // Render Smart Lists panel
   return (
     <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-xl mx-auto p-6 md:p-8 flex flex-col gap-4 transition-all duration-500">
       <div className="flex items-center gap-3 mb-4">
@@ -88,15 +84,22 @@ export default function SmartListsPanel({ onCreate }: { onCreate?: () => void })
         </div>
         <h4 className="text-xl font-bold text-gray-800">Smart Lists</h4>
       </div>
+      
       {message && (
-        <div className={`mb-4 p-3 rounded-lg text-sm font-medium ${messageType === 'success' ? 'bg-green-100 text-green-800 border border-green-200' : 'bg-red-100 text-red-800 border border-red-200'}`}>
+        <div className={`mb-4 p-3 rounded-lg text-sm font-medium ${
+          messageType === "success" 
+            ? "bg-green-100 text-green-800 border border-green-200" 
+            : "bg-red-100 text-red-800 border border-red-200"
+        }`}>
           {message}
         </div>
       )}
+
+      {/* List Type Selection */}
       <div className="mb-6">
         <label className="block text-sm font-semibold text-gray-700 mb-2">List Type</label>
         <div className="space-y-3">
-          {Object.entries(listTypeDescriptions).map(([type, desc]) => (
+          {Object.entries(listTypeDescriptions).map(([type, description]) => (
             <div key={type} className="flex items-start gap-3">
               <input
                 type="radio"
@@ -109,9 +112,9 @@ export default function SmartListsPanel({ onCreate }: { onCreate?: () => void })
               />
               <div className="flex-1">
                 <label htmlFor={type} className="block text-sm font-medium text-gray-800 capitalize cursor-pointer">
-                  {type}
+                  {type.replace(/([A-Z])/g, ' $1').trim()}
                 </label>
-                <p className="text-xs text-gray-600 mt-1">{desc}</p>
+                <p className="text-xs text-gray-600 mt-1">{description}</p>
               </div>
             </div>
           ))}
@@ -232,24 +235,34 @@ export default function SmartListsPanel({ onCreate }: { onCreate?: () => void })
       <button
         onClick={createSmart}
         disabled={isLoading || accountLoading || !canCreateMoreLists}
-        className={`w-full py-3 px-4 rounded-lg font-semibold text-white transition-all duration-200 ${isLoading || accountLoading || !canCreateMoreLists ? 'bg-gray-400 cursor-not-allowed' : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-lg hover:shadow-xl transform hover:scale-[1.02] active:scale-[0.98]'}`}
+        className={`w-full py-3 px-4 rounded-lg font-semibold text-white transition-all duration-200 ${
+          (isLoading || accountLoading || !canCreateMoreLists)
+            ? "bg-gray-400 cursor-not-allowed"
+            : "bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 shadow-lg hover:shadow-xl transform hover:scale-[1.02] active:scale-[0.98]"
+        }`}
       >
         {isLoading ? (
           <div className="flex items-center justify-center gap-2">
             <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
             Generating...
           </div>
+        ) : (accountLoading ? (
+          <div className="flex items-center justify-center gap-2">
+            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+            Checking quota…
+          </div>
+        ) : (!canCreateMoreLists ? (
+          <span>Quota reached ({listCount}/{account?.max_lists ?? 0})</span>
         ) : (
-          canCreateMoreLists
-            ? `Generate ${count} Smart List${count > 1 ? 's' : ''}`
-            : `Quota reached (${listCount}/${account?.max_lists ?? 0})`
-        )}
+          <span>Generate {count} Smart List{count > 1 ? 's' : ''}</span>
+        )))}
       </button>
 
       {/* Help Text */}
       <div className="mt-4 p-3 bg-blue-50 rounded-lg border border-blue-100">
         <p className="text-xs text-blue-700">
-          <strong>Tip:</strong> Smart Lists learn from your viewing history and preferences. The more you watch and rate content, the better your recommendations become!
+          <strong>Tip:</strong> Smart Lists learn from your viewing history and preferences. 
+          The more you watch and rate content, the better your recommendations become!
         </p>
       </div>
     </div>

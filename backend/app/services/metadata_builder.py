@@ -107,6 +107,24 @@ class MetadataBuilder:
         from app.models import PersistentCandidate
         from sqlalchemy import func
         
+        # Check if a pause has been requested
+        try:
+            r_pause = get_redis()
+            paused = await r_pause.get("metadata_build:paused")
+            if paused:
+                await self.set_build_status({
+                    "status": "paused",
+                    "total": 0,
+                    "processed": 0,
+                    "progress_percent": 0,
+                    "started_at": datetime.utcnow().isoformat(),
+                    "errors": 0
+                })
+                logger.info("Metadata build is paused via Redis flag. Exiting early.")
+                return
+        except Exception:
+            pass
+
         # Check if already in progress and detect stale runs
         current_status = await self.get_build_status()
         if current_status["status"] == "running" and not force:
@@ -183,6 +201,23 @@ class MetadataBuilder:
             
             # Use pagination instead of loading all candidates
             while offset < candidates_count:
+                # Respect pause flag between batches
+                try:
+                    r_pause_loop = get_redis()
+                    if await r_pause_loop.get("metadata_build:paused"):
+                        await self.set_build_status({
+                            "status": "paused",
+                            "total": candidates_count,
+                            "processed": processed,
+                            "progress_percent": round((processed / candidates_count) * 100, 2) if candidates_count else 0,
+                            "started_at": current_status.get("started_at") or datetime.utcnow().isoformat(),
+                            "errors": errors
+                        })
+                        logger.info("Metadata build paused. Saving progress and exiting loop.")
+                        break
+                except Exception:
+                    pass
+
                 # Fetch batch from database
                 if not force:
                     batch = db.query(PersistentCandidate).filter(

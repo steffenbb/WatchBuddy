@@ -252,8 +252,12 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
     - Iterate across alphabet letters and pages using a Redis cursor (per media_type)
     - For each result (movie/tv): if not in DB by tmdb_id, attempt to resolve Trakt ID via TraktClient.search_by_tmdb_id
     - Insert minimal PersistentCandidate rows and compute scores
-    - Time-boxed to avoid blocking sync pipeline (default ~12 minutes)
+    - Time-boxed to avoid blocking sync pipeline (default 10 minutes)
     """
+
+    # Enforce 10 minute max duration
+    if duration_minutes is None or duration_minutes > 10:
+        duration_minutes = 10
     assert media_type in ('movies', 'shows')
     _update_worker_status(media_type, "running")
 
@@ -274,10 +278,15 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
     letters = [chr(c) for c in range(ord('a'), ord('z') + 1)]
     # Helper to advance cursor
     def advance_cursor(cur: dict):
+        prev_page = cur["page"]
+        prev_letter = cur["letter_index"]
         cur["page"] += 1
         if cur["page"] > 50:  # sane upper bound
             cur["page"] = 1
             cur["letter_index"] = (cur["letter_index"] + 1) % len(letters)
+            logger.debug(f"Cursor advanced to next letter: {letters[cur['letter_index']]} (from {letters[prev_letter]}), page reset to 1")
+        else:
+            logger.debug(f"Cursor advanced to page {cur['page']} (from {prev_page}) for letter {letters[cur['letter_index']]}")
         return cur
 
     try:
@@ -292,10 +301,11 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
             query = letters[cursor["letter_index"]]
             page = cursor["page"]
 
+            logger.debug(f"Fetching TMDB multi-search for query='{query}', page={page}, language={language}")
             data = await search_multi(query=query, page=page, language=language)
             results = (data or {}).get('results') or []
             if not results:
-                # Advance and continue
+                logger.debug(f"No results for query='{query}', page={page}. Advancing cursor.")
                 cursor = advance_cursor(cursor)
                 continue
 
@@ -309,10 +319,10 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
                 if not tmdb_id:
                     continue
                 desired_tmdb_items.append((tmdb_id, item))
-
-            if not desired_tmdb_items:
-                cursor = advance_cursor(cursor)
-                continue
+                if not desired_tmdb_items:
+                    logger.debug(f"No desired TMDB items for query='{query}', page={page}, type={tmdb_type}. Advancing cursor.")
+                    cursor = advance_cursor(cursor)
+                    continue
 
             # Dedup against DB in bulk
             tmdb_ids = [tid for tid, _ in desired_tmdb_items]
@@ -370,6 +380,7 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
                 db.bulk_save_objects(new_objs)
                 db.commit()
                 inserted += len(new_objs)
+                logger.info(f"Inserted {len(new_objs)} new candidates for query='{query}', page={page}, type={tmdb_type}")
                 _update_worker_status(media_type, "running", items_processed=inserted)
 
             # Advance cursor for next page

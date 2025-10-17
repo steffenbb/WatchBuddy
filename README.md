@@ -9,16 +9,75 @@ WatchBuddy is a smart recommendation system that syncs with your Trakt watch his
 ## ✨ Features
 
 ### 🎯 Smart Recommendations
-- **AI-Powered Scoring**: Multi-factor algorithm considers your watch history, mood preferences, and content freshness
-- **MMR Diversity Algorithm**: No more lists full of sequels - get varied, relevant recommendations
-- **Mood-Based Filtering**: Filters for Dark, Cozy, Intense, Quirky, and more
-- **Semantic Matching**: TF-IDF-based similarity to your favorite content
+- **1.4 Million+ Candidate Pool**: Instant recommendations from our massive pre-loaded database (~1.3M movies + 165K shows)
+- **Trakt History Integration**: Personalized scoring based on your actual watch history and ratings
+- **Multi-Factor Scoring**: Combines popularity, rating, votes, freshness, mood matching, and semantic similarity
+- **Discovery Modes**: Find mainstream hits, hidden gems, or a balanced mix based on your preferences
+- **Semantic Matching**: TF-IDF-based similarity finds content similar to your favorites
+- **Mood-Based Filtering**: Choose from Dark, Cozy, Intense, Quirky, Feel-Good and more
 
-### 📋 SmartLists
-- **Custom Lists**: Create lists with genre, year, language, and obscurity filters
+### 📋 SmartLists & List Types
+
+WatchBuddy offers six powerful list types to match different discovery needs:
+
+#### **Custom Lists**
+Manually curated lists where you have full control. Perfect for watchlists, collections, or sharing with friends.
+- Add/remove titles manually
+- Set custom filters and ordering
+- Optionally sync to Trakt
+
+#### **Suggested Lists**
+Pre-configured recommendation lists with optimized filters for popular use cases.
+- "Hidden Gems" - Highly rated but lesser-known titles
+- "Recent Blockbusters" - Mainstream hits from the last 2 years
+- "Cult Classics" - Beloved niche favorites
+- One-click setup with proven filter combinations
+
+#### **Mood Lists**
+Emotionally-driven recommendations that match your current feeling.
+- Select up to 3 moods (Dark, Cozy, Tense, Quirky, Feel-Good, etc.)
+- Mood vector scoring weights genres and themes appropriately
+- Perfect for "I want something dark and intense tonight"
+
+#### **Theme Lists**
+Curated around specific topics, settings, or concepts.
+- Time Travel, Space Exploration, Heist Movies, etc.
+- Combines genre filters with keyword matching
+- Semantic search finds thematically similar content
+
+#### **Fusion Lists**
+Blend multiple genres together for unique combinations.
+- "Rom-Com Thrillers" (Romance + Comedy + Thriller)
+- "Sci-Fi Horror" (Science Fiction + Horror)
+- Automatic genre weighting finds the best crossover titles
+
+#### **Chat Lists** ⭐ *Most Powerful*
+Natural language prompts powered by smart parsing - just describe what you want!
+
+**Examples:**
+- *"Cozy feel-good movies like The Hangover, prefer stuff after 2000, comedies with a bit of action"*
+- *"Dark psychological thrillers in Scandinavian languages"*
+- *"Hidden gem sci-fi films from the 80s and 90s"*
+
+**How Chat Lists Work:**
+1. **Smart Parsing**: Extracts genres, moods, years, languages, and reference titles from your text
+2. **Discovery Detection**: Recognizes "obscure", "popular", "mainstream", "under the radar" keywords
+3. **Semantic Anchoring**: Uses "like [movie]" or "similar to [show]" for TF-IDF similarity matching
+4. **Automatic Defaults**: Assumes English and mainstream content unless you specify otherwise
+5. **Flexible Genre Matching**: Allows broader matches while respecting your intent
+
+**Chat Features:**
+- Natural language understanding (no complex syntax needed)
+- Automatic mainstream bias for quality results
+- Smart defaults for missing parameters
+- Supports all filters: genre, mood, year, language, obscurity, media type
+- Semantic similarity to reference titles
+
+### Other SmartList Features
 - **Dynamic Titles**: Netflix-style personalized titles like "Fans of Inception Also Enjoyed"
 - **Watched Status Sync**: Automatically marks watched items from your Trakt history
 - **Trakt Integration**: Two-way sync with your Trakt lists
+- **Cooldown Management**: Smart sync timing prevents API rate limits
 
 ### 🌍 Content Discovery
 - **~1.47 Million Pre-Loaded Titles**: Instant recommendations from TMDB CSV datasets (~1.3M movies + 165K shows)
@@ -122,6 +181,87 @@ Notes:
     - Click "Create SmartList"
     - Set filters (genre, mood, year, language)
     - Watch your personalized recommendations appear!
+
+---
+
+## 🎯 How Recommendations Work
+
+### The Scoring System
+
+WatchBuddy uses a sophisticated multi-factor scoring algorithm to rank candidates. Every title gets a score from 0.0 to 1.0 based on:
+
+#### **Base Quality Metrics** (40-50% weight)
+- **TMDB Rating** (vote_average): Normalized 0-10 scale → 0-1
+- **Vote Count**: More votes = more reliable rating (logarithmic scaling)
+- **Popularity**: TMDB popularity score indicates current interest
+
+#### **Discovery Mode** (20-30% weight)
+Different modes adjust how popularity affects scoring:
+- **Mainstream/Popular**: Boosts high mainstream_score (popularity + votes + rating)
+- **Obscure/Hidden Gems**: Boosts high obscurity_score (high rating, low popularity)
+- **Balanced**: Equal weight to both mainstream and obscure content
+- **Ultra Discovery**: Aggressive exploration of lesser-known titles
+
+#### **Freshness Bonus** (5-15% weight)
+Recent releases get a boost:
+- Content <1 year old: +15% bonus
+- Content 1-2 years old: +10% bonus
+- Content 2-3 years old: +5% bonus
+- Older content: No bonus
+
+#### **Mood Matching** (10-20% weight for mood lists)
+Mood vectors map to genres and themes:
+- "Dark" → boosts Thriller, Horror, Crime
+- "Cozy" → boosts Comedy, Romance, Family
+- "Intense" → boosts Action, Thriller, War
+- Multiple moods blend together with configurable weights
+
+#### **Semantic Similarity** (20-55% weight when anchor set)
+For "like [movie]" queries:
+- TF-IDF vectorization of title, overview, and genres
+- Cosine similarity between anchor and candidate
+- Higher weight (55%) for chat lists to prioritize good matches
+- Lower weight (50%) for other lists to balance with other factors
+
+#### **Trakt History Integration** (Dynamic)
+- **Watched Penalty**: Already-watched items scored lower (or excluded entirely)
+- **Rating Alignment**: Your Trakt ratings influence similar content scoring (future feature)
+- **Genre Preference**: Your watch history informs genre weighting (future feature)
+
+#### **Post-Processing Adjustments**
+- **Animation/Family Penalty**: -8-10% when not explicitly requested (reduces kid content noise)
+- **English Boost**: +5% for English content when language not specified (mainstream bias)
+- **Duplicate Filtering**: Removes duplicates and recently shown items
+
+### Score Calculation Example
+
+For a candidate like "21 Jump Street" (2012):
+```python
+Base Score = 0.7  # Good rating (7.1/10), 5000+ votes, decent popularity
+
+Discovery Adjustment:
+  - Mainstream mode: +0.1 (high mainstream_score = 180)
+  
+Freshness:
+  - Released 2012: 0.0 (>3 years old)
+
+Semantic Similarity (if "like The Hangover"):
+  - TF-IDF similarity: 0.65
+  - Weight: 0.55 (chat list)
+  - Contribution: 0.55 * 0.65 = 0.36
+
+English Boost:
+  - +0.05 (English content, no language filter)
+
+Final Score = (0.45 * 0.7) + (0.55 * 0.65) + 0.05 = 0.73
+```
+
+This balanced approach ensures:
+✅ Quality content rises to the top
+✅ Discovery preferences are respected
+✅ Semantic matches are prioritized for "like X" queries
+✅ Fresh content gets visibility
+✅ Your watch history keeps recommendations relevant
 
 ---
 

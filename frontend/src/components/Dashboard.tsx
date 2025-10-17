@@ -4,7 +4,7 @@ import { formatRelativeTime, formatLocalDate } from "../utils/date";
 import CreateListForm from "./CreateListForm";
 import ListDetails from "./ListDetails";
 import SuggestedLists from "./SuggestedLists";
-import SmartListsPanel from "./SmartListsPanel";
+import DynamicDashboard from "./DynamicDashboard";
 import Settings from "./Settings";
 
 import { StatusWidgets } from "./StatusWidgets";
@@ -36,7 +36,7 @@ const updateUrl = (view: string, listId?: number) => {
 export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNavigateHome?: (callback: () => void) => void }){
   const { account, loading: accountLoading } = useTraktAccount();
   const [lists, setLists] = useState<any[]>([]);
-  const [view, setView] = useState<"lists"|"create"|"suggested"|"settings"|"listDetails">("lists");
+  const [view, setView] = useState<"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic">("lists");
   const [selectedList, setSelectedList] = useState<{id:number; title:string}|null>(null);
   const [editingId, setEditingId] = useState<number|null>(null);
   const [savingId, setSavingId] = useState<number|null>(null);
@@ -77,7 +77,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   }, [lists]);
 
   // Helper function to change view and update URL
-  const changeView = (newView: "lists"|"create"|"suggested"|"settings"|"listDetails", listId?: number, listTitle?: string) => {
+  const changeView = (newView: "lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic", listId?: number, listTitle?: string) => {
     setView(newView);
     if (newView === 'listDetails' && listId && listTitle) {
       setSelectedList({ id: listId, title: listTitle });
@@ -118,7 +118,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
     <div className="w-full max-w-[1800px] mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8 px-2 md:px-8">
       <div className="lg:col-span-2 bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100 flex flex-col py-8">
         {/* Mobile-optimized navigation */}
-        <div className="grid grid-cols-4 gap-2 mb-4 md:flex md:gap-2">
+        <div className="grid grid-cols-5 gap-2 mb-4 md:flex md:gap-2">
           <button 
             className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
               view === "lists" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
@@ -134,6 +134,14 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
             onClick={()=>changeView("create")}
           >
             Create
+          </button>
+          <button 
+            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
+              view === "dynamic" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+            }`} 
+            onClick={()=>changeView("dynamic")}
+          >
+            Dynamic
           </button>
           <button 
             className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
@@ -276,13 +284,13 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
         )}
 
         {view === "create" && (
-          <>
-            <CreateListForm onCreated={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
-            <div className="mt-6">
-              <SmartListsPanel onCreate={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
-            </div>
-          </>
+          <CreateListForm onCreated={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
         )}
+
+        {view === "dynamic" && (
+          <DynamicDashboard />
+        )}
+
         {view === "suggested" && <SuggestedLists onCreate={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />}
         {view === "settings" && <Settings />}
       </div>

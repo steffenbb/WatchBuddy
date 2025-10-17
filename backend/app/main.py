@@ -1,11 +1,17 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db
-from app.api import lists, smartlists, settings, status, trakt_auth, suggested, ratings, metadata
+
+from app.api import lists, smartlists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists
+from app.api.chat_prompt import router as chat_prompt_router
+from app.api.available_genres_languages import router as genres_languages_router
 from app.api.recommendations import router as recommendations_router
 from app.api.notifications import router as notifications_router
+from app.api.metadata_options import router as metadata_options_router
+
 
 app = FastAPI(title="WatchBuddy API", version="1.0.0")
+app.include_router(chat_prompt_router, prefix="/api", tags=["Chat Prompt"])
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,16 +21,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+
+app.include_router(genres_languages_router, prefix="/api", tags=["Genres & Languages"])
+app.include_router(metadata_options_router, prefix="/api/metadata", tags=["Metadata Options"])
+
+# Core API routers
 app.include_router(lists.router, prefix="/api/lists", tags=["Lists"])
 app.include_router(smartlists.router, prefix="/api/smartlists", tags=["SmartLists"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(status.router, prefix="/api/status", tags=["Status"])
-app.include_router(trakt_auth.router, prefix="/api/trakt", tags=["Trakt Auth"])
-app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
-app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
-app.include_router(suggested.router, prefix="/api/suggested", tags=["Suggested Lists"])
+app.include_router(trakt_auth.router, prefix="/api/trakt", tags=["Trakt"])
+app.include_router(suggested.router, prefix="/api/suggested", tags=["Suggested"])
 app.include_router(ratings.router, prefix="/api/ratings", tags=["Ratings"])
 app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
+app.include_router(chatlists.router, prefix="/api/chatlists", tags=["Chat Lists"])
+
+# Optional: Recommendations and Notifications if present
+app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
+app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
 
 
 @app.on_event("startup")

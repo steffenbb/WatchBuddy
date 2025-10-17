@@ -483,10 +483,9 @@ class BulkCandidateProvider:
                         return all(r in have for r in required_genres)
                     return any(r in have for r in required_genres)
 
-                # First pass: moderate fetch cap, early-exit once enough matches
-                fetch_cap = min(max(limit * 3, limit), 6000)
+                # First pass: fetch all matching candidates from persistent DB (no artificial cap)
                 stored_candidates = []
-                rows = q.limit(fetch_cap).all()
+                rows = q.all()
                 for row in rows:
                     try:
                         # Robustly parse genres JSON (can be malformed or non-list)
@@ -504,6 +503,12 @@ class BulkCandidateProvider:
                             continue
                         # STRICT: skip if title is missing/null/empty
                         if not row.title or not isinstance(row.title, str) or not row.title.strip():
+                            continue
+                        # QUALITY FILTER: Skip items with very low mainstream_score or few votes (poor quality/unreliable data)
+                        # Minimum thresholds: 50 votes and mainstream_score > 50 to ensure decent quality
+                        if row.mainstream_score is None or row.mainstream_score < 50:
+                            continue
+                        if row.vote_count is None or row.vote_count < 50:
                             continue
                         # Exclude items in exclude_ids
                         cid = row.trakt_id or row.tmdb_id or row.id
@@ -538,10 +543,6 @@ class BulkCandidateProvider:
                             '_from_persistent_store': True
                         }
                         stored_candidates.append(item)
-                        # Short-circuit as soon as we have enough to fulfill the request
-                        if len(stored_candidates) >= limit:
-                            logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (pre-limit {limit})")
-                            return stored_candidates[:limit]
                     except Exception as row_err:
                         # Skip bad rows rather than failing the entire request
                         logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
@@ -553,6 +554,9 @@ class BulkCandidateProvider:
                         PersistentCandidate.media_type == ("movie" if media_type == "movies" else "show"),
                         (PersistentCandidate.is_adult == False)
                     )
+                    # Apply exclude_ids filter to second pass as well for diversity
+                    if exclude_ids:
+                        q2 = q2.filter(~PersistentCandidate.trakt_id.in_(exclude_ids))
                     if languages:
                         # Keep language filter strict - no automatic broadening
                         q2 = q2.filter(PersistentCandidate.language.in_([l.lower() for l in languages]))
@@ -567,7 +571,8 @@ class BulkCandidateProvider:
                     else:
                         from sqlalchemy import desc
                         q2 = q2.order_by(desc(PersistentCandidate.freshness_score), desc(PersistentCandidate.mainstream_score))
-                    rows2 = q2.limit(min(limit * 6, 8000)).all()
+                    # Second pass: fetch all matching candidates (no cap)
+                    rows2 = q2.all()
                     for row in rows2:
                         try:
                             parsed_genres = []
@@ -608,19 +613,13 @@ class BulkCandidateProvider:
                                 '_from_persistent_store': True
                             }
                             stored_candidates.append(item)
-                            if len(stored_candidates) >= limit:
-                                return stored_candidates[:limit]
                         except Exception:
                             continue
                 if stored_candidates:
                     logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
-                    # If we have enough from persistent store, return them
-                    if len(stored_candidates) >= limit:
-                        logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (sufficient)")
-                        return stored_candidates[:limit]
-                    else:
-                        logger.info(f"Persistent store has {len(stored_candidates)}/{limit} candidates, will supplement with TMDB discovery")
-                        # DON'T return early - continue to TMDB discovery to fill the gap
+                    # Return all matching candidates for scoring engine to rank
+                    logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (all matches)")
+                    return stored_candidates
             except Exception as e_pc:
                 logger.debug(f"PersistentCandidate sourcing failed or not available: {e_pc}")
                 stored_candidates = []  # Ensure it's defined for later merge

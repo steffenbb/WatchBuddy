@@ -62,8 +62,12 @@ async def init_db():
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS sync_status varchar(20) DEFAULT 'pending'",
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS sync_watched_status boolean DEFAULT true",
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS exclude_watched boolean DEFAULT false",
+            "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS list_type varchar(50) NOT NULL DEFAULT 'smartlist'",
+            "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS persistent_id integer NULL",
+            "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS dynamic_theme varchar(255) NULL",
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS trakt_list_id varchar(255) NULL",
             "CREATE INDEX IF NOT EXISTS idx_user_lists_trakt_list_id ON user_lists (trakt_list_id)",
+            "CREATE INDEX IF NOT EXISTS ix_userlist_type_pid ON user_lists (user_id, list_type, persistent_id)",
             # persistent_candidates index / columns (table created by create_all)
             "CREATE INDEX IF NOT EXISTS idx_persistent_candidates_media_type ON persistent_candidates (media_type)",
             "CREATE INDEX IF NOT EXISTS idx_persistent_candidates_language ON persistent_candidates (language)",

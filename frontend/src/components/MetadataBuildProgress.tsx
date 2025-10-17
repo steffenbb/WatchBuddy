@@ -275,26 +275,29 @@ export const MetadataBuildProgress: React.FC<MetadataBuildProgressProps> = ({ on
             </div>
           )}
 
-          {/* Skip Button */}
+          {/* Skip Button with Enhanced Disclaimer */}
           {isRunning && !isSkipping && (
             <div className="mt-6 text-center">
               <button
                 onClick={handleSkip}
-                className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl border border-white/30 transition-all duration-200 hover:scale-105"
+                className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl border border-white/30 transition-all duration-200 hover:scale-105 font-semibold"
               >
-                Skip and Continue
+                Skip and Continue to App
               </button>
-              <p className="mt-2 text-white/50 text-sm">
-                Background tasks will continue mapping Trakt IDs
-              </p>
+              <div className="mt-4 bg-yellow-500/10 border border-yellow-500/30 rounded-xl p-4 max-w-md mx-auto">
+                <p className="text-yellow-200 text-sm font-medium mb-2">⚠️ Note: App may run slower initially</p>
+                <p className="text-white/60 text-xs">
+                  Skipping will allow you to use the app now, but recommendations and syncing may be slower until all items are enriched in the background. This process can take 30-60 minutes depending on your database size.
+                </p>
+              </div>
             </div>
           )}
         </div>
 
-        {/* Info Footer */}
-        <div className="mt-6 text-center text-white/50 text-sm">
-          <p>This process enriches your catalog with Trakt IDs for accurate watch tracking.</p>
-          <p className="mt-2">You can safely close this window - the build will continue in the background.</p>
+        {/* Info Footer with Performance Note */}
+        <div className="mt-6 text-center text-white/50 text-sm space-y-2">
+          <p>This process enriches your catalog with Trakt IDs for accurate watch tracking and faster syncing.</p>
+          <p>Recommended: Let it complete for optimal performance. You can safely close this window - the build will continue in the background.</p>
         </div>
       </div>
     </div>

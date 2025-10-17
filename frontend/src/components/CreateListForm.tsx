@@ -2,14 +2,19 @@ import React, { useEffect, useMemo, useState } from "react";
 import { api } from "../hooks/useApi";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 
-const ALL_GENRES = ["action","comedy","drama","sci-fi","romance","mystery","thriller","documentary"];
+
+// Dynamic genres/languages from backend
+const DEFAULT_GENRES = ["action","comedy","drama","sci-fi","romance","mystery","thriller","documentary"];
+const DEFAULT_LANGUAGES = ["en","da","es","fr","de","it","ja","ko","zh"];
 
 export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
+  const [availableGenres, setAvailableGenres] = useState<string[]>(DEFAULT_GENRES);
+  const [availableLanguages, setAvailableLanguages] = useState<string[]>(DEFAULT_LANGUAGES);
   const { account, loading: accountLoading } = useTraktAccount();
   const [listCount, setListCount] = useState<number>(0);
 
   const [title, setTitle] = useState<string>("");
-  const [genres, setGenres] = useState<string[]>(ALL_GENRES.slice());
+  const [genres, setGenres] = useState<string[]>(DEFAULT_GENRES.slice());
   const [itemLimit, setItemLimit] = useState<number>(30);
   const [genreMode, setGenreMode] = useState<'any'|'all'>('any');
   const [obscurity, setObscurity] = useState<string[]>([]); // ["very_obscure", "less_obscure", "neutral", "popular"]
@@ -71,6 +76,46 @@ export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
   }
 
   useEffect(()=>{ refreshListCount(); }, []);
+  useEffect(()=>{
+      // Fetch genres and languages from metadata API
+      Promise.all([
+        api.get('/metadata/options/genres'),
+        api.get('/metadata/options/languages')
+      ]).then(([genresRes, languagesRes]) => {
+        if (genresRes.data?.genres) {
+          const fetchedGenres: string[] = genresRes.data.genres;
+          setAvailableGenres(fetchedGenres);
+          // Normalize any existing selected genres to the fetched canonical set
+          setGenres((prev) => {
+            const map: Record<string, string> = {
+              'sci-fi': 'Science Fiction',
+              'scifi': 'Science Fiction',
+              'science fiction': 'Science Fiction',
+              'action': 'Action',
+              'comedy': 'Comedy',
+              'drama': 'Drama',
+              'romance': 'Romance',
+              'mystery': 'Mystery',
+              'thriller': 'Thriller',
+              'documentary': 'Documentary',
+            };
+            const normalized = prev.map((g) => map[g.toLowerCase()] || g);
+            const intersected = normalized.filter((g) => fetchedGenres.includes(g));
+            // If intersection becomes empty, keep it empty and let validation guide user
+            return intersected;
+          });
+        }
+        if (languagesRes.data?.languages) {
+          // Extract just the language codes
+          const langCodes = languagesRes.data.languages.map((l: any) => l.code);
+          setAvailableLanguages(langCodes);
+        }
+      }).catch((err) => {
+        console.warn('Failed to fetch metadata options, using defaults:', err);
+      setAvailableGenres(DEFAULT_GENRES);
+      setAvailableLanguages(DEFAULT_LANGUAGES);
+    });
+  }, []);
 
   async function submit(){
     setMessage(""); setMessageType("");
@@ -104,7 +149,7 @@ export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
         try{ await api.post(`/lists/${newId}/sync?user_id=1&force_full=true`); }catch{}
       }
       await refreshListCount();
-      setTitle(""); setGenres(ALL_GENRES.slice());
+  setTitle(""); setGenres(DEFAULT_GENRES.slice());
       setObscurity([]); setLanguages([]); setYearFrom(2000); setYearTo(new Date().getFullYear());
       setWatchedStatus("exclude_watched"); setNotWatchedDays(90); setMediaType(["movies", "shows"]);
       if(onCreated) onCreated();
@@ -146,7 +191,7 @@ export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
       {errorTitle && <div className="text-xs text-red-600 mb-2">{errorTitle}</div>}
       <div className="mb-2 text-sm font-semibold text-gray-700">Genres</div>
       <div className="flex flex-wrap gap-2 mb-1">
-        {ALL_GENRES.map(g => (
+        {availableGenres.map(g => (
           <button key={g} onClick={()=>toggleGenre(g)} className={`px-3 py-1.5 rounded-lg text-sm border transition ${genres.includes(g) ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>{g}</button>
         ))}
       </div>
@@ -170,7 +215,7 @@ export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
       <div className="text-xs text-gray-500 mb-4">Tip: Obscurity controls discovery (popular ↔ obscure) and is separate from your mood profile.</div>
       <div className="mb-2 text-sm font-semibold text-gray-700">Languages</div>
       <div className="flex flex-wrap gap-2 mb-4">
-        {["en","da","es","fr","de","it","ja","ko","zh"].map(l => (
+        {availableLanguages.map(l => (
           <button key={l} onClick={()=>toggleLanguage(l)} className={`px-3 py-1.5 rounded-lg text-sm border transition ${languages.includes(l) ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>{l}</button>
         ))}
       </div>

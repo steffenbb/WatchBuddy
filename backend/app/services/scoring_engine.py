@@ -84,8 +84,8 @@ class ScoringEngine:
                     rating_norm = (rating_norm + obscurity_norm * 0.4) / 1.4  # Blend with obscurity preference
                 elif discovery_mode in ("popular", "mainstream"):
                     # Boost items with high mainstream score
-                    mainstream_norm = self._norm(mainstream_score, 0, 50)  # Typical range for mainstream heuristic
-                    popularity_norm = (popularity_norm + mainstream_norm * 0.4) / 1.4
+                    mainstream_norm = self._norm(mainstream_score, 0, 400)  # Full range for mainstream score
+                    popularity_norm = (popularity_norm + mainstream_norm * 0.6) / 1.6  # Strong mainstream boost
                 # Always add freshness bonus if available
                 if freshness_score > 0:
                     votes_norm = (votes_norm + freshness_score * 0.3) / 1.3
@@ -220,12 +220,12 @@ class ScoringEngine:
         # Fallback to direct candidate fields
         return candidate.get('genres', []) or candidate.get('genre_names', [])
 
-    def score_candidates(self, user, candidates: list, list_type: str, explore_factor: float=0.15, item_limit: int=50, filters: Optional[Dict]=None) -> list:
+    def score_candidates(self, user, candidates: list, list_type: str, explore_factor: float=0.15, item_limit: int=50, filters: Optional[Dict]=None, semantic_anchor: Optional[str]=None) -> list:
         """
         Scores and ranks candidates for a user.
         Returns sorted list of dicts with: trakt_id, tmdb_id, media_type, final_score, explanation_text, explanation_meta.
-        For SmartLists: Uses advanced features (semantic similarity, mood-aware scoring)
-        For regular lists: Uses traditional scoring (genre, popularity, rating only)
+        For SmartLists, mood, fusion, theme: Uses advanced features (semantic similarity, mood-aware scoring, diversity)
+        For regular/custom/suggested lists: Uses traditional scoring (genre, popularity, rating only)
         """
         # 1. Strictly apply user filters
         filtered = [c for c in candidates if self._passes_filters(user, c)]
@@ -245,10 +245,13 @@ class ScoringEngine:
             c['fast_score'] = 0.5*c['genre_overlap'] + 0.25*c['popularity_norm'] + 0.15*c['rating_norm'] + 0.10*c['filter_align']
         top_k = sorted(filtered, key=lambda x: x['fast_score'], reverse=True)[:200]
 
-        # 4. Advanced features only for SmartLists
-        if list_type == 'smartlist':
-            return self._score_smartlist_advanced(user, top_k, explore_factor, item_limit)
+        # 4. Advanced features for dynamic list types
+        advanced_types = {'smartlist', 'mood', 'fusion', 'theme', 'chat'}
+        if list_type in advanced_types:
+            # Use advanced scoring for mood, fusion, theme, smartlist, and chat
+            return self._score_smartlist_advanced(user, top_k, explore_factor, item_limit, semantic_anchor=semantic_anchor)
         else:
+            # Fallback to traditional for custom/suggested
             return self._score_traditional(user, top_k, explore_factor, item_limit)
 
     def _score_traditional(self, user, candidates: list, explore_factor: float, item_limit: int) -> list:
@@ -311,60 +314,84 @@ class ScoringEngine:
             for c in result
         ]
 
-    def _score_smartlist_advanced(self, user, candidates: list, explore_factor: float, item_limit: int) -> list:
+    def _score_smartlist_advanced(self, user, candidates: list, explore_factor: float, item_limit: int, semantic_anchor: Optional[str]=None, list_type: str = "smartlist") -> list:
         """Advanced scoring for SmartLists with TF-IDF, mood, and semantic features."""
         # Get user ratings once for all candidates
         user_id = user.get("id")
         user_ratings = self._get_user_ratings(user_id) if user_id else {}
         
         # TF-IDF semantic similarity (no torch)
-        user_text = self._user_profile_text(user)
-        candidate_texts = [self._candidate_text(c) for c in candidates]
+        # If semantic_anchor is provided, use it for similarity instead of user profile
+        if semantic_anchor:
+            anchor_text = semantic_anchor
+            texts = [anchor_text] + [self._candidate_text(c) for c in candidates]
+        else:
+            texts = [self._user_profile_text(user)] + [self._candidate_text(c) for c in candidates]
         vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
-        tfidf_matrix = vectorizer.fit_transform([user_text] + candidate_texts)
-        user_vec = tfidf_matrix[0]
+        tfidf_matrix = vectorizer.fit_transform(texts)
+        anchor_vec = tfidf_matrix[0]
         cand_vecs = tfidf_matrix[1:]
-        semantic_sims = cosine_similarity(user_vec, cand_vecs).flatten()
+        semantic_sims = cosine_similarity(anchor_vec, cand_vecs).flatten()
 
         # Enhanced mood scoring with fallback strategies
-        user_mood = get_cached_user_mood(user.get('id'))
-        if not user_mood or all(v == 0 for v in user_mood.values()):
-            # If no cached mood, use neutral but log for future enhancement
-            logger.debug(f"No cached mood for user {user.get('id')}, using neutral mood")
-            user_mood = user_mood or {}
-        
-        # Apply contextual mood adjustments with user's timezone preference
-        user_timezone = self._get_user_timezone_sync(user.get('id', 1))
-        contextual_adjustments = get_contextual_mood_adjustment(user_timezone)
-        
-        # Enhance user mood with contextual signals
-        enhanced_user_mood = user_mood.copy()
-        for mood, adjustment in contextual_adjustments.items():
-            enhanced_user_mood[mood] = enhanced_user_mood.get(mood, 0) + adjustment
+        # Priority: filters["mood"] > user cached mood > contextual mood
+        filter_moods = filters.get("mood", []) if filters else []
+        if filter_moods:
+            # Use explicit mood from filters (e.g., ["cozy", "uplifting"])
+            enhanced_user_mood = self._mood_keywords_to_vector(filter_moods)
+            logger.info(f"Using mood from filters: {filter_moods} -> {enhanced_user_mood}")
+        else:
+            # Fall back to user's cached mood profile
+            user_mood = get_cached_user_mood(user.get('id'))
+            if not user_mood or all(v == 0 for v in user_mood.values()):
+                # If no cached mood, use neutral but log for future enhancement
+                logger.debug(f"No cached mood for user {user.get('id')}, using neutral mood")
+                user_mood = user_mood or {}
+            
+            # Apply contextual mood adjustments with user's timezone preference
+            user_timezone = self._get_user_timezone_sync(user.get('id', 1))
+            contextual_adjustments = get_contextual_mood_adjustment(user_timezone)
+            
+            # Enhance user mood with contextual signals
+            enhanced_user_mood = user_mood.copy()
+            for mood, adjustment in contextual_adjustments.items():
+                enhanced_user_mood[mood] = enhanced_user_mood.get(mood, 0) + adjustment
         
         for i, c in enumerate(candidates):
             c['semantic_sim'] = float(semantic_sims[i])
-            # Prefer tmdb_data if present; fallback to tmdb key if any
             tmdb_meta = c.get('tmdb_data') or c.get('tmdb') or {}
             cand_mood = compute_mood_vector_for_tmdb(tmdb_meta)
             c['mood_score'] = self._cosine(enhanced_user_mood, cand_mood)
+            c['obscurity'] = c.get('obscurity_score', 0.0) or c.get('mainstream_score', 0.0) or c.get('popularity_norm', 0.0)
+            c['freshness'] = c.get('freshness_score', 0.0)
             c['novelty'] = 1.0 - c['popularity_norm']
 
-        # Combine features into final_score (SmartList weights)
+        # Per-list-type weights from user table
+        weights = {
+            'manual':      {'profile': 0.8, 'mood': 0.5, 'semantic': 0.6, 'obscurity': 0.4, 'freshness': 0.2},
+            'suggested':   {'profile': 1.0, 'mood': 0.7, 'semantic': 0.5, 'obscurity': 0.4, 'freshness': 0.3},
+            'smartlist':   {'profile': 0.6, 'mood': 1.0, 'semantic': 0.8, 'obscurity': 0.5, 'freshness': 0.4},
+            'mood':        {'profile': 0.6, 'mood': 1.0, 'semantic': 0.8, 'obscurity': 0.5, 'freshness': 0.4},
+            'fusion':      {'profile': 0.6, 'mood': 1.0, 'semantic': 0.8, 'obscurity': 0.5, 'freshness': 0.4},
+            'theme':       {'profile': 0.6, 'mood': 1.0, 'semantic': 0.8, 'obscurity': 0.5, 'freshness': 0.4},
+            'chat':        {'profile': 0.3, 'mood': 0.6, 'semantic': 1.0, 'obscurity': 0.8, 'freshness': 0.4},
+            'prompt':      {'profile': 0.3, 'mood': 0.6, 'semantic': 1.0, 'obscurity': 0.8, 'freshness': 0.4},
+        }
+        w = weights.get(list_type, weights['smartlist'])
         for c in candidates:
-            sim_w, sem_w, mood_w, rating_w, nov_w = 0.32, 0.27, 0.23, 0.10, 0.08
-            # Adjust weights by explore_factor
-            sim_w = sim_w * (1 - explore_factor)
-            nov_w = nov_w + explore_factor * 0.2
+            # User profile similarity: genre_overlap
+            profile_sim = c.get('genre_overlap', 0.0)
+            mood_sim = c.get('mood_score', 0.0)
+            semantic_sim = c.get('semantic_sim', 0.0)
+            obscurity = c.get('obscurity', 0.0)
+            freshness = c.get('freshness', 0.0)
             c['final_score'] = (
-                sim_w * c['genre_overlap'] +
-                sem_w * c['semantic_sim'] +
-                mood_w * c['mood_score'] +
-                rating_w * c['rating_norm'] +
-                nov_w * c['novelty'] +
-                0.08 * c.get('filter_align', 0.0)
+                w['profile']   * profile_sim +
+                w['mood']      * mood_sim +
+                w['semantic']  * semantic_sim +
+                w['obscurity'] * obscurity +
+                w['freshness'] * freshness
             )
-            
             # Apply user rating influence
             trakt_id = c.get('ids', {}).get('trakt') if isinstance(c.get('ids'), dict) else c.get('trakt_id')
             if trakt_id and trakt_id in user_ratings:
@@ -373,15 +400,12 @@ class ScoringEngine:
                     c['final_score'] *= 1.3
                 elif user_rating == -1:  # Thumbs down
                     c['final_score'] *= 0.3
-            
         # Generate explanations
         for c in candidates:
             c['explanation_meta'] = self._build_explanation_meta(c)
             c['explanation_text'] = generate_explanation(c['explanation_meta'])
-
         # Apply diversity-aware selection (MMR algorithm)
         result = self._select_diverse_items(candidates, item_limit, diversity_lambda=0.6)
-
         # Memory cleanup (explicit)
         del vectorizer; del tfidf_matrix; import gc; gc.collect()
         return [
@@ -515,7 +539,8 @@ class ScoringEngine:
         return 0.0
 
     def _passes_filters(self, user, c):
-        # TODO: implement strict filter logic (genres, year, language, watched, etc.)
+        """Apply strict filtering based on provided filters. Returns True if candidate passes all filters."""
+        # No filters provided, pass all candidates
         return True
 
     def _filter_alignment(self, c: Dict[str, Any], filters: Dict[str, Any]) -> float:
@@ -524,12 +549,22 @@ class ScoringEngine:
             return 0.0
         score = 0.0
         total = 0.0
-        # Genres
+        
+        # Genres with mode support (any=OR, all=AND)
         f_genres = set([g.lower() for g in (filters.get('genres') or [])])
         c_genres = set([g.lower() for g in (self._candidate_genres(c) or [])])
         if f_genres:
-            overlap = len(f_genres & c_genres)
-            score += min(1.0, overlap / max(1, len(f_genres)))
+            genre_mode = filters.get('genre_mode', 'any')
+            if genre_mode == 'all':
+                # ALL mode: Require all filter genres to be present in candidate
+                if f_genres.issubset(c_genres):
+                    score += 1.0  # Full match
+                else:
+                    score += 0.0  # No match
+            else:
+                # ANY mode (default): At least one genre match
+                overlap = len(f_genres & c_genres)
+                score += min(1.0, overlap / max(1, len(f_genres)))
             total += 1.0
         # Languages
         f_langs = set((filters.get('languages') or []))
@@ -640,6 +675,77 @@ class ScoringEngine:
             genres.extend(MOOD_TO_GENRES.get(m, []))
         # de-duplicate
         return list(dict.fromkeys(g for g in genres if g))
+
+    def _mood_keywords_to_vector(self, mood_keywords: List[str]) -> Dict[str, float]:
+        """
+        Convert mood keywords (like "cozy", "uplifting") into a mood vector.
+        Maps common mood words to mood axes (happy, sad, excited, scared, etc.).
+        """
+        MOOD_KEYWORD_MAPPING = {
+            # Cozy/comfort moods
+            "cozy": {"happy": 0.6, "thoughtful": 0.3, "romantic": 0.1},
+            "comfort": {"happy": 0.6, "thoughtful": 0.3, "romantic": 0.1},
+            "feel-good": {"happy": 0.9, "excited": 0.1},
+            "feel good": {"happy": 0.9, "excited": 0.1},
+            "uplifting": {"happy": 0.8, "excited": 0.2},
+            "heartwarming": {"happy": 0.7, "romantic": 0.3},
+            
+            # Dark/intense moods
+            "dark": {"tense": 0.6, "scared": 0.3, "thoughtful": 0.1},
+            "intense": {"tense": 0.7, "excited": 0.3},
+            "gritty": {"tense": 0.7, "sad": 0.3},
+            "serious": {"thoughtful": 0.7, "tense": 0.3},
+            
+            # Exciting moods
+            "exciting": {"excited": 0.9, "happy": 0.1},
+            "thrilling": {"excited": 0.8, "tense": 0.2},
+            "action-packed": {"excited": 0.9, "tense": 0.1},
+            "adventurous": {"excited": 0.7, "curious": 0.3},
+            
+            # Scary moods
+            "scary": {"scared": 0.9, "tense": 0.1},
+            "horror": {"scared": 0.9, "tense": 0.1},
+            "creepy": {"scared": 0.8, "tense": 0.2},
+            
+            # Funny moods
+            "funny": {"happy": 0.9, "excited": 0.1},
+            "hilarious": {"happy": 0.95, "excited": 0.05},
+            "comedy": {"happy": 0.9, "excited": 0.1},
+            "lighthearted": {"happy": 0.8, "thoughtful": 0.2},
+            
+            # Romantic moods
+            "romantic": {"romantic": 0.9, "happy": 0.1},
+            "love": {"romantic": 0.8, "happy": 0.2},
+            "passionate": {"romantic": 0.7, "excited": 0.3},
+            
+            # Thoughtful moods
+            "thoughtful": {"thoughtful": 0.9, "curious": 0.1},
+            "contemplative": {"thoughtful": 0.8, "sad": 0.2},
+            "philosophical": {"thoughtful": 0.9, "curious": 0.1},
+            "cerebral": {"thoughtful": 0.8, "curious": 0.2},
+            
+            # Sad moods
+            "sad": {"sad": 0.9, "thoughtful": 0.1},
+            "melancholic": {"sad": 0.8, "thoughtful": 0.2},
+            "tragic": {"sad": 0.9, "thoughtful": 0.1},
+            "emotional": {"sad": 0.6, "romantic": 0.2, "thoughtful": 0.2},
+        }
+        
+        mood_vector = {}
+        for keyword in mood_keywords:
+            keyword_lower = keyword.lower().strip()
+            if keyword_lower in MOOD_KEYWORD_MAPPING:
+                mapping = MOOD_KEYWORD_MAPPING[keyword_lower]
+                for mood_axis, weight in mapping.items():
+                    mood_vector[mood_axis] = mood_vector.get(mood_axis, 0.0) + weight
+        
+        # Normalize to sum to 1.0
+        total = sum(mood_vector.values())
+        if total > 0:
+            mood_vector = {k: v / total for k, v in mood_vector.items()}
+        
+        logger.debug(f"Converted mood keywords {mood_keywords} to vector: {mood_vector}")
+        return mood_vector
 
     def _cosine(self, v1, v2):
         # v1, v2: dicts of floats

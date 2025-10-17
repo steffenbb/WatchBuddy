@@ -4,7 +4,7 @@ models.py
 
 SQLAlchemy models for User, SmartList, ListItem, and encrypted Secret.
 """
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, Text, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, Text, UniqueConstraint, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import datetime
@@ -214,7 +214,12 @@ class UserList(Base):
     sort_order = Column(String, nullable=True)
     item_limit = Column(Integer, nullable=True)
     sync_interval = Column(Integer, nullable=True)
-    list_type = Column(String, nullable=True)
+    # Enum: 'mood', 'fusion', 'theme', 'chat', 'suggested', 'custom', 'trending', 'discovery', etc.
+    list_type = Column(String, nullable=False, index=True)
+    # For dynamic lists: persistent_id is 1-7 for the 7 core lists, null for others
+    persistent_id = Column(Integer, nullable=True, index=True)
+    # For dynamic lists: stores current theme context (e.g. genres, mood, etc.)
+    dynamic_theme = Column(String, nullable=True)
     trakt_list_id = Column(String, nullable=True, index=True)  # Trakt list ID for synchronization
     last_sync_at = Column(DateTime, nullable=True)
     last_full_sync_at = Column(DateTime, nullable=True)
@@ -224,6 +229,11 @@ class UserList(Base):
     created_at = Column(DateTime, default=utc_now)
     last_updated = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
+
+    __table_args__ = (
+        # For fast lookup of dynamic lists by type/id
+        Index('ix_userlist_type_pid', 'user_id', 'list_type', 'persistent_id'),
+    )
 
 # Add relationship after class definition
 UserList.items = relationship("ListItem", order_by=ListItem.id, back_populates="user_list")

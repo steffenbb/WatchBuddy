@@ -56,14 +56,13 @@ class ListSyncService:
             self._tmdb_ready = False
 
     async def sync_all_lists(self, force_full: bool = False) -> Dict[str, Any]:
-        """Sync all user lists based on their sync settings."""
+        """Sync all user lists based on their sync settings, including dynamic lists."""
         db = SessionLocal()
         results = {
             "synced": 0,
             "errors": 0,
             "lists": []
         }
-        
         try:
             # Warm up mood cache daily for this user
             try:
@@ -72,10 +71,15 @@ class ListSyncService:
             except Exception:
                 pass
 
+            # --- Dynamic List Integration ---
+            from app.services.dynamic_list_service import DynamicListService
+            dyn_service = DynamicListService(self.user_id or 1)
+            await dyn_service.sync_dynamic_lists(db)
+
             user_lists = db.query(UserList).filter(
                 UserList.user_id == self.user_id if self.user_id else True
             ).all()
-            
+
             for user_list in user_lists:
                 try:
                     sync_result = await self._sync_single_list(user_list, force_full=force_full)
@@ -94,7 +98,6 @@ class ListSyncService:
                     })
         finally:
             db.close()
-        
         return results
 
     async def _sync_single_list(self, user_list: UserList, force_full: bool = False) -> Dict[str, Any]:
@@ -420,7 +423,7 @@ class ListSyncService:
                         new_title = await title_generator.generate_title(
                             list_type=user_list.list_type,
                             discovery=filters.get("discovery", "balanced"),
-                            media_types=filters.get("media_types", ["movies", "shows"]),
+                            media_types=filters.get("media_types") or filters.get("media_type", ["movies", "shows"]),
                             fusion_mode=filters.get("fusion_mode", False)
                         )
                         
@@ -583,10 +586,32 @@ class ListSyncService:
         logger.warning(f"[DEBUG][CANDIDATE] List {user_list.id} filters: {filters}")
         print(f"[DEBUG][CANDIDATE] List {user_list.id} filters: {filters}")
         
+        # For chat lists without media_types, try to re-parse from title/prompt
+        if user_list.list_type == "chat" and "media_types" not in filters and "media_type" not in filters:
+            from app.api.chat_prompt import parse_chat_prompt
+            prompt = user_list.title or filters.get("search_query", "")
+            if prompt:
+                reparsed = parse_chat_prompt(prompt)
+                if "media_types" in reparsed:
+                    filters["media_types"] = reparsed["media_types"]
+                    logger.info(f"Re-parsed media_types from chat list title: {reparsed['media_types']}")
+        
         # Default to mixed content if no specific type
-        media_types = filters.get("media_types", ["movies", "shows"])
-        if not isinstance(media_types, list):
+        # Check both "media_types" (plural) and "media_type" (singular) for compatibility
+        media_types = filters.get("media_types") or filters.get("media_type")
+        
+        # Handle various input formats
+        if media_types is None:
+            # No media type specified - default to both
             media_types = ["movies", "shows"]
+        elif not isinstance(media_types, list):
+            # Single string value - convert to list
+            media_types = [media_types]
+        elif len(media_types) == 0:
+            # Empty list - default to both
+            media_types = ["movies", "shows"]
+        
+        logger.info(f"List {user_list.id} media_types before normalization: {media_types}")
         
         # Get list of recently shown items (last 3 syncs) for rotation/freshness
         db = SessionLocal()
@@ -601,15 +626,46 @@ class ListSyncService:
                     recent_trakt_ids.add(item.trakt_id)
             
             logger.info(f"Excluding {len(recent_trakt_ids)} recently shown items for freshness")
+            
+            # Get items from ALL OTHER lists for diversity (avoid duplicate items across lists)
+            exclude_ids = set()
+            other_list_items = db.query(ListItem).join(UserList).filter(
+                UserList.user_id == user_list.user_id,
+                UserList.id != user_list.id  # Exclude current list
+            ).all()
+            for item in other_list_items:
+                if item.trakt_id:
+                    exclude_ids.add(item.trakt_id)
+            # For chat lists we prioritize user intent over cross-list diversity.
+            # Many users expect popular anchors (e.g., Hangover-like) to surface even if they appear elsewhere.
+            if user_list.list_type == "chat":
+                logger.info(f"Chat list detected; disabling cross-list exclusion (was {len(exclude_ids)} items)")
+                exclude_ids = set()
+            else:
+                logger.info(f"Excluding {len(exclude_ids)} items from other lists for diversity")
         finally:
             db.close()
         
         # Get candidates from bulk provider
         all_candidates = []
         for media_type in media_types:
+            # Normalize media_type to plural form expected by get_candidates()
+            # Handle: "movie"/"film" → "movies", "show"/"tv"/"series" → "shows"
+            # Also handle if already plural or mixed case
+            mt_lower = media_type.lower().strip()
+            if mt_lower in ["movie", "movies", "film", "films"]:
+                media_type = "movies"
+            elif mt_lower in ["show", "shows", "tv", "tv show", "tv shows", "series", "tv series"]:
+                media_type = "shows"
+            # If unrecognized, keep as-is (will likely fail gracefully downstream)
+            
             # Extract filter parameters (must be before logger.warning)
             genres = filters.get("genres", [])
             languages = filters.get("languages", [])
+            # Chat lists default language: assume English if not specified to better match typical prompts
+            if user_list.list_type == "chat" and (not languages or len(languages) == 0):
+                languages = ["en"]
+                logger.info("[LANG_DEFAULT] Chat list without languages -> defaulting to ['en']")
             min_year = filters.get("year_from")
             max_year = filters.get("year_to")
             min_rating = filters.get("min_rating")
@@ -621,12 +677,39 @@ class ListSyncService:
             discovery = filters.get("discovery") or filters.get("mood") or "balanced"
             search_keywords = filters.get("search_query")
             search_keywords_list = search_keywords.split() if search_keywords else None
-            logger.warning(f"[DEBUG][CANDIDATE] Fetching candidates for media_type={media_type}, genres={genres}, languages={languages}, min_year={min_year}, max_year={max_year}, limit={enhanced_limit}")
+            logger.warning(f"[DEBUG][CANDIDATE] Fetching candidates for media_type={media_type}, genres={genres}, languages={languages}, min_year={min_year}, max_year={max_year}, discovery={discovery}, limit={enhanced_limit}")
             
-            # Enhanced candidate fetching for better recommendation quality (computed above)
-            # Keep discovery balanced to rely on PersistentCandidate ordering heuristics
-            enhanced_discovery = discovery or "balanced"
+            # Resolve discovery to a valid string
+            allowed_discovery = {"mainstream", "popular", "balanced", "obscure", "very_obscure", "deep_discovery", "ultra_discovery"}
+            raw_discovery = discovery
+            if isinstance(raw_discovery, list) or isinstance(raw_discovery, dict) or not isinstance(raw_discovery, str):
+                raw_discovery = None
+            if raw_discovery and raw_discovery not in allowed_discovery:
+                raw_discovery = None
+            # Default chat lists to mainstream when discovery not provided/invalid
+            if user_list.list_type == "chat" and not raw_discovery:
+                enhanced_discovery = "mainstream"
+                logger.info("[DISCOVERY] Defaulting to 'mainstream' for chat list (missing/invalid discovery)")
+            else:
+                enhanced_discovery = raw_discovery or "balanced"
+                logger.info(f"[DISCOVERY] Using discovery mode: '{enhanced_discovery}'")
             
+            # Determine genre_mode
+            # Chat lists: default to 'any' to avoid over-restricting (e.g., Action + Comedy should allow pure Comedy)
+            # Allow explicit override via filters.genre_mode == 'all'
+            genre_mode = "any"
+            if isinstance(filters.get("genre_mode"), str) and filters.get("genre_mode").lower() == "all":
+                genre_mode = "all"
+                logger.info(f"[GENRE_MODE] Using explicit 'all' mode from filters: {genres}")
+            else:
+                if user_list.list_type == "chat":
+                    logger.info(f"[GENRE_MODE] Chat default 'any' for genres={genres}")
+                elif genres and len(genres) >= 2:
+                    # Non-chat lists with multiple genres can be stricter by default
+                    genre_mode = "all"
+                    logger.info(f"[GENRE_MODE] Non-chat list using 'all' for multiple genres: {genres}")
+            
+            # Always use persistent DB for all list types (custom, suggested, smart, etc.)
             candidates = await self.candidate_provider.get_candidates(
                 search_keywords=search_keywords_list,
                 discovery=enhanced_discovery,
@@ -637,9 +720,11 @@ class ListSyncService:
                 max_year=max_year,
                 min_rating=min_rating,
                 limit=enhanced_limit,
+                genre_mode=genre_mode,
                 list_title=user_list.title,
                 fusion_mode=filters.get("fusion_mode", False),
-                persistent_only=True  # Only use persistent DB for syncs, no TMDB fallback
+                exclude_ids=exclude_ids,  # Exclude items from other lists for diversity
+                persistent_only=True  # ENFORCED: Only use persistent DB for all list syncs
             )
             
             logger.warning(f"[DEBUG] Candidates from provider for {media_type} - sample titles: {[c.get('title', 'NO_TITLE') for c in candidates[:5]]}")
@@ -740,18 +825,118 @@ class ListSyncService:
             except:
                 filters = {}
         
+        # Extract semantic anchor from filters for "like [movie]" functionality
+        semantic_anchor = filters.get("similar_to_title") if filters else None
+        if semantic_anchor:
+            logger.info(f"[SEMANTIC] Using semantic anchor: '{semantic_anchor}' for list {user_list.id}")
+        
         logger.warning(f"[DEBUG] Candidates before scoring for list {user_list.id}: {[c.get('title') for c in candidates]}")
         
         for candidate in candidates:
             try:
-                # Use scoring engine to get comprehensive score
-                score = await self.scoring_engine.score_candidate(
-                    candidate, 
-                    user_profile={}, 
-                    filters=filters
+                # Global quality gate: skip items with explicitly zero votes or zero mainstream_score
+                # - If vote_count is known and == 0, skip
+                # - If mainstream_score is present and == 0, skip
+                tmdb_data = candidate.get('tmdb_data') or {}
+                cached_meta = candidate.get('cached_metadata') or {}
+                votes = (
+                    tmdb_data.get('vote_count')
+                    or cached_meta.get('votes')
+                    or candidate.get('vote_count')
+                    or 0
                 )
+                mainstream_score_val = candidate.get('mainstream_score')
+                if votes == 0:
+                    logger.debug(f"[QUALITY_SKIP] Skipping '{candidate.get('title')}' due to vote_count=0")
+                    continue
+                if mainstream_score_val is not None and mainstream_score_val == 0:
+                    logger.debug(f"[QUALITY_SKIP] Skipping '{candidate.get('title')}' due to mainstream_score=0")
+                    continue
+
+                # Use scoring engine to get comprehensive score
+                # Note: score_candidate doesn't support semantic_anchor yet, but we pass filters which contain it
+                # The batch score_candidates method DOES support it, but we're using per-candidate scoring here
+                # TODO: Consider refactoring to use batch scoring for semantic similarity
+                discovery_mode = (filters or {}).get('discovery')
+                if candidate.get('_from_persistent_store') and discovery_mode in ('mainstream', 'popular'):
+                    # Robust fallback: use mainstream_score as primary signal for mainstream/popular discovery
+                    ms = float(candidate.get('mainstream_score') or 0.0)
+                    score = min(1.0, max(0.0, ms / 400.0))
+                    logger.debug(
+                        f"[MAINSTREAM_FALLBACK] '{candidate.get('title')}' mainstream_score={ms:.2f} -> score={score:.3f}"
+                    )
+                else:
+                    score = await self.scoring_engine.score_candidate(
+                        candidate,
+                        user_profile={},
+                        filters=filters
+                    )
+                
+                # HACK: If we have a semantic anchor, apply TF-IDF similarity boost manually
+                # This is a workaround until we refactor to use batch scoring
+                if semantic_anchor:
+                    try:
+                        from sklearn.feature_extraction.text import TfidfVectorizer
+                        from sklearn.metrics.pairwise import cosine_similarity
+                        import numpy as np
+                        
+                        # Build text for anchor and candidate
+                        anchor_text = f"{semantic_anchor} "
+                        candidate_text = f"{candidate.get('title', '')} {candidate.get('overview', '')} {' '.join(candidate.get('genres', []))}"
+                        
+                        # Calculate TF-IDF similarity
+                        vectorizer = TfidfVectorizer(stop_words='english', max_features=1000)
+                        try:
+                            tfidf_matrix = vectorizer.fit_transform([anchor_text, candidate_text])
+                            similarity = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
+                            
+                            # Blend semantic similarity with base score using list-type specific weights
+                            # IMPORTANT: Do not let semantic similarity fully override a strong base score.
+                            # Keep weights conservative so mainstream/popularity still matters for chat lists.
+                            semantic_weights = {
+                                'smartlist': 0.5,
+                                'mood': 0.5,
+                                'fusion': 0.5,
+                                'theme': 0.5,
+                                'chat': 0.55,  # reduce from 1.0 to avoid zeroing base score
+                                'prompt': 0.55
+                            }
+                            semantic_weight = semantic_weights.get(user_list.list_type, 0.5)
+
+                            # If similarity is extremely low (near zero), keep the base score as-is
+                            # This prevents wiping out a good mainstream/popularity score.
+                            if similarity <= 0.05:
+                                logger.debug(f"[SEMANTIC] Very low similarity ({similarity:.3f}) for '{candidate.get('title')}', keeping base score {score:.3f}")
+                            else:
+                                score = (1 - semantic_weight) * score + semantic_weight * similarity
+                            
+                            logger.debug(f"[SEMANTIC] '{candidate.get('title')}' similarity to '{semantic_anchor}': {similarity:.3f}, final score: {score:.3f}")
+                        except ValueError:
+                            # Not enough features or empty texts
+                            logger.debug(f"[SEMANTIC] Could not calculate similarity for '{candidate.get('title')}'")
+                    except Exception as e:
+                        logger.warning(f"[SEMANTIC] Error calculating semantic similarity for {candidate.get('title')}: {e}")
+                
                 candidate["score"] = score
                 logger.warning(f"[DEBUG][SCORING] Candidate '{candidate.get('title')}' scored {score}")
+                # Soft post-adjustments:
+                # - Downweight Animation/Family if the user didn't ask for those genres explicitly
+                # - Slightly favor English content when user didn't specify languages
+                try:
+                    requested_genres = set((filters.get('genres') or []))
+                    tmdb_genres = set((candidate.get('tmdb_data') or {}).get('genres') or [])
+                    if tmdb_genres:
+                        if 'Animation' in tmdb_genres and 'Animation' not in requested_genres:
+                            candidate['score'] = max(0.0, candidate['score'] * 0.9)
+                        if 'Family' in tmdb_genres and 'Family' not in requested_genres:
+                            candidate['score'] = max(0.0, candidate['score'] * 0.92)
+                    # English preference when no language constraint provided
+                    langs = filters.get('languages') or []
+                    cand_lang = candidate.get('language') or (candidate.get('tmdb_data') or {}).get('original_language')
+                    if (not langs) and cand_lang and str(cand_lang).lower() == 'en':
+                        candidate['score'] = min(1.0, candidate['score'] + 0.05)
+                except Exception:
+                    pass
                 
                 # Generate explanation for the item using existing explanation service
                 try:
@@ -763,7 +948,7 @@ class ListSyncService:
                         'genres': candidate.get('genres', []),
                         'rating': candidate.get('rating'),
                         'score': score,
-                        'reason': 'Based on genre preferences and popularity'
+                        'reason': f"Similar to {semantic_anchor}" if semantic_anchor else 'Based on genre preferences and popularity'
                     }
                     candidate["explanation"] = generate_explanation(explanation_meta)
                 except Exception as ex:

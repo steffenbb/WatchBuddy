@@ -402,64 +402,13 @@ export const StatusWidgets: React.FC = () => {
         )}
       </div>
 
-      {/* Fusion Mode Widget */}
-  <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
-        <h4 className="font-semibold text-gray-900 mb-3 text-sm">Fusion Mode</h4>
-        {fusionStatus ? (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-600">Status</span>
-              <span className={`text-sm font-medium ${fusionStatus.enabled ? 'text-green-600' : 'text-gray-500'}`}>
-                {fusionStatus.enabled ? '● Enabled' : '○ Disabled'}
-              </span>
-            </div>
-            {fusionStatus.enabled && (
-              <>
-                <div className="mt-3 pt-3 border-t border-gray-200">
-                  <div className="text-xs text-gray-600 mb-2">Aggressiveness</div>
-                  <div className="flex items-center gap-3">
-                    <input
-                      type="range"
-                      min={0}
-                      max={2}
-                      step={0.01}
-                      value={fusionAggressiveness}
-                      onChange={e => handleAggressivenessChange(Number(e.target.value))}
-                      disabled={fusionLoading}
-                      className="w-full"
-                    />
-                    <span className="text-xs text-gray-700 w-12 text-right">
-                      {fusionAggressiveness === 0 ? 'Low' : fusionAggressiveness === 2 ? 'High' : 'Med'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">Controls how strongly fusion mode influences recommendations.</div>
-                </div>
-                <div className="mt-3">
-                  <div className="text-xs text-gray-600 mb-2">Active Components:</div>
-                  <div className="grid grid-cols-2 gap-1 text-xs">
-                    {Object.entries(liveWeights || fusionStatus.weights)
-                      .filter(([_, weight]) => Number(weight) > 0.01)
-                      .sort(([, a], [, b]) => Number(b) - Number(a))
-                      .slice(0, 4)
-                      .map(([component, weight]) => (
-                        <div key={component} className="flex justify-between">
-                          <span className="text-gray-600 truncate">
-                            {component.replace('components.', '').replace(/^\w/, c => c.toUpperCase())}
-                          </span>
-                          <span className="text-gray-800 font-medium">
-                            {(Number(weight) * 100).toFixed(0)}%
-                          </span>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-        ) : (
-          <div className="text-gray-500 text-sm py-2">Unable to check fusion status</div>
-        )}
-      </div>
+      {/* Fusion Mode Widget (removed per requirements) */}
+      {false && (
+        <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
+          <h4 className="font-semibold text-gray-900 mb-3 text-sm">Fusion Mode</h4>
+          {/* Content intentionally disabled */}
+        </div>
+      )}
     </div>
   );
 };
