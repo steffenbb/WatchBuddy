@@ -249,7 +249,15 @@ class ScoringEngine:
         advanced_types = {'smartlist', 'mood', 'fusion', 'theme', 'chat'}
         if list_type in advanced_types:
             # Use advanced scoring for mood, fusion, theme, smartlist, and chat
-            return self._score_smartlist_advanced(user, top_k, explore_factor, item_limit, semantic_anchor=semantic_anchor)
+            return self._score_smartlist_advanced(
+                user,
+                top_k,
+                explore_factor,
+                item_limit,
+                semantic_anchor=semantic_anchor,
+                list_type=list_type,
+                filters=filters or {}
+            )
         else:
             # Fallback to traditional for custom/suggested
             return self._score_traditional(user, top_k, explore_factor, item_limit)
@@ -314,7 +322,7 @@ class ScoringEngine:
             for c in result
         ]
 
-    def _score_smartlist_advanced(self, user, candidates: list, explore_factor: float, item_limit: int, semantic_anchor: Optional[str]=None, list_type: str = "smartlist") -> list:
+    def _score_smartlist_advanced(self, user, candidates: list, explore_factor: float, item_limit: int, semantic_anchor: Optional[str]=None, list_type: str = "smartlist", filters: Optional[Dict[str, Any]] = None) -> list:
         """Advanced scoring for SmartLists with TF-IDF, mood, and semantic features."""
         # Get user ratings once for all candidates
         user_id = user.get("id")
@@ -335,7 +343,7 @@ class ScoringEngine:
 
         # Enhanced mood scoring with fallback strategies
         # Priority: filters["mood"] > user cached mood > contextual mood
-        filter_moods = filters.get("mood", []) if filters else []
+        filter_moods = filters.get("mood", []) if isinstance(filters, dict) else []
         if filter_moods:
             # Use explicit mood from filters (e.g., ["cozy", "uplifting"])
             enhanced_user_mood = self._mood_keywords_to_vector(filter_moods)

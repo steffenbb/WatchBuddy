@@ -64,8 +64,10 @@ class DynamicListService:
 
     async def sync_dynamic_lists(self, db: Session):
         """Sync all 7 dynamic lists: update title, theme, items, and Trakt (async)."""
+        # Ensure the 7 dynamic lists exist
         lists = self.ensure_dynamic_lists(db)
-        # Set similar_to_title for the primary mood list (lowest ID)
+
+        # Best-effort: set a semantic anchor for the primary mood list
         mood_lists = [ul for ul in lists if ul.list_type == "mood"]
         if mood_lists:
             primary_mood_list = min(mood_lists, key=lambda ul: ul.id)
@@ -82,7 +84,13 @@ class DynamicListService:
                         logger.info(f"[DynamicList] Set similar_to_title for mood list {primary_mood_list.id}: {recent_title}")
             except Exception as e:
                 logger.warning(f"[DynamicList] Failed to set similar_to_title for mood list {primary_mood_list.id}: {e}")
-        # ...existing code for syncing each ul in lists...
+
+        # Fetch candidates from persistent pool and run the implemented sync
+        try:
+            candidates = self.get_candidates(db)
+            await self.sync_dynamic_lists_impl(db, lists, candidates)
+        except Exception as e:
+            logger.warning(f"[DynamicList] sync_dynamic_lists_impl failed: {e}")
 
     def get_candidates(self, db: Session) -> List[PersistentCandidate]:
         """Return all candidates with a Trakt ID."""
@@ -119,31 +127,7 @@ class DynamicListService:
             '_from_persistent_store': True  # Flag for scoring engine
         }
 
-    async def sync_dynamic_lists(self, db: Session):
-        """Sync all 7 dynamic lists: update title, theme, items, and Trakt (async)."""
-        lists = self.ensure_dynamic_lists(db)
-        # Set similar_to_title for the primary mood list (lowest ID)
-        mood_lists = [ul for ul in lists if ul.list_type == "mood"]
-        if mood_lists:
-            primary_mood_list = min(mood_lists, key=lambda ul: ul.id)
-            try:
-                filters = json.loads(primary_mood_list.filters) if primary_mood_list.filters else {}
-                history = await self.trakt_client.get_my_history(media_type="movies", limit=1)
-                if history and isinstance(history, list):
-                    recent = history[0]
-                    recent_title = recent.get("movie", {}).get("title") or recent.get("title")
-                    if recent_title:
-                        filters["similar_to_title"] = recent_title
-                        primary_mood_list.filters = json.dumps(filters)
-                        db.commit()
-                        logger.info(f"[DynamicList] Set similar_to_title for mood list {primary_mood_list.id}: {recent_title}")
-            except Exception as e:
-                logger.warning(f"[DynamicList] Failed to set similar_to_title for mood list {primary_mood_list.id}: {e}")
-        # ...existing code for syncing each ul in lists...
-
-    def get_candidates(self, db: Session) -> List[PersistentCandidate]:
-        """Return all candidates with a Trakt ID."""
-        return db.query(PersistentCandidate).filter(PersistentCandidate.trakt_id.isnot(None)).all()
+    
 
     async def sync_dynamic_lists_impl(self, db: Session, lists: List[UserList], candidates: List[PersistentCandidate]):
         """Internal implementation of dynamic list sync (extracted for clarity)."""
