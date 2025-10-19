@@ -12,8 +12,24 @@ import httpx
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-# Trakt OAuth configuration - now loaded dynamically from Redis
-TRAKT_REDIRECT_URI = "http://localhost:5173/auth/trakt/callback"
+async def get_trakt_redirect_uri():
+    """Get Trakt redirect URI from Redis settings, defaulting to localhost."""
+    redis = get_redis()
+    redirect_base = await redis.get("settings:global:trakt_redirect_uri")
+    
+    # Default to localhost if not set or empty
+    if not redirect_base or not redirect_base.strip():
+        redirect_base = "localhost"
+    
+    # Ensure proper format - add http:// if no protocol specified
+    if not redirect_base.startswith(("http://", "https://")):
+        redirect_base = f"http://{redirect_base}"
+    
+    # Remove trailing slash if present
+    redirect_base = redirect_base.rstrip("/")
+    
+    # Append the callback path
+    return f"{redirect_base}:5173/auth/trakt/callback"
 
 async def get_trakt_credentials():
     """Get Trakt credentials from Redis settings."""
@@ -32,8 +48,9 @@ async def get_trakt_credentials():
 @router.get("/oauth/url")
 async def get_oauth_url():
     """Get Trakt OAuth authorization URL."""
-    # Get dynamic credentials
+    # Get dynamic credentials and redirect URI
     client_id, client_secret = await get_trakt_credentials()
+    redirect_uri = await get_trakt_redirect_uri()
     
     # Generate state parameter for security
     import uuid
@@ -47,7 +64,7 @@ async def get_oauth_url():
         f"https://trakt.tv/oauth/authorize"
         f"?response_type=code"
         f"&client_id={client_id}"
-        f"&redirect_uri={TRAKT_REDIRECT_URI}"
+        f"&redirect_uri={redirect_uri}"
         f"&state={state}"
     )
     
@@ -70,8 +87,9 @@ async def oauth_callback(
     # Clean up state
     await redis.delete(state_key)
     
-    # Get dynamic credentials
+    # Get dynamic credentials and redirect URI
     client_id, client_secret = await get_trakt_credentials()
+    redirect_uri = await get_trakt_redirect_uri()
     
     try:
         # Exchange code for access token
@@ -82,7 +100,7 @@ async def oauth_callback(
                     "code": code,
                     "client_id": client_id,
                     "client_secret": client_secret,
-                    "redirect_uri": TRAKT_REDIRECT_URI,
+                    "redirect_uri": redirect_uri,
                     "grant_type": "authorization_code"
                 },
                 headers={
@@ -212,6 +230,56 @@ async def disconnect():
     except Exception as e:
         logger.error(f"Failed to disconnect: {e}")
         raise HTTPException(status_code=500, detail="Failed to disconnect account")
+
+@router.get("/redirect-uri")
+async def get_redirect_uri_setting():
+    """Get the current Trakt redirect URI setting."""
+    redis = get_redis()
+    redirect_base = await redis.get("settings:global:trakt_redirect_uri")
+    
+    # Return the raw value (or default)
+    if not redirect_base or not redirect_base.strip():
+        redirect_base = "localhost"
+    
+    # Also return the full computed URI for display
+    full_uri = await get_trakt_redirect_uri()
+    
+    return {
+        "redirect_base": redirect_base,
+        "full_redirect_uri": full_uri
+    }
+
+@router.post("/redirect-uri")
+async def set_redirect_uri_setting(data: Dict[str, Any]):
+    """Set the Trakt redirect URI (base domain/IP)."""
+    redis = get_redis()
+    redirect_base = data.get("redirect_uri", "").strip()
+    
+    # Validate input
+    if not redirect_base:
+        # Allow empty to reset to default
+        redirect_base = "localhost"
+    
+    # Remove protocol if user included it (we'll add it back when building the full URI)
+    if redirect_base.startswith("http://"):
+        redirect_base = redirect_base[7:]
+    elif redirect_base.startswith("https://"):
+        redirect_base = redirect_base[8:]
+    
+    # Remove trailing slashes and port if included in the base
+    redirect_base = redirect_base.rstrip("/").split(":")[0]
+    
+    # Store in Redis
+    await redis.set("settings:global:trakt_redirect_uri", redirect_base)
+    
+    # Return the computed full URI
+    full_uri = await get_trakt_redirect_uri()
+    
+    return {
+        "success": True,
+        "redirect_base": redirect_base,
+        "full_redirect_uri": full_uri
+    }
 
 from fastapi import Query
 

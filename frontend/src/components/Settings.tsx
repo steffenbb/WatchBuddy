@@ -37,6 +37,8 @@ export default function Settings() {
   });
   const [timezoneSettings, setTimezoneSettings] = useState<TimezoneSettings | null>(null);
   const [timezone, setTimezone] = useState("UTC");
+  const [traktRedirectUri, setTraktRedirectUri] = useState("localhost");
+  const [traktRedirectUriDisplay, setTraktRedirectUriDisplay] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
 
@@ -49,11 +51,12 @@ export default function Settings() {
       setLoading(true);
       
       // Load all settings in parallel
-      const [fusionRes, traktRes, tmdbRes, timezoneRes] = await Promise.all([
+      const [fusionRes, traktRes, tmdbRes, timezoneRes, redirectUriRes] = await Promise.all([
         api.get("/settings/fusion").catch(() => ({ data: { enabled: false, weights: {} } })),
         api.get("/settings/trakt-credentials").catch(() => ({ data: { configured: false } })),
         api.get("/settings/tmdb-key").catch(() => ({ data: { configured: false } })),
-        api.get("/settings/timezone").catch(() => ({ data: { timezone: "UTC", available_timezones: [] } }))
+        api.get("/settings/timezone").catch(() => ({ data: { timezone: "UTC", available_timezones: [] } })),
+        api.get("/trakt/redirect-uri").catch(() => ({ data: { redirect_base: "localhost", full_redirect_uri: "http://localhost:5173/auth/trakt/callback" } }))
       ]);
       
       setFusionSettings(fusionRes.data);
@@ -61,6 +64,8 @@ export default function Settings() {
       setTmdbStatus(tmdbRes.data);
       setTimezoneSettings(timezoneRes.data);
       setTimezone(timezoneRes.data.timezone || "UTC");
+      setTraktRedirectUri(redirectUriRes.data.redirect_base || "localhost");
+      setTraktRedirectUriDisplay(redirectUriRes.data.full_redirect_uri || "");
     } catch (e) {
       console.error("Failed to load settings:", e);
     } finally {
@@ -130,6 +135,24 @@ export default function Settings() {
     }
   }
 
+  async function saveTraktRedirectUri() {
+    if (!traktRedirectUri.trim()) {
+      alert("Please enter a redirect URI (or leave as 'localhost' for default)");
+      return;
+    }
+    
+    try {
+      setSaving("trakt-redirect");
+      const response = await api.post("/trakt/redirect-uri", { redirect_uri: traktRedirectUri });
+      setTraktRedirectUriDisplay(response.data.full_redirect_uri);
+      alert("Trakt redirect URI saved successfully!");
+    } catch (error: any) {
+      alert("Failed to save redirect URI: " + (error?.response?.data?.detail || error.message));
+    } finally {
+      setSaving(null);
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-fuchsia-200 via-indigo-100 to-blue-200 flex items-center justify-center">
@@ -192,6 +215,62 @@ export default function Settings() {
 
             <div className="text-sm text-gray-600">
               <p>Re-authorization will clear your current Trakt connection and redirect you to set up new API credentials.</p>
+            </div>
+          </div>
+
+          {/* Trakt Redirect URI Card */}
+          <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 p-8">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="w-12 h-12 bg-gradient-to-tr from-purple-400 via-fuchsia-400 to-pink-400 rounded-full flex items-center justify-center">
+                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold text-indigo-900">Trakt Redirect URI</h2>
+                <p className="text-indigo-600">Configure OAuth callback for Trakt authentication</p>
+              </div>
+            </div>
+
+            <div className="bg-gradient-to-r from-purple-50 via-fuchsia-50 to-pink-50 rounded-xl p-6 mb-6">
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="redirect-uri-input" className="block text-sm font-medium text-indigo-900 mb-2">
+                    Base Domain/IP
+                  </label>
+                  <input
+                    id="redirect-uri-input"
+                    type="text"
+                    value={traktRedirectUri}
+                    onChange={(e) => setTraktRedirectUri(e.target.value)}
+                    placeholder="localhost (default) or example.com or 192.168.1.100"
+                    className="w-full px-4 py-3 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-fuchsia-400 focus:border-fuchsia-400 transition-all duration-200 shadow-sm"
+                  />
+                  {traktRedirectUriDisplay && (
+                    <p className="text-xs text-indigo-600 mt-2">
+                      Full callback URL: <span className="font-mono bg-white px-2 py-1 rounded">{traktRedirectUriDisplay}</span>
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex justify-between items-center">
+                  <div className="text-sm text-indigo-700">
+                    <p>Set the domain or IP for OAuth callbacks. Default is "localhost" for local development.</p>
+                  </div>
+                  <button
+                    onClick={saveTraktRedirectUri}
+                    disabled={saving === "trakt-redirect"}
+                    className="bg-gradient-to-r from-purple-500 via-fuchsia-500 to-pink-500 text-white px-6 py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50"
+                  >
+                    {saving === "trakt-redirect" ? "Saving..." : "Save URI"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div className="text-sm text-gray-600 space-y-2">
+              <p><strong>Important:</strong> Make sure this matches the redirect URI registered in your Trakt application settings.</p>
+              <p className="text-xs">Examples: <code className="bg-gray-100 px-1 rounded">localhost</code>, <code className="bg-gray-100 px-1 rounded">example.com</code>, <code className="bg-gray-100 px-1 rounded">192.168.1.100</code></p>
             </div>
           </div>
 
