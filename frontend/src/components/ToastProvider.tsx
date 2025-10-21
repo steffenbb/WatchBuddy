@@ -105,20 +105,20 @@ const ToastContainer: React.FC = () => {
   const { toasts, removeToast } = useToast();
 
   const getToastStyles = (type: Toast['type']) => {
-    const baseStyles = "rounded-2xl shadow-2xl p-4 max-w-sm md:max-w-sm w-full pointer-events-auto border border-indigo-100 bg-white/90 backdrop-blur-xl transition-all duration-500";
+    const baseStyles = "rounded-2xl shadow-2xl p-4 max-w-sm md:max-w-sm w-full pointer-events-auto border backdrop-blur-lg transition-all duration-500";
     let accent = "";
     switch (type) {
       case 'success':
-        accent = "border-green-300";
+        accent = "bg-emerald-500/20 border-emerald-400/40";
         break;
       case 'error':
-        accent = "border-red-300";
+        accent = "bg-red-500/20 border-red-400/40";
         break;
       case 'warning':
-        accent = "border-yellow-300";
+        accent = "bg-yellow-500/20 border-yellow-400/40";
         break;
       default:
-        accent = "border-blue-300";
+        accent = "bg-blue-500/20 border-blue-400/40";
     }
     return `${baseStyles} ${accent}`;
   };
@@ -126,44 +126,44 @@ const ToastContainer: React.FC = () => {
   const getIcon = (type: Toast['type']) => {
     switch (type) {
       case 'success':
-        return '✓';
+        return '✅';
       case 'error':
-        return '✕';
+        return '❌';
       case 'warning':
-        return '⚠';
+        return '⚠️';
       default:
-        return 'ℹ';
+        return 'ℹ️';
     }
   };
 
   return (
-    <div className="fixed bottom-4 right-4 left-4 md:left-auto md:top-4 md:bottom-auto space-y-2 z-50 pointer-events-none">
+    <div className="fixed bottom-4 right-4 left-4 md:left-auto md:top-20 md:bottom-auto space-y-2 z-50 pointer-events-none">
       {toasts.map((toast) => (
         <div
           key={toast.id}
-          className={`${getToastStyles(toast.type)} transform transition-all duration-300 ease-in-out pointer-events-auto`}
+          className={`${getToastStyles(toast.type)} transform transition-all duration-300 ease-in-out pointer-events-auto animate-in slide-in-from-right`}
         >
           <div className="flex items-start">
             <div className="flex-shrink-0 mr-3 text-lg">
               {getIcon(toast.type)}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium break-words">{toast.message}</p>
+              <p className="text-sm font-medium break-words text-white">{toast.message}</p>
               {toast.link && (
                 <button
                   onClick={() => {
                     window.location.href = toast.link!;
                     removeToast(toast.id);
                   }}
-                  className="mt-2 text-xs underline hover:no-underline touch-manipulation"
+                  className="mt-2 text-xs text-purple-300 hover:text-purple-200 underline hover:no-underline touch-manipulation min-h-[32px] transition"
                 >
-                  View Details
+                  View Details →
                 </button>
               )}
             </div>
             <button
               onClick={() => removeToast(toast.id)}
-              className="flex-shrink-0 ml-4 text-lg hover:opacity-70 p-1 touch-manipulation"
+              className="flex-shrink-0 ml-4 text-xl text-white hover:text-white/70 p-1 touch-manipulation min-h-[32px] min-w-[32px] transition"
               aria-label="Close notification"
             >
               ×

@@ -20,74 +20,46 @@ async def get_available_genres() -> Dict[str, Any]:
     Returns both the raw list and a normalized/grouped version for UI display.
     """
     try:
-        from app.core.database import SessionLocal
-        from sqlalchemy import text
+        from app.utils.extract_genres_languages import get_genres_and_languages
         
-        db = SessionLocal()
-        try:
-            # Query distinct genres from persistent_candidates
-            query = text("""
-                SELECT DISTINCT jsonb_array_elements_text(genres::jsonb) as genre 
-                FROM persistent_candidates 
-                WHERE genres IS NOT NULL AND genres != '[]'
-                ORDER BY genre
-            """)
-            result = db.execute(query)
-            raw_genres = [row[0] for row in result.fetchall()]
-            
-            # Normalize and deduplicate genres
-            # Map variations to canonical names
-            genre_mapping = {
-                'Sci-Fi & Fantasy': 'Science Fiction',
-                'Action & Adventure': 'Action',
-                'War & Politics': 'War',
-            }
-            
-            normalized_genres = set()
-            for genre in raw_genres:
-                normalized = genre_mapping.get(genre, genre)
-                normalized_genres.add(normalized)
-            
-            # Sort for consistent output
-            sorted_genres = sorted(normalized_genres)
-            
-            # Group genres by category for better UI organization
-            genre_categories = {
-                "action": ["Action", "Adventure", "War", "Western"],
-                "comedy": ["Comedy"],
-                "drama": ["Drama", "Romance", "Family"],
-                "thriller": ["Thriller", "Crime", "Mystery"],
-                "horror": ["Horror"],
-                "scifi": ["Science Fiction", "Fantasy"],
-                "other": ["Documentary", "History", "Music", "Musical", "Animation", "Kids", 
-                         "News", "Reality", "Soap", "Talk", "TV Movie"]
-            }
-            
-            # Build categorized output
-            categorized = {}
-            uncategorized = []
-            for genre in sorted_genres:
-                found = False
-                for category, genres in genre_categories.items():
-                    if genre in genres:
-                        if category not in categorized:
-                            categorized[category] = []
-                        categorized[category].append(genre)
-                        found = True
-                        break
-                if not found:
-                    uncategorized.append(genre)
-            
-            if uncategorized:
-                categorized["other"] = categorized.get("other", []) + uncategorized
-            
-            return {
-                "genres": sorted_genres,
-                "count": len(sorted_genres),
-                "categorized": categorized
-            }
-        finally:
-            db.close()
+        # Use shared utility for consistent genre extraction
+        sorted_genres, _ = get_genres_and_languages(min_count=0)
+        
+        # Group genres by category for better UI organization
+        genre_categories = {
+            "action": ["Action", "Adventure", "War", "Western"],
+            "comedy": ["Comedy"],
+            "drama": ["Drama", "Romance", "Family"],
+            "thriller": ["Thriller", "Crime", "Mystery"],
+            "horror": ["Horror"],
+            "scifi": ["Science Fiction", "Fantasy"],
+            "other": ["Documentary", "History", "Music", "Musical", "Animation", "Kids", 
+                     "News", "Reality", "Soap", "Talk", "TV Movie"]
+        }
+        
+        # Build categorized output
+        categorized = {}
+        uncategorized = []
+        for genre in sorted_genres:
+            found = False
+            for category, genres in genre_categories.items():
+                if genre in genres:
+                    if category not in categorized:
+                        categorized[category] = []
+                    categorized[category].append(genre)
+                    found = True
+                    break
+            if not found:
+                uncategorized.append(genre)
+        
+        if uncategorized:
+            categorized["other"] = categorized.get("other", []) + uncategorized
+        
+        return {
+            "genres": sorted_genres,
+            "count": len(sorted_genres),
+            "categorized": categorized
+        }
     except Exception as e:
         logger.error(f"Failed to fetch genres: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch genres: {str(e)}")
@@ -105,7 +77,7 @@ async def get_available_languages() -> Dict[str, Any]:
         
         db = SessionLocal()
         try:
-            # Query distinct languages with counts
+            # Query distinct languages with counts (use shared logic)
             query = text("""
                 SELECT language, COUNT(*) as count 
                 FROM persistent_candidates 
@@ -116,7 +88,7 @@ async def get_available_languages() -> Dict[str, Any]:
             result = db.execute(query)
             language_data = [(row[0], row[1]) for row in result.fetchall()]
             
-            # Map common language codes to names
+            # Map common language codes to names (same as metadata_options)
             language_names = {
                 'en': 'English',
                 'da': 'Danish',

@@ -22,13 +22,13 @@ function HealthIndicator() {
     return () => { cancelled = true; clearInterval(t); };
   }, []);
 
-  const color = healthy == null ? 'bg-gray-400' : healthy ? 'bg-green-500' : 'bg-red-500';
+  const color = healthy == null ? 'bg-white/40' : healthy ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-red-400 shadow-lg shadow-red-400/50';
   const title = healthy == null ? 'Checking health…' : healthy ? 'Backend healthy' : 'Backend unhealthy';
 
   return (
     <div className="flex items-center gap-1" title={title} aria-label={title}>
       <span className={`inline-block w-2 h-2 rounded-full ${color}`} />
-      <span className="hidden sm:inline text-xs opacity-80">API</span>
+      <span className="hidden sm:inline text-xs text-white/70">API</span>
     </div>
   );
 }
@@ -38,35 +38,35 @@ export default function Header({ onLogoClick }: { onLogoClick?: () => void }){
 
   return (
     <>
-  <header className="relative z-20 bg-white/80 backdrop-blur-xl rounded-b-3xl shadow-2xl border-b-2 border-indigo-100 p-4 sticky top-0 z-40 transition-all duration-500">
+  <header className="bg-white/10 backdrop-blur-lg rounded-b-3xl shadow-2xl border-b-2 border-white/20 p-4 sticky top-0 z-40 transition-all duration-500">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 md:gap-3 min-w-0">
             <button 
               onClick={onLogoClick} 
-              className={`text-xl md:text-2xl font-bold truncate transition-colors ${onLogoClick ? 'hover:text-indigo-600 cursor-pointer' : ''}`}
+              className={`text-xl md:text-2xl font-bold truncate transition-colors text-white ${onLogoClick ? 'hover:text-purple-300 cursor-pointer' : ''}`}
               disabled={!onLogoClick}
             >
               {config.app_title}
             </button>
-            <span className="text-xs md:text-sm opacity-80 hidden sm:inline">— personalized recommendations</span>
+            <span className="text-xs md:text-sm text-white/70 hidden sm:inline">— personalized recommendations</span>
           </div>
           <div className="flex items-center gap-2 md:gap-4">
             <button
               onClick={() => { window.location.hash = '#help'; }}
-              className="text-xs md:text-sm px-2 py-1 rounded bg-indigo-100 text-indigo-800 border border-indigo-200 hover:bg-indigo-200 transition"
+              className="text-xs md:text-sm px-3 py-2 rounded-xl bg-white/10 text-white border border-white/20 hover:bg-white/20 transition-all min-h-[36px]"
               title="Help & Wiki"
             >
-              Help
+              📖 Help
             </button>
             <HealthIndicator />
             <button
               onClick={() => setShowNotifications(true)}
-              className="relative p-2 hover:bg-indigo-700 rounded-md transition-colors touch-manipulation"
+              className="relative p-2 hover:bg-white/20 rounded-xl transition-colors touch-manipulation min-h-[36px] min-w-[36px] flex items-center justify-center"
               title="Notifications"
               aria-label="Open notifications"
             >
               <svg
-                className="w-5 h-5"
+                className="w-5 h-5 text-white"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -80,12 +80,12 @@ export default function Header({ onLogoClick }: { onLogoClick?: () => void }){
                 />
               </svg>
             </button>
-            <span className="text-xs md:text-sm whitespace-nowrap">v{config.version}</span>
+            <span className="text-xs md:text-sm whitespace-nowrap text-white/60">v{config.version}</span>
             <a 
               href={config.github_url} 
               target="_blank" 
               rel="noreferrer" 
-              className="text-xs md:text-sm underline hover:no-underline whitespace-nowrap hidden sm:inline"
+              className="text-xs md:text-sm text-purple-300 hover:text-purple-200 underline hover:no-underline whitespace-nowrap hidden sm:inline transition"
             >
               GitHub
             </a>

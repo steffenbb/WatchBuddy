@@ -48,3 +48,75 @@ body{
 		padding-bottom: env(safe-area-inset-bottom);
 	}
 }
+
+/* Micro-interactions and animations */
+@layer utilities {
+	/* Smooth transitions for interactive elements */
+	.transition-smooth {
+		transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+	}
+	
+	/* Pulse animation for loading states */
+	@keyframes pulse-glow {
+		0%, 100% { opacity: 1; }
+		50% { opacity: 0.6; }
+	}
+	
+	.animate-pulse-glow {
+		animation: pulse-glow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+	}
+	
+	/* Slide in animations for modals/toasts */
+	@keyframes slide-in-right {
+		from {
+			transform: translateX(100%);
+			opacity: 0;
+		}
+		to {
+			transform: translateX(0);
+			opacity: 1;
+		}
+	}
+	
+	@keyframes slide-in-up {
+		from {
+			transform: translateY(20px);
+			opacity: 0;
+		}
+		to {
+			transform: translateY(0);
+			opacity: 1;
+		}
+	}
+	
+	.animate-slide-in-right {
+		animation: slide-in-right 0.3s ease-out;
+	}
+	
+	.animate-slide-in-up {
+		animation: slide-in-up 0.3s ease-out;
+	}
+	
+	/* Scale animation for buttons */
+	.hover-scale {
+		transition: transform 0.15s ease-in-out;
+	}
+	
+	.hover-scale:hover:not(:disabled) {
+		transform: scale(1.05);
+	}
+	
+	.hover-scale:active:not(:disabled) {
+		transform: scale(0.95);
+	}
+	
+	/* Glow effect for focused elements */
+	.focus-glow {
+		transition: box-shadow 0.2s ease-in-out;
+	}
+	
+	.focus-glow:focus {
+		outline: none;
+		box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.4);
+	}
+}

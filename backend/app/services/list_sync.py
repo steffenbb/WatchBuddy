@@ -858,19 +858,12 @@ class ListSyncService:
                 # The batch score_candidates method DOES support it, but we're using per-candidate scoring here
                 # TODO: Consider refactoring to use batch scoring for semantic similarity
                 discovery_mode = (filters or {}).get('discovery')
-                if candidate.get('_from_persistent_store') and discovery_mode in ('mainstream', 'popular'):
-                    # Robust fallback: use mainstream_score as primary signal for mainstream/popular discovery
-                    ms = float(candidate.get('mainstream_score') or 0.0)
-                    score = min(1.0, max(0.0, ms / 400.0))
-                    logger.debug(
-                        f"[MAINSTREAM_FALLBACK] '{candidate.get('title')}' mainstream_score={ms:.2f} -> score={score:.3f}"
-                    )
-                else:
-                    score = await self.scoring_engine.score_candidate(
-                        candidate,
-                        user_profile={},
-                        filters=filters
-                    )
+                # Use full scoring engine with user context (ratings/preferences) for all cases
+                score = await self.scoring_engine.score_candidate(
+                    candidate,
+                    user_profile={'id': user_list.user_id} if user_list.user_id else {},
+                    filters=filters
+                )
                 
                 # HACK: If we have a semantic anchor, apply TF-IDF similarity boost manually
                 # This is a workaround until we refactor to use batch scoring
@@ -961,6 +954,26 @@ class ListSyncService:
                 candidate["score"] = 0.5
                 candidate["explanation"] = "Recommended for you"
                 scored_candidates.append(candidate)
+        
+        # Display calibration: rescale scores to a higher band for better interpretability
+        # This preserves ranking while lifting the displayed values to match earlier builds
+        try:
+            if scored_candidates:
+                values = [float(c.get("score", 0.0)) for c in scored_candidates]
+                smin, smax = min(values), max(values)
+                low, high = 0.65, 0.98
+                if smax > smin:
+                    scale = (high - low) / (smax - smin)
+                    for c in scored_candidates:
+                        s = float(c.get("score", 0.0))
+                        c["score"] = max(0.0, min(1.0, low + (s - smin) * scale))
+                else:
+                    # Degenerate case: all scores equal; lift into display band
+                    for c in scored_candidates:
+                        c["score"] = 0.80  # Neutral mid-point in display band
+                logger.debug(f"[SCALING] Rescaled scores to [{low}, {high}] (original min={smin:.3f}, max={smax:.3f}) for list {user_list.id}")
+        except Exception as scale_err:
+            logger.debug(f"[SCALING] Score rescale skipped due to error: {scale_err}")
         
         # Sort by score descending
         scored_candidates.sort(key=lambda x: x.get("score", 0), reverse=True)
@@ -1355,7 +1368,10 @@ class ListSyncService:
                     # Upsert into MediaMetadata
                     local_db = SessionLocal()
                     try:
-                        meta = local_db.query(MediaMetadata).filter(MediaMetadata.trakt_id == trakt_id).first()
+                        meta = local_db.query(MediaMetadata).filter(
+                            MediaMetadata.trakt_id == trakt_id,
+                            MediaMetadata.media_type == ('movie' if mt == 'movie' else 'show')
+                        ).first()
                         from datetime import datetime as _dt
                         if meta:
                             if poster_url:

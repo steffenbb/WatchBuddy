@@ -147,31 +147,70 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
   }, [loadUserRatings]);
 
   return (
-    <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-2xl mx-auto p-6 md:p-8 flex flex-col gap-4 transition-all duration-500">
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <button onClick={onBack} className="px-2 py-1 text-sm rounded border border-gray-300 bg-white hover:bg-gray-50">← Back</button>
-          <h3 className="text-xl font-bold text-gray-800 truncate">{title}</h3>
+    <div className="w-full max-w-7xl mx-auto p-4 md:p-6">
+      {/* Header with glassmorphic styling */}
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6 mb-6">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-4">
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={onBack} 
+              className="px-4 py-3 rounded-xl border border-white/30 bg-white/10 backdrop-blur-sm text-white hover:bg-white/15 transition-all min-h-[44px] font-medium"
+            >
+              ← Back
+            </button>
+            <h3 className="text-2xl font-bold text-white truncate">{title}</h3>
+          </div>
+          <div className="flex items-center gap-2">
+            <button 
+              onClick={load} 
+              className="px-4 py-3 rounded-xl bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white transition-all min-h-[44px] font-medium shadow-lg"
+            >
+              Refresh
+            </button>
+            <button 
+              onClick={async()=>{ await loadListMeta(); setShowEdit(true); }} 
+              className="px-4 py-3 rounded-xl bg-white/10 backdrop-blur-sm border border-white/30 text-white hover:bg-white/15 transition-all min-h-[44px] font-medium"
+            >
+              Edit
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-700 flex items-center gap-2">
-            <input type="checkbox" checked={includeWatched} onChange={(e)=>setIncludeWatched(e.target.checked)} />
-            Include watched
+
+        {/* Controls row */}
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="text-sm text-white/90 flex items-center gap-2 bg-white/10 backdrop-blur-sm px-4 py-3 rounded-xl border border-white/20 min-h-[44px]">
+            <input 
+              type="checkbox" 
+              checked={includeWatched} 
+              onChange={(e)=>setIncludeWatched(e.target.checked)} 
+              className="w-4 h-4 rounded border-white/30 text-purple-500"
+            />
+            <span className="font-medium">Include watched</span>
           </label>
-          <select value={sortBy} onChange={(e)=>setSortBy(e.target.value as any)} className="text-sm px-2 py-1 rounded border bg-white">
-            <option value="score">Score</option>
-            <option value="added_at">Added</option>
-            <option value="watched_at">Watched</option>
+          <select 
+            value={sortBy} 
+            onChange={(e)=>setSortBy(e.target.value as any)} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]"
+          >
+            <option value="score">Sort: Score</option>
+            <option value="added_at">Sort: Added</option>
+            <option value="watched_at">Sort: Watched</option>
           </select>
-          <select value={order} onChange={(e)=>setOrder(e.target.value as any)} className="text-sm px-2 py-1 rounded border bg-white">
-            <option value="desc">Desc</option>
-            <option value="asc">Asc</option>
+          <select 
+            value={order} 
+            onChange={(e)=>setOrder(e.target.value as any)} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]"
+          >
+            <option value="desc">▼ Desc</option>
+            <option value="asc">▲ Asc</option>
           </select>
-          <select value={limit} onChange={(e)=>{ setPage(1); setLimit(Number(e.target.value)); }} className="text-sm px-2 py-1 rounded border bg-white">
+          <select 
+            value={limit} 
+            onChange={(e)=>{ setPage(1); setLimit(Number(e.target.value)); }} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]"
+          >
             {[10,25,50,100].map(n => <option key={n} value={n}>{n}/page</option>)}
           </select>
-          <button onClick={load} className="text-sm px-3 py-1 rounded bg-indigo-600 text-white hover:bg-indigo-700">Refresh</button>
-          <button onClick={async()=>{ await loadListMeta(); setShowEdit(true); }} className="text-sm px-3 py-1 rounded bg-gray-600 text-white hover:bg-gray-700">Edit</button>
         </div>
       </div>
 
@@ -189,10 +228,13 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
               if (vals.item_limit !== undefined) payload.item_limit = vals.item_limit;
               if (vals.sync_interval !== undefined) payload.sync_interval = vals.sync_interval;
               if (vals.full_sync_days !== undefined) payload.full_sync_days = vals.full_sync_days;
-              if ((listMeta.list_type === 'smartlist') && vals.discovery !== undefined) payload.discovery = vals.discovery;
-              if ((listMeta.list_type === 'smartlist') && vals.fusion_mode !== undefined) payload.fusion_mode = vals.fusion_mode;
-              if ((listMeta.list_type === 'smartlist') && vals.media_types !== undefined) payload.media_types = vals.media_types;
-              if ((listMeta.list_type === 'smartlist') && vals.genre_mode !== undefined) payload.genre_mode = vals.genre_mode;
+              // Custom/Suggested list filters
+              if (vals.genres !== undefined) payload.genres = vals.genres;
+              if (vals.genre_mode !== undefined) payload.genre_mode = vals.genre_mode;
+              if (vals.languages !== undefined) payload.languages = vals.languages;
+              if (vals.year_from !== undefined) payload.year_from = vals.year_from;
+              if (vals.year_to !== undefined) payload.year_to = vals.year_to;
+              if (vals.min_rating !== undefined) payload.min_rating = vals.min_rating;
               await api.patch(`/lists/${listId}`, payload);
               await api.post(`/lists/${listId}/sync?user_id=1&force_full=true`);
               await load();
@@ -204,110 +246,148 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
         />
       )}
 
-      <div className="flex items-center justify-between mb-3 text-xs text-gray-600">
-        <div>
+      {/* Pagination */}
+      <div className="flex items-center justify-between mb-4 text-white/80">
+        <div className="text-sm">
           {total > 0 ? `Showing ${Math.min((page-1)*limit+1, total)}–${Math.min(page*limit, total)} of ${total}` : 'No items'}
         </div>
         <div className="flex items-center gap-2">
-          <button disabled={page<=1} onClick={()=>setPage(p=>Math.max(1, p-1))} className={`px-2 py-1 rounded border text-xs ${page<=1 ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white hover:bg-gray-50'}`}>Prev</button>
-          <div>Page {page}</div>
-          <button disabled={page*limit >= total} onClick={()=>setPage(p=>p+1)} className={`px-2 py-1 rounded border text-xs ${page*limit >= total ? 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed' : 'bg-white hover:bg-gray-50'}`}>Next</button>
+          <button 
+            disabled={page<=1} 
+            onClick={()=>setPage(p=>Math.max(1, p-1))} 
+            className={`px-4 py-3 rounded-xl text-sm font-medium min-h-[44px] ${
+              page<=1 
+                ? 'bg-white/5 text-white/40 border border-white/10 cursor-not-allowed' 
+                : 'bg-white/10 backdrop-blur-sm text-white border border-white/20 hover:bg-white/15'
+            }`}
+          >
+            Prev
+          </button>
+          <div className="text-sm font-medium">Page {page}</div>
+          <button 
+            disabled={page*limit >= total} 
+            onClick={()=>setPage(p=>p+1)} 
+            className={`px-4 py-3 rounded-xl text-sm font-medium min-h-[44px] ${
+              page*limit >= total 
+                ? 'bg-white/5 text-white/40 border border-white/10 cursor-not-allowed' 
+                : 'bg-white/10 backdrop-blur-sm text-white border border-white/20 hover:bg-white/15'
+            }`}
+          >
+            Next
+          </button>
         </div>
       </div>
 
       {loading ? (
-        <div className="flex items-center gap-3 py-12 justify-center text-gray-600"><div className="w-5 h-5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin"/> Loading…</div>
+        <div className="flex items-center gap-3 py-12 justify-center text-white">
+          <div className="w-6 h-6 border-2 border-white/60 border-t-transparent rounded-full animate-spin"/>
+          <span>Loading…</span>
+        </div>
       ) : error ? (
-        <div className="p-3 bg-red-100 text-red-800 border border-red-200 rounded text-sm">{error}</div>
+        <div className="p-4 bg-red-500/20 text-red-200 border border-red-400/30 rounded-xl">{error}</div>
       ) : items.length === 0 ? (
-        <div className="text-gray-600 text-sm">No items</div>
+        <div className="text-center py-12">
+          <div className="text-6xl mb-4">🎬</div>
+          <h3 className="text-2xl font-bold text-white mb-2">No items found</h3>
+          <p className="text-white/60">Try adjusting your filters or sync the list</p>
+        </div>
       ) : (
-        <div className="space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
           {items.map(it => {
             const comps = parseExplanation(it.explanation)?.components || parseExplanation(it.explanation) || {};
-            // Pick top 3 component scores
             const entries = Object.entries(comps).filter(([,v])=> typeof v === 'number' && v > 0).sort((a:any,b:any)=> b[1]-a[1]).slice(0,3);
             return (
-              <div key={it.id} className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-sm transition-shadow">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-start gap-3 min-w-0">
-                    {it.poster_url ? (
-                      <img src={it.poster_url} alt={it.title || ''} className="w-12 h-18 object-cover rounded shadow-sm" loading="lazy" />
-                    ) : null}
-                    <div className="min-w-0">
-                    <div className="font-semibold text-gray-900 truncate">{it.title || `#${it.trakt_id}`}</div>
-                    <div className="text-xs text-gray-500 mt-1 flex items-center gap-1">
-                      {it.media_type} • 
-                      <span 
-                        className="cursor-help underline decoration-dotted"
-                        title="Match Score: How well this item matches your preferences. Higher scores (0.0-1.0) indicate better matches based on factors like genre preferences, ratings, popularity, and your viewing history."
-                      >
-                        score {it.score?.toFixed(2)}
-                      </span>
-                      <span className="text-gray-400">ℹ️</span>
+              <div key={it.id} className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl transition-all duration-300 overflow-hidden">
+                {/* Poster */}
+                <div className="relative aspect-[2/3] bg-gradient-to-br from-indigo-900/50 to-purple-900/50 overflow-hidden">
+                  {it.poster_url ? (
+                    <img 
+                      src={it.poster_url} 
+                      alt={it.title || ''} 
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                      loading="lazy" 
+                    />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-4xl text-white/30">
+                      {it.media_type === 'movie' ? '🎬' : '📺'}
                     </div>
-                    {it.explanation && !parseExplanation(it.explanation) && (
-                      <div className="text-xs text-gray-600 mt-2 italic bg-gray-50 p-2 rounded border">
-                        💡 {it.explanation}
-                      </div>
-                    )}
-                    </div>
+                  )}
+                  {/* Overlay with score */}
+                  <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg">
+                    <span className="text-xs font-bold text-white">{it.score?.toFixed(2)}</span>
                   </div>
-                  <div className="flex flex-col gap-2 items-end">
-                    {it.is_watched ? (
-                          <span className="inline-flex items-center px-2 py-1 text-xs rounded-full bg-green-100 text-green-700 border border-green-200">Watched{it.watched_at ? ` • ${formatLocalDate(it.watched_at, { dateStyle: 'medium', timeStyle: 'short' })}` : ''}</span>
-                    ) : (
-                      <span className="inline-flex items-center px-2 py-1 text-xs rounded-full bg-blue-100 text-blue-700 border border-blue-200">Unwatched</span>
-                    )}
-                    <div className="flex gap-1">
-                      <button 
-                        onClick={() => handleRating(it.trakt_id, it.media_type, 1)}
-                        className={`p-1 rounded text-sm transition-colors ${
-                          userRatings[it.trakt_id] === 1 
-                            ? 'bg-green-500 text-white hover:bg-green-600' 
-                            : 'bg-gray-100 text-gray-600 hover:bg-green-100 hover:text-green-700'
-                        }`}
-                        title="Thumbs up - I like this recommendation"
-                      >
-                        👍
-                      </button>
-                      <button 
-                        onClick={() => handleRating(it.trakt_id, it.media_type, -1)}
-                        className={`p-1 rounded text-sm transition-colors ${
-                          userRatings[it.trakt_id] === -1 
-                            ? 'bg-red-500 text-white hover:bg-red-600' 
-                            : 'bg-gray-100 text-gray-600 hover:bg-red-100 hover:text-red-700'
-                        }`}
-                        title="Thumbs down - I don't like this recommendation"
-                      >
-                        👎
-                      </button>
+                  {/* Watched badge */}
+                  {it.is_watched && (
+                    <div className="absolute top-2 left-2 bg-emerald-500/80 backdrop-blur-sm px-2 py-1 rounded-lg">
+                      <span className="text-xs font-bold text-white">✓</span>
                     </div>
-                  </div>
+                  )}
                 </div>
-                {entries.length > 0 && (
-                  <div className="flex flex-wrap gap-2 mt-3">
-                    {entries.map(([k,v])=> {
-                      const compExplanations: Record<string, string> = {
-                        genre_overlap: 'How closely the item matches your favorite genres.',
-                        semantic_sim: 'How similar the item is to your past favorites (using AI).',
-                        mood_score: 'How well the item fits your current mood.',
-                        rating_norm: 'How highly this item is rated by the community.',
-                        novelty: 'How new or unique this item is for you.',
-                        popularity_norm: 'How popular this item is overall.'
-                      };
-                      return (
-                        <span
-                          key={k}
-                          className={`inline-flex items-center px-2 py-0.5 text-xs rounded-full border ${compColor(k)}`}
-                          title={compExplanations[k] || ''}
-                        >
-                          {compLabel(k)}: {(v as number).toFixed(2)}
-                        </span>
-                      );
-                    })}
+                
+                {/* Content */}
+                <div className="p-3">
+                  <h4 className="font-semibold text-white text-sm line-clamp-2 mb-2">
+                    {it.title || `#${it.trakt_id}`}
+                  </h4>
+                  
+                  {/* Rating buttons */}
+                  <div className="flex gap-2 mb-2">
+                    <button 
+                      onClick={() => handleRating(it.trakt_id, it.media_type, 1)}
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all min-h-[44px] ${
+                        userRatings[it.trakt_id] === 1 
+                          ? 'bg-emerald-500 text-white' 
+                          : 'bg-white/10 text-white/70 hover:bg-emerald-500/30 border border-white/20'
+                      }`}
+                      title="Thumbs up"
+                    >
+                      👍
+                    </button>
+                    <button 
+                      onClick={() => handleRating(it.trakt_id, it.media_type, -1)}
+                      className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all min-h-[44px] ${
+                        userRatings[it.trakt_id] === -1 
+                          ? 'bg-red-500 text-white' 
+                          : 'bg-white/10 text-white/70 hover:bg-red-500/30 border border-white/20'
+                      }`}
+                      title="Thumbs down"
+                    >
+                      👎
+                    </button>
                   </div>
-                )}
+                  
+                  {/* Score breakdown */}
+                  {entries.length > 0 && (
+                    <div className="flex items-center justify-between">
+                      <div className="flex flex-wrap gap-1">
+                        {entries.slice(0, 2).map(([k,v])=> (
+                          <span
+                            key={k}
+                            className="inline-flex items-center px-2 py-0.5 text-xs rounded-full bg-purple-500/20 text-purple-200 border border-purple-400/30"
+                            title={`${compLabel(k)} contribution`}
+                          >
+                            {compLabel(k).slice(0, 3)}: {(v as number).toFixed(1)}
+                          </span>
+                        ))}
+                      </div>
+                      {/* Details popover */}
+                      <div className="relative group">
+                        <button className="px-2 py-1 text-xs rounded-md bg-white/10 text-white/80 hover:bg-white/20 border border-white/20" title="Why this?">Why</button>
+                        <div className="absolute right-0 mt-2 hidden group-hover:block z-20 w-60 p-3 rounded-xl bg-black/80 text-white/90 border border-white/20 shadow-xl">
+                          <div className="text-xs font-semibold mb-1">Why this recommendation</div>
+                          <ul className="space-y-1">
+                            {Object.entries(comps).filter(([,v])=> typeof v === 'number' && v>0).map(([k,v])=> (
+                              <li key={k} className="flex items-center justify-between text-xs">
+                                <span className="text-white/80">{compLabel(k)}</span>
+                                <span className="text-white/70">{(v as number).toFixed(2)}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })}
@@ -327,87 +407,184 @@ function EditPanel({ meta, account, onClose, onSave, saving }:{
   const [values, setValues] = React.useState<any>({
     ...meta,
     genre_mode: meta.genre_mode || 'any',
+    genres: meta.genres || [],
+    languages: meta.languages || [],
+    year_from: meta.year_from || 2000,
+    year_to: meta.year_to || new Date().getFullYear(),
+    min_rating: meta.min_rating || 0,
   });
-  const isSmart = meta.list_type === 'smartlist';
   const maxItems = account?.max_items_per_list ?? 100;
   const update = (k:string, v:any)=> setValues((prev:any)=> ({...prev, [k]: v }));
 
   return (
-  <div className="mb-4 p-3 rounded-2xl border border-indigo-100 bg-white/80 backdrop-blur-xl shadow transition-all duration-500">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Title</span>
-          <input className="text-xs px-2 py-1 bg-white rounded border" value={values.title || ''} onChange={(e)=>update('title', e.target.value)} />
+    <div className="mb-6 p-5 rounded-2xl border border-white/30 bg-white/10 backdrop-blur-lg shadow-lg">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Title</span>
+          <input 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]" 
+            value={values.title || ''} 
+            onChange={(e)=>update('title', e.target.value)} 
+          />
         </label>
-        <label className="text-xs text-gray-700 flex items-center gap-2 bg-white px-2 py-1 rounded border">
-          <input type="checkbox" checked={!!values.exclude_watched} onChange={(e)=>update('exclude_watched', e.target.checked)} />
-          Exclude Watched
+        <label className="text-sm text-white/90 flex items-center gap-3 bg-white/10 backdrop-blur-sm px-4 py-3 rounded-xl border border-white/20 min-h-[44px]">
+          <input 
+            type="checkbox" 
+            checked={!!values.exclude_watched} 
+            onChange={(e)=>update('exclude_watched', e.target.checked)} 
+            className="w-5 h-5 rounded border-white/30 text-purple-500"
+          />
+          <span className="font-medium">Exclude Watched</span>
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Item limit</span>
-          <select className="text-xs px-2 py-1 bg-white rounded border" value={values.item_limit}
-            onChange={(e)=>update('item_limit', Math.min(Number(e.target.value), maxItems))}>
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Item limit</span>
+          <select 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]" 
+            value={values.item_limit}
+            onChange={(e)=>update('item_limit', Math.min(Number(e.target.value), maxItems))}
+          >
             {[10,20,50,100,200,500].filter(n=>n<=maxItems).map(n=> (
               <option key={n} value={n}>{n} items</option>
             ))}
           </select>
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Sync interval (hours)</span>
-          <input type="number" min={1} max={48} className="text-xs px-2 py-1 bg-white rounded border" value={values.sync_interval ?? ''}
-            onChange={(e)=>update('sync_interval', e.target.value ? Number(e.target.value) : undefined)} />
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Sync interval (hours)</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={48} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]" 
+            value={values.sync_interval ?? ''}
+            onChange={(e)=>update('sync_interval', e.target.value ? Number(e.target.value) : undefined)} 
+          />
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Full sync cadence (days)</span>
-          <input type="number" min={1} max={7} className="text-xs px-2 py-1 bg-white rounded border" value={values.full_sync_days}
-            onChange={(e)=>update('full_sync_days', Number(e.target.value))} />
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Full sync cadence (days)</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={7} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 min-h-[44px]" 
+            value={values.full_sync_days}
+            onChange={(e)=>update('full_sync_days', Number(e.target.value))} 
+          />
         </label>
       </div>
-      {isSmart && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-2">
-          <label className="text-xs text-gray-700 flex flex-col gap-1">
-            <span>Discovery</span>
-            <select className="text-xs px-2 py-1 bg-white rounded border" value={values.discovery} onChange={(e)=>update('discovery', e.target.value)}>
-              <option value="balanced">Balanced</option>
-              <option value="obscure">Obscure</option>
-              <option value="popular">Popular</option>
-              <option value="very_obscure">Very Obscure</option>
+      {/* Custom/Suggested List Filters */}
+      <div className="space-y-4 mt-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="text-sm text-white/90 flex flex-col gap-2">
+            <span className="font-medium">Year From</span>
+            <input 
+              type="number" 
+              min={1900} 
+              max={new Date().getFullYear()} 
+              className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+              value={values.year_from}
+              onChange={(e)=>update('year_from', Number(e.target.value))} 
+            />
+          </label>
+          <label className="text-sm text-white/90 flex flex-col gap-2">
+            <span className="font-medium">Year To</span>
+            <input 
+              type="number" 
+              min={1900} 
+              max={new Date().getFullYear()} 
+              className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+              value={values.year_to}
+              onChange={(e)=>update('year_to', Number(e.target.value))} 
+            />
+          </label>
+          <label className="text-sm text-white/90 flex flex-col gap-2">
+            <span className="font-medium">Minimum Rating (0-10)</span>
+            <input 
+              type="number" 
+              min={0} 
+              max={10} 
+              step={0.1}
+              className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+              value={values.min_rating}
+              onChange={(e)=>update('min_rating', Number(e.target.value))} 
+            />
+          </label>
+          <label className="text-sm text-white/90 flex flex-col gap-2">
+            <span className="font-medium">Genre Mode</span>
+            <select 
+              className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+              value={values.genre_mode} 
+              onChange={(e)=>update('genre_mode', e.target.value)}
+            >
+              <option value="any">Any Genre (OR)</option>
+              <option value="all">All Genres (AND)</option>
             </select>
           </label>
-          <label className="text-xs text-gray-700 flex items-center gap-2 bg-white px-2 py-1 rounded border">
-            <input type="checkbox" checked={!!values.fusion_mode} onChange={(e)=>update('fusion_mode', e.target.checked)} />
-            Fusion mode
-          </label>
-          <div className="text-xs text-gray-700">
-            <div className="mb-1">Media types</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={()=>{
-                const cur = new Set(values.media_types || []);
-                if (cur.has('movies')) cur.delete('movies'); else cur.add('movies');
-                update('media_types', Array.from(cur));
-              }} className={`px-2 py-1 rounded border ${values.media_types?.includes('movies') ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Movies</button>
-              <button type="button" onClick={()=>{
-                const cur = new Set(values.media_types || []);
-                if (cur.has('shows')) cur.delete('shows'); else cur.add('shows');
-                update('media_types', Array.from(cur));
-              }} className={`px-2 py-1 rounded border ${values.media_types?.includes('shows') ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Shows</button>
-            </div>
-            <div className="mt-2 flex gap-4">
-              <label className="flex items-center gap-1 text-xs cursor-pointer">
-                <input type="radio" name="genreModeEdit" value="any" checked={values.genre_mode==='any'} onChange={()=>update('genre_mode','any')} />
-                Match <span className="font-semibold">any</span> genre
-              </label>
-              <label className="flex items-center gap-1 text-xs cursor-pointer">
-                <input type="radio" name="genreModeEdit" value="all" checked={values.genre_mode==='all'} onChange={()=>update('genre_mode','all')} />
-                Match <span className="font-semibold">all</span> genres
-              </label>
-            </div>
+        </div>
+        <div className="text-sm text-white/90">
+          <div className="mb-2 font-medium">Genres (select multiple)</div>
+          <div className="flex flex-wrap gap-2">
+            {['action','comedy','drama','sci-fi','romance','mystery','thriller','horror','documentary','animation','fantasy','adventure'].map(g => (
+              <button
+                key={g}
+                type="button"
+                onClick={()=>{
+                  const cur = new Set(values.genres || []);
+                  if (cur.has(g)) cur.delete(g); else cur.add(g);
+                  update('genres', Array.from(cur));
+                }}
+                className={`px-3 py-2 rounded-lg border transition-all text-sm ${
+                  values.genres?.includes(g)
+                    ? 'bg-indigo-500 text-white border-indigo-500'
+                    : 'bg-white/10 text-white border-white/20 hover:bg-white/15'
+                }`}
+              >
+                {g}
+              </button>
+            ))}
           </div>
         </div>
-      )}
-      <div className="flex gap-2 justify-end mt-3">
-        <button onClick={onClose} className="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-50">Cancel</button>
-        <button onClick={()=>onSave(values)} disabled={!!saving} className={`px-3 py-1.5 text-xs rounded ${saving ? 'bg-gray-300 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{saving ? 'Saving…' : 'Save & Full Sync'}</button>
+        <div className="text-sm text-white/90">
+          <div className="mb-2 font-medium">Languages (select multiple)</div>
+          <div className="flex flex-wrap gap-2">
+            {['en','da','sv','no','es','fr','de','it','ja','ko','zh'].map(lang => (
+              <button
+                key={lang}
+                type="button"
+                onClick={()=>{
+                  const cur = new Set(values.languages || []);
+                  if (cur.has(lang)) cur.delete(lang); else cur.add(lang);
+                  update('languages', Array.from(cur));
+                }}
+                className={`px-3 py-2 rounded-lg border transition-all text-sm uppercase ${
+                  values.languages?.includes(lang)
+                    ? 'bg-purple-500 text-white border-purple-500'
+                    : 'bg-white/10 text-white border-white/20 hover:bg-white/15'
+                }`}
+              >
+                {lang}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+      <div className="flex gap-3 justify-end mt-5 pt-4 border-t border-white/20">
+        <button 
+          onClick={onClose} 
+          className="px-6 py-3 rounded-xl border border-white/20 bg-white/10 backdrop-blur-sm text-white hover:bg-white/15 transition-all min-h-[44px] font-medium"
+        >
+          Cancel
+        </button>
+        <button 
+          onClick={()=>onSave(values)} 
+          disabled={!!saving} 
+          className={`px-6 py-3 rounded-xl font-medium min-h-[44px] transition-all ${
+            saving 
+              ? 'bg-white/5 text-white/40 cursor-not-allowed' 
+              : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white shadow-lg'
+          }`}
+        >
+          {saving ? 'Saving…' : 'Save & Full Sync'}
+        </button>
       </div>
     </div>
   );

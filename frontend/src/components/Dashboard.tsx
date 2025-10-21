@@ -4,8 +4,9 @@ import { formatRelativeTime, formatLocalDate } from "../utils/date";
 import CreateListForm from "./CreateListForm";
 import ListDetails from "./ListDetails";
 import SuggestedLists from "./SuggestedLists";
-import DynamicDashboard from "./DynamicDashboard";
+import AiListManager from "./AiListManager";
 import Settings from "./Settings";
+import { theme } from "../theme";
 
 import { StatusWidgets } from "./StatusWidgets";
 import { useTraktAccount } from "../hooks/useTraktAccount";
@@ -41,6 +42,8 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   const [editingId, setEditingId] = useState<number|null>(null);
   const [savingId, setSavingId] = useState<number|null>(null);
   const [editValues, setEditValues] = useState<Record<number, any>>({});
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showSuggestedModal, setShowSuggestedModal] = useState(false);
 
   // Initialize from URL on load
   useEffect(() => {
@@ -116,74 +119,82 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
 
   return (
     <div className="w-full max-w-[1800px] mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8 px-2 md:px-8">
-      <div className="lg:col-span-2 bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100 flex flex-col py-8">
-        {/* Mobile-optimized navigation */}
-        <div className="grid grid-cols-5 gap-2 mb-4 md:flex md:gap-2">
+      <div className="lg:col-span-2 bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 flex flex-col py-8 rounded-3xl shadow-2xl">
+        {/* Modern glassmorphic navigation */}
+        <div className="flex flex-wrap gap-2 mb-6 px-4 md:gap-3">
           <button 
-            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
-              view === "lists" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+            className={`flex-1 min-w-[80px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] ${
+              view === "lists" 
+                ? "bg-white text-indigo-900 shadow-xl scale-105" 
+                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
             }`} 
             onClick={()=>changeView("lists")}
           >
             Lists
           </button>
           <button 
-            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
-              view === "create" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
-            }`} 
-            onClick={()=>changeView("create")}
-          >
-            Create
-          </button>
-          <button 
-            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
-              view === "dynamic" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+            className={`flex-1 min-w-[90px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] flex items-center justify-center gap-1 ${
+              view === "dynamic" 
+                ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-xl scale-105" 
+                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
             }`} 
             onClick={()=>changeView("dynamic")}
           >
-            Dynamic
+            <span className="text-lg hidden sm:inline">✨</span>
+            <span className="hidden sm:inline">AI Lists</span>
+            <span className="sm:hidden">AI</span>
           </button>
           <button 
-            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
-              view === "suggested" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
-            }`} 
-            onClick={()=>changeView("suggested")}
-          >
-            Suggested
-          </button>
-          <button 
-            className={`px-2 py-2 md:px-3 md:py-1 rounded shadow text-sm font-medium transition-colors ${
-              view === "settings" ? "bg-indigo-600 text-white" : "bg-white text-gray-700 hover:bg-gray-50"
+            className={`flex-1 min-w-[80px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] ${
+              view === "settings" 
+                ? "bg-white text-indigo-900 shadow-xl scale-105" 
+                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
             }`} 
             onClick={()=>changeView("settings")}
           >
-            Settings
+            <span className="hidden sm:inline">Settings</span>
+            <span className="sm:hidden">⚙️</span>
           </button>
         </div>
 
         {view === "lists" && (
-          <div className="space-y-3">
+          <div className="space-y-4 px-4">
+            {/* Action buttons at top of lists */}
+            <div className="flex gap-3 mb-4">
+              <button
+                onClick={() => setShowCreateModal(true)}
+                className="flex-1 px-4 py-3 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] shadow-lg"
+              >
+                ➕ Create List
+              </button>
+              <button
+                onClick={() => setShowSuggestedModal(true)}
+                className="flex-1 px-4 py-3 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] shadow-lg"
+              >
+                💡 Suggested Lists
+              </button>
+            </div>
+
             {lists.map(l => (
-            <div key={l.id} className="bg-white p-3 md:p-4 rounded-lg shadow-sm border border-gray-200">
-              {/* Mobile-optimized list item layout */}
-              <div className="flex flex-col sm:flex-row sm:justify-between gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="font-semibold text-gray-900 truncate">
-                    <button onClick={()=>changeView('listDetails', l.id, l.title)} className="hover:underline">{l.title}</button>
+            <div key={l.id} className="bg-white/10 backdrop-blur-lg border border-white/20 p-4 md:p-6 rounded-2xl shadow-lg hover:bg-white/15 transition-all duration-200">
+              {/* Modern list item layout */}
+              <div className="flex flex-col sm:flex-row sm:justify-between gap-4">
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  <div className="font-bold text-xl text-white truncate overflow-hidden text-ellipsis whitespace-nowrap">
+                    <button onClick={()=>changeView('listDetails', l.id, l.title)} className="hover:text-pink-300 transition-colors truncate overflow-hidden text-ellipsis max-w-full inline-block align-bottom">{l.title}</button>
                   </div>
-                  <div className="text-sm text-gray-500 mt-1">
-                    <span className="inline-block">{l.list_type}</span>
-                    <span className="mx-1">•</span>
-                    <span className="inline-block">{l.item_limit} items</span>
+                  <div className="text-sm text-white/80 mt-2 flex items-center gap-3">
+                    <span className="px-3 py-1 bg-purple-500/30 rounded-full">{l.list_type}</span>
+                    <span className="px-3 py-1 bg-indigo-500/30 rounded-full">{l.item_limit} items</span>
                   </div>
-                  <div className="text-xs text-gray-400 mt-1 flex items-center gap-2">
+                  <div className="text-xs text-white/60 mt-2 flex items-center gap-2">
                     <span>
                       Last updated: {l.last_updated ? formatRelativeTime(l.last_updated) : 'Never'}
                     </span>
-                    <button onClick={load} className="text-[11px] px-1 py-0.5 rounded border border-gray-300 bg-white hover:bg-gray-50">↻</button>
+                    <button onClick={load} className="text-xs px-2 py-1 rounded-lg border border-white/30 bg-white/10 hover:bg-white/20 transition-colors">↻</button>
                   </div>
                   {l.last_error && (
-                    <div className="text-red-600 text-xs mt-1 p-2 bg-red-50 rounded border border-red-200">
+                    <div className="text-red-300 text-xs mt-2 p-3 bg-red-500/20 rounded-lg border border-red-400/30">
                       Error: {l.last_error}
                     </div>
                   )}
@@ -204,11 +215,17 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                           if (vals.item_limit !== undefined) payload.item_limit = vals.item_limit;
                           if (vals.sync_interval !== undefined) payload.sync_interval = vals.sync_interval;
                           if (vals.full_sync_days !== undefined) payload.full_sync_days = vals.full_sync_days;
-                          if ((l.list_type === 'smartlist') && vals.discovery !== undefined) payload.discovery = vals.discovery;
-                          if ((l.list_type === 'smartlist') && vals.fusion_mode !== undefined) payload.fusion_mode = vals.fusion_mode;
-                          if ((l.list_type === 'smartlist') && vals.media_types !== undefined) payload.media_types = vals.media_types;
+                          
+                          // Custom/Suggested list filters
+                          if (vals.genres !== undefined) payload.genres = vals.genres;
+                          if (vals.genre_mode !== undefined) payload.genre_mode = vals.genre_mode;
+                          if (vals.languages !== undefined) payload.languages = vals.languages;
+                          if (vals.year_from !== undefined) payload.year_from = vals.year_from;
+                          if (vals.year_to !== undefined) payload.year_to = vals.year_to;
+                          if (vals.min_rating !== undefined) payload.min_rating = vals.min_rating;
+                          
                           await api.patch(`/lists/${l.id}`, payload);
-                          // Immediately run a full sync
+                          // Immediately run a full sync to apply filter changes
                           await api.post(`/lists/${l.id}/sync?user_id=1&force_full=true`);
                           await load();
                           window.dispatchEvent(new Event('lists-updated'));
@@ -223,13 +240,13 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                     />
                   )}
                 </div>
-                {/* Mobile-optimized action buttons */}
-                <div className="flex sm:flex-col gap-2 sm:gap-1">
+                {/* Touch-optimized action buttons */}
+                <div className="flex sm:flex-col gap-2">
                   {editingId === l.id ? (
                     <button 
                       onClick={()=>{ /* handled inside panel */ }}
                       disabled
-                      className="flex-1 sm:flex-none px-3 py-2 bg-gray-300 text-white rounded-md text-sm font-medium"
+                      className="flex-1 sm:flex-none px-4 py-3 bg-white/20 text-white/50 rounded-xl text-sm font-semibold min-h-[44px]"
                     >Editing…</button>
                   ) : (
                     <button 
@@ -243,21 +260,25 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                           item_limit: l.item_limit || 20,
                           sync_interval: l.sync_interval || undefined,
                           full_sync_days: (filters.full_sync_days || 1),
-                          discovery: filters.discovery || 'balanced',
-                          fusion_mode: !!filters.fusion_mode,
-                          media_types: Array.isArray(filters.media_types) ? filters.media_types : ['movies','shows']
+                          // Custom/Suggested list filters
+                          genres: Array.isArray(filters.genres) ? filters.genres : [],
+                          genre_mode: filters.genre_mode || 'any',
+                          languages: Array.isArray(filters.languages) ? filters.languages : [],
+                          year_from: filters.year_from || 2000,
+                          year_to: filters.year_to || new Date().getFullYear(),
+                          min_rating: filters.min_rating || 0
                         };
                         setEditValues(prev=>({...prev, [l.id]: initVals}));
                         setEditingId(l.id);
                       }} 
-                      className="flex-1 sm:flex-none px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-md text-sm font-medium transition-colors touch-manipulation"
+                      className="flex-1 sm:flex-none px-4 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] border border-white/20"
                     >
                       Edit
                     </button>
                   )}
                   <button 
                     onClick={()=>api.post(`/lists/${l.id}/sync?user_id=1`)} 
-                    className="flex-1 sm:flex-none px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-md text-sm font-medium transition-colors touch-manipulation"
+                    className="flex-1 sm:flex-none px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] shadow-lg"
                   >
                     Sync
                   </button>
@@ -268,7 +289,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                         load();
                       }
                     }} 
-                    className="flex-1 sm:flex-none px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-md text-sm font-medium transition-colors touch-manipulation"
+                    className="flex-1 sm:flex-none px-4 py-3 bg-red-500/80 hover:bg-red-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px]"
                   >
                     Delete
                   </button>
@@ -288,7 +309,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
         )}
 
         {view === "dynamic" && (
-          <DynamicDashboard />
+          <AiListManager />
         )}
 
         {view === "suggested" && <SuggestedLists onCreate={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />}
@@ -298,15 +319,15 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
       {/* Mobile-optimized sidebar - stacks on mobile, sidebar on desktop */}
       <aside className="lg:col-span-1 space-y-4">
         <StatusWidgets />
-        <div className="bg-white p-3 md:p-4 rounded-lg shadow-sm border border-gray-200">
-          <h4 className="font-semibold text-gray-900">Quota</h4>
+        <div className="bg-white/10 backdrop-blur-lg border border-white/20 p-4 md:p-5 rounded-2xl shadow-lg">
+          <h4 className="font-semibold text-white text-lg mb-3">Quota</h4>
           {accountLoading ? (
-            <p className="text-sm text-gray-600 mt-1">Checking account...</p>
+            <p className="text-sm text-white/60">Checking account...</p>
           ) : account ? (
             <>
-              <p className={`text-sm mt-1 ${account.vip ? 'text-green-700' : 'text-gray-700'}`}>{account.message}</p>
+              <p className={`text-sm ${account.vip ? 'text-emerald-300' : 'text-white/80'}`}>{account.message}</p>
               {!account.vip && (
-                <p className="text-xs text-gray-500 mt-1">Upgrade your Trakt account to VIP for unlimited lists and higher item limits.</p>
+                <p className="text-xs text-white/50 mt-2">Upgrade your Trakt account to VIP for unlimited lists and higher item limits.</p>
               )}
             </>
           ) : (
@@ -314,6 +335,54 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
           )}
         </div>
       </aside>
+
+      {/* Create List Modal */}
+      {showCreateModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowCreateModal(false)}>
+          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-4 flex justify-between items-center rounded-t-3xl z-10">
+              <h2 className="text-2xl font-bold text-white">Create New List</h2>
+              <button
+                onClick={() => setShowCreateModal(false)}
+                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-6">
+              <CreateListForm onCreated={() => {
+                load();
+                window.dispatchEvent(new Event('lists-updated'));
+                setShowCreateModal(false);
+              }} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Suggested Lists Modal */}
+      {showSuggestedModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowSuggestedModal(false)}>
+          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-4 flex justify-between items-center rounded-t-3xl z-10">
+              <h2 className="text-2xl font-bold text-white">Suggested Lists</h2>
+              <button
+                onClick={() => setShowSuggestedModal(false)}
+                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all"
+              >
+                ×
+              </button>
+            </div>
+            <div className="p-6">
+              <SuggestedLists onCreate={() => {
+                load();
+                window.dispatchEvent(new Event('lists-updated'));
+                setShowSuggestedModal(false);
+              }} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -328,75 +397,176 @@ function EditPanel({ list, account, values, onChange, onCancel, onSave, saving }
   saving: boolean;
 }){
   if (!values) return null;
-  const isSmart = list.list_type === 'smartlist';
   const maxItems = account?.max_items_per_list ?? 100;
   const update = (k:string, v:any)=> onChange({ ...values, [k]: v });
   return (
-    <div className="mt-3 p-3 rounded border bg-gray-50 space-y-3">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Title</span>
-          <input className="text-xs px-2 py-1 bg-white rounded border" value={values.title || ''} onChange={(e)=>update('title', e.target.value)} />
+    <div className="mt-4 p-5 rounded-2xl border border-white/30 bg-white/5 backdrop-blur-sm space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Title</span>
+          <input 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+            value={values.title || ''} 
+            onChange={(e)=>update('title', e.target.value)} 
+          />
         </label>
-        <label className="text-xs text-gray-700 flex items-center gap-2 bg-white px-2 py-1 rounded border">
-          <input type="checkbox" checked={!!values.exclude_watched} onChange={(e)=>update('exclude_watched', e.target.checked)} />
-          Exclude Watched
+        <label className="text-sm text-white/90 flex items-center gap-3 bg-white/10 backdrop-blur-sm px-4 py-3 rounded-xl border border-white/20 min-h-[44px]">
+          <input 
+            type="checkbox" 
+            checked={!!values.exclude_watched} 
+            onChange={(e)=>update('exclude_watched', e.target.checked)} 
+            className="w-5 h-5 rounded border-white/30 text-purple-500 focus:ring-purple-400 focus:ring-offset-0"
+          />
+          <span className="font-medium">Exclude Watched</span>
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Item limit</span>
-          <select className="text-xs px-2 py-1 bg-white rounded border" value={values.item_limit}
-            onChange={(e)=>update('item_limit', Math.min(Number(e.target.value), maxItems))}>
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Item limit</span>
+          <select 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+            value={values.item_limit}
+            onChange={(e)=>update('item_limit', Math.min(Number(e.target.value), maxItems))}
+          >
             {[10,20,50,100,200,500].filter(n=>n<=maxItems).map(n=> (
               <option key={n} value={n}>{n} items</option>
             ))}
           </select>
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Sync interval (hours)</span>
-          <input type="number" min={1} max={48} className="text-xs px-2 py-1 bg-white rounded border" value={values.sync_interval ?? ''}
-            onChange={(e)=>update('sync_interval', e.target.value ? Number(e.target.value) : undefined)} />
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Sync interval (hours)</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={48} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+            value={values.sync_interval ?? ''}
+            onChange={(e)=>update('sync_interval', e.target.value ? Number(e.target.value) : undefined)} 
+          />
         </label>
-        <label className="text-xs text-gray-700 flex flex-col gap-1">
-          <span>Full sync cadence (days)</span>
-          <input type="number" min={1} max={7} className="text-xs px-2 py-1 bg-white rounded border" value={values.full_sync_days}
-            onChange={(e)=>update('full_sync_days', Number(e.target.value))} />
+        <label className="text-sm text-white/90 flex flex-col gap-2">
+          <span className="font-medium">Full sync cadence (days)</span>
+          <input 
+            type="number" 
+            min={1} 
+            max={7} 
+            className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+            value={values.full_sync_days}
+            onChange={(e)=>update('full_sync_days', Number(e.target.value))} 
+          />
         </label>
       </div>
-      {isSmart && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <label className="text-xs text-gray-700 flex flex-col gap-1">
-            <span>Discovery</span>
-            <select className="text-xs px-2 py-1 bg-white rounded border" value={values.discovery} onChange={(e)=>update('discovery', e.target.value)}>
-              <option value="balanced">Balanced</option>
-              <option value="obscure">Obscure</option>
-              <option value="popular">Popular</option>
-              <option value="very_obscure">Very Obscure</option>
-            </select>
-          </label>
-          <label className="text-xs text-gray-700 flex items-center gap-2 bg-white px-2 py-1 rounded border">
-            <input type="checkbox" checked={!!values.fusion_mode} onChange={(e)=>update('fusion_mode', e.target.checked)} />
-            Fusion mode
-          </label>
-          <div className="text-xs text-gray-700">
-            <div className="mb-1">Media types</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={()=>{
-                const cur = new Set(values.media_types || []);
-                if (cur.has('movies')) cur.delete('movies'); else cur.add('movies');
-                update('media_types', Array.from(cur));
-              }} className={`px-2 py-1 rounded border ${values.media_types?.includes('movies') ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Movies</button>
-              <button type="button" onClick={()=>{
-                const cur = new Set(values.media_types || []);
-                if (cur.has('shows')) cur.delete('shows'); else cur.add('shows');
-                update('media_types', Array.from(cur));
-              }} className={`px-2 py-1 rounded border ${values.media_types?.includes('shows') ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white'}`}>Shows</button>
+      <div className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="text-sm text-white/90 flex flex-col gap-2">
+            <span className="font-medium">Year From</span>
+            <input 
+                type="number" 
+                min={1900} 
+                max={new Date().getFullYear()} 
+                className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+                value={values.year_from || 2000}
+                onChange={(e)=>update('year_from', Number(e.target.value))} 
+              />
+            </label>
+            <label className="text-sm text-white/90 flex flex-col gap-2">
+              <span className="font-medium">Year To</span>
+              <input 
+                type="number" 
+                min={1900} 
+                max={new Date().getFullYear()} 
+                className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+                value={values.year_to || new Date().getFullYear()}
+                onChange={(e)=>update('year_to', Number(e.target.value))} 
+              />
+            </label>
+            <label className="text-sm text-white/90 flex flex-col gap-2">
+              <span className="font-medium">Minimum Rating (0-10)</span>
+              <input 
+                type="number" 
+                min={0} 
+                max={10} 
+                step={0.1}
+                className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white placeholder-white/40 rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+                value={values.min_rating || 0}
+                onChange={(e)=>update('min_rating', Number(e.target.value))} 
+              />
+            </label>
+            <label className="text-sm text-white/90 flex flex-col gap-2">
+              <span className="font-medium">Genre Mode</span>
+              <select 
+                className="px-4 py-3 bg-white/10 backdrop-blur-sm text-white rounded-xl border border-white/20 focus:outline-none focus:ring-2 focus:ring-purple-400 transition-all min-h-[44px]" 
+                value={values.genre_mode || 'any'} 
+                onChange={(e)=>update('genre_mode', e.target.value)}
+              >
+                <option value="any">Any Genre (OR)</option>
+                <option value="all">All Genres (AND)</option>
+              </select>
+            </label>
+          </div>
+          <div className="text-sm text-white/90">
+            <div className="mb-2 font-medium">Genres (select multiple)</div>
+            <div className="flex flex-wrap gap-2">
+              {['action','comedy','drama','sci-fi','romance','mystery','thriller','horror','documentary','animation','fantasy','adventure'].map(g => (
+                <button
+                  key={g}
+                  type="button"
+                  onClick={()=>{
+                    const cur = new Set(values.genres || []);
+                    if (cur.has(g)) cur.delete(g); else cur.add(g);
+                    update('genres', Array.from(cur));
+                  }}
+                  className={`px-3 py-2 rounded-lg border transition-all text-sm ${
+                    values.genres?.includes(g)
+                      ? 'bg-indigo-500 text-white border-indigo-500'
+                      : 'bg-white/10 text-white border-white/20 hover:bg-white/15'
+                  }`}
+                >
+                  {g}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="text-sm text-white/90">
+            <div className="mb-2 font-medium">Languages (select multiple)</div>
+            <div className="flex flex-wrap gap-2">
+              {['en','da','sv','no','es','fr','de','it','ja','ko','zh'].map(lang => (
+                <button
+                  key={lang}
+                  type="button"
+                  onClick={()=>{
+                    const cur = new Set(values.languages || []);
+                    if (cur.has(lang)) cur.delete(lang); else cur.add(lang);
+                    update('languages', Array.from(cur));
+                  }}
+                  className={`px-3 py-2 rounded-lg border transition-all text-sm uppercase ${
+                    values.languages?.includes(lang)
+                      ? 'bg-purple-500 text-white border-purple-500'
+                      : 'bg-white/10 text-white border-white/20 hover:bg-white/15'
+                  }`}
+                >
+                  {lang}
+                </button>
+              ))}
             </div>
           </div>
         </div>
-      )}
-      <div className="flex gap-2 justify-end">
-        <button onClick={onCancel} className="px-3 py-1.5 text-xs rounded border bg-white hover:bg-gray-50">Cancel</button>
-        <button onClick={()=>onSave(values)} disabled={!!saving} className={`px-3 py-1.5 text-xs rounded ${saving ? 'bg-gray-300 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700'}`}>{saving ? 'Saving…' : 'Save & Full Sync'}</button>
+      <div className="flex gap-3 justify-end pt-2">
+        <button 
+          onClick={onCancel} 
+          className="px-6 py-3 rounded-xl border border-white/20 bg-white/10 backdrop-blur-sm text-white hover:bg-white/15 transition-all min-h-[44px] font-medium"
+        >
+          Cancel
+        </button>
+        <button 
+          onClick={()=>onSave(values)} 
+          disabled={!!saving} 
+          className={`px-6 py-3 rounded-xl transition-all min-h-[44px] font-medium ${
+            saving 
+              ? 'bg-white/5 text-white/40 cursor-not-allowed' 
+              : 'bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white shadow-lg'
+          }`}
+        >
+          {saving ? 'Saving…' : 'Save & Full Sync'}
+        </button>
       </div>
     </div>
   );

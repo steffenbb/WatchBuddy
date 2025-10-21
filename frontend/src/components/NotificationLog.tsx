@@ -138,10 +138,10 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
 
   const getNotificationColor = (type: string) => {
     switch (type) {
-      case 'success': return 'text-green-600';
-      case 'error': return 'text-red-600';
-      case 'warning': return 'text-yellow-600';
-      default: return 'text-blue-600';
+      case 'success': return 'text-green-300';
+      case 'error': return 'text-red-300';
+      case 'warning': return 'text-yellow-300';
+      default: return 'text-blue-300';
     }
   };
 
@@ -150,17 +150,17 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 bg-gradient-to-br from-fuchsia-200 via-indigo-100 to-blue-200 bg-opacity-80 flex items-center justify-center z-50 p-4">
-      <div className="relative z-10 bg-white/90 dark:bg-gray-800/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-2xl max-h-[90vh] md:max-h-[80vh] flex flex-col transition-all duration-500">
+    <div className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <div className="relative z-10 bg-white/10 backdrop-blur-lg rounded-2xl shadow-lg border border-white/20 w-full max-w-2xl max-h-[90vh] md:max-h-[80vh] flex flex-col transition-all duration-300">
         {/* Header */}
-        <div className="p-4 md:p-6 border-b border-gray-200 dark:border-gray-700">
+        <div className="p-4 md:p-6 border-b border-white/10">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg md:text-xl font-semibold text-gray-900 dark:text-white">
+            <h2 className="text-lg md:text-xl font-semibold text-white">
               Notifications
             </h2>
             <button
               onClick={onClose}
-              className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-2 -m-2 touch-manipulation"
+              className="text-white/60 hover:text-white p-2 -m-2 touch-manipulation transition-colors"
               aria-label="Close"
             >
               ✕
@@ -172,20 +172,20 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
             <div className="flex space-x-2">
               <button
                 onClick={() => setFilter('all')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition-colors touch-manipulation ${
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors touch-manipulation ${
                   filter === 'all'
-                    ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    ? 'bg-white/20 text-white border border-white/30'
+                    : 'text-white/70 hover:bg-white/10 hover:text-white border border-white/10'
                 }`}
               >
                 All
               </button>
               <button
                 onClick={() => setFilter('unread')}
-                className={`px-3 py-2 rounded-md text-sm font-medium transition-colors touch-manipulation ${
+                className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors touch-manipulation ${
                   filter === 'unread'
-                    ? 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                    : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
+                    ? 'bg-white/20 text-white border border-white/30'
+                    : 'text-white/70 hover:bg-white/10 hover:text-white border border-white/10'
                 }`}
               >
                 Unread
@@ -195,13 +195,13 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
             <div className="flex flex-col sm:flex-row gap-2">
               <button
                 onClick={markAllAsRead}
-                className="px-3 py-2 bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200 rounded-md text-sm font-medium hover:bg-green-200 dark:hover:bg-green-800 transition-colors touch-manipulation"
+                className="px-3 py-2 bg-green-500/20 text-green-200 border border-green-400/30 rounded-lg text-sm font-medium hover:bg-green-500/30 transition-colors touch-manipulation"
               >
                 Mark All Read
               </button>
               <button
                 onClick={clearNotifications}
-                className="px-3 py-2 bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 rounded-md text-sm font-medium hover:bg-red-200 dark:hover:bg-red-800 transition-colors touch-manipulation"
+                className="px-3 py-2 bg-red-500/20 text-red-200 border border-red-400/30 rounded-lg text-sm font-medium hover:bg-red-500/30 transition-colors touch-manipulation"
               >
                 Clear All
               </button>
@@ -213,11 +213,11 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
         <div className="flex-1 overflow-y-auto p-4 md:p-6">
           {loading ? (
             <div className="flex items-center justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white"></div>
             </div>
           ) : notifications.length === 0 ? (
             <div className="text-center py-8">
-              <p className="text-gray-500 dark:text-gray-400">
+              <p className="text-white/60">
                 {filter === 'unread' ? 'No unread notifications' : 'No notifications'}
               </p>
             </div>
@@ -226,10 +226,10 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
               {notifications.map((notification) => (
                 <div
                   key={notification.id}
-                  className={`p-3 md:p-4 rounded-lg border ${
+                  className={`p-3 md:p-4 rounded-lg border transition-all ${
                     notification.read
-                      ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900'
-                      : 'border-blue-200 dark:border-blue-700 bg-blue-50 dark:bg-blue-900/20'
+                      ? 'border-white/10 bg-white/5'
+                      : 'border-white/30 bg-white/15'
                   }`}
                 >
                   <div className="flex items-start">
@@ -237,18 +237,18 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
                       {getNotificationIcon(notification.type)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm text-gray-900 dark:text-white break-words">
+                      <p className="text-sm text-white break-words">
                         {notification.message}
                       </p>
                       <div className="mt-2 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
+                        <span className="text-xs text-white/60">
                           {formatLocalDate(notification.created_at, { dateStyle: 'medium', timeStyle: 'short' })}
                         </span>
                         <div className="flex gap-3">
                           {notification.link && (
                             <button
                               onClick={() => window.location.href = notification.link!}
-                              className="text-xs text-blue-600 dark:text-blue-400 hover:underline touch-manipulation"
+                              className="text-xs text-blue-300 hover:text-blue-200 hover:underline touch-manipulation"
                             >
                               View Details
                             </button>
@@ -256,7 +256,7 @@ export const NotificationLog: React.FC<NotificationLogProps> = ({ isOpen, onClos
                           {!notification.read && (
                             <button
                               onClick={() => markAsRead(notification.id)}
-                              className="text-xs text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 touch-manipulation"
+                              className="text-xs text-white/60 hover:text-white touch-manipulation"
                             >
                               Mark as Read
                             </button>

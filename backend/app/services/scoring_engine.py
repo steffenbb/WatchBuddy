@@ -27,6 +27,7 @@ class ScoringEngine:
     def __init__(self, trakt_client: Optional[TraktClient] = None):
         self.trakt_client = trakt_client
         self._user_ratings_cache = {}  # Cache user ratings for performance
+        self._user_genre_prefs_cache: Dict[int, List[str]] = {}
 
     def _get_user_ratings(self, user_id: int) -> Dict[int, int]:
         """Fetch and cache user ratings (trakt_id -> rating value)."""
@@ -44,6 +45,53 @@ class ScoringEngine:
             return rating_dict
         finally:
             db.close()
+
+    def _get_user_genre_preferences(self, user_id: Optional[int]) -> List[str]:
+        """Infer user's preferred genres using local data first, fallback to mood mapping.
+        Strategy:
+        - Use genres of items the user thumbed up (UserRating=1), via MediaMetadata if available
+        - If none, derive from cached mood axes mapping
+        Returns a de-duplicated list of canonical genre strings (case-insensitive compare later)
+        """
+        if not user_id:
+            return []
+        if user_id in self._user_genre_prefs_cache:
+            return self._user_genre_prefs_cache[user_id]
+
+        from app.core.database import SessionLocal
+        from app.models import UserRating, MediaMetadata
+        import json as _json
+
+        db = SessionLocal()
+        try:
+            likes = db.query(UserRating).filter(UserRating.user_id == user_id, UserRating.rating == 1).all()
+            genre_counts: Dict[str, int] = defaultdict(int)
+            for r in likes:
+                mm = db.query(MediaMetadata).filter(
+                    MediaMetadata.trakt_id == r.trakt_id,
+                    MediaMetadata.media_type == r.media_type
+                ).first()
+                if mm and mm.genres:
+                    try:
+                        gl = _json.loads(mm.genres)
+                        if isinstance(gl, list):
+                            for g in gl:
+                                if g:
+                                    genre_counts[str(g).lower()] += 1
+                    except Exception:
+                        pass
+            if genre_counts:
+                # Take top 8
+                prefs = [g for g, _ in sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:8]]
+                self._user_genre_prefs_cache[user_id] = prefs
+                return prefs
+        finally:
+            db.close()
+
+        # Fallback to mood-based mapping
+        mood_genres = self._preferred_genres_from_mood({ 'id': user_id })
+        self._user_genre_prefs_cache[user_id] = [g.lower() for g in mood_genres]
+        return self._user_genre_prefs_cache[user_id]
 
     async def score_candidate(self, candidate: Dict[str, Any], user_profile: Dict[str, Any], filters: Dict[str, Any]) -> float:
         """
@@ -80,8 +128,15 @@ class ScoringEngine:
             if from_persistent and discovery_mode:
                 if discovery_mode in ("obscure", "very_obscure"):
                     # Boost items with high obscurity score
-                    obscurity_norm = self._norm(obscurity_score, 0, 5)  # Typical range for obscurity heuristic
-                    rating_norm = (rating_norm + obscurity_norm * 0.4) / 1.4  # Blend with obscurity preference
+                    # Obscurity scores typically range 0-2 for quality items (50+ votes)
+                    obscurity_norm = self._norm(obscurity_score, 0, 2.0)
+                    # Apply stronger boost for obscure mode
+                    boost_factor = 0.6 if discovery_mode == "very_obscure" else 0.5
+                    rating_norm = (rating_norm + obscurity_norm * boost_factor) / (1.0 + boost_factor)
+                    # Penalize high popularity for obscure mode
+                    if popularity > 50:
+                        popularity_penalty = min(0.3, (popularity - 50) / 200)  # Up to -0.3 for very popular items
+                        rating_norm = rating_norm * (1.0 - popularity_penalty)
                 elif discovery_mode in ("popular", "mainstream"):
                     # Boost items with high mainstream score
                     mainstream_norm = self._norm(mainstream_score, 0, 400)  # Full range for mainstream score
@@ -184,7 +239,10 @@ class ScoringEngine:
             
             db = SessionLocal()
             try:
-                metadata = db.query(MediaMetadata).filter_by(trakt_id=trakt_id).first()
+                metadata = db.query(MediaMetadata).filter(
+                    MediaMetadata.trakt_id == trakt_id,
+                    MediaMetadata.media_type == (candidate.get('media_type') or candidate.get('type'))
+                ).first()
                 if metadata:
                     # Build metadata dict from individual columns
                     candidate['cached_metadata'] = {
@@ -227,22 +285,29 @@ class ScoringEngine:
         For SmartLists, mood, fusion, theme: Uses advanced features (semantic similarity, mood-aware scoring, diversity)
         For regular/custom/suggested lists: Uses traditional scoring (genre, popularity, rating only)
         """
-        # 1. Strictly apply user filters
-        filtered = [c for c in candidates if self._passes_filters(user, c)]
+        # 1. Strictly apply user filters (including actors/studios)
+        filtered = [c for c in candidates if self._passes_explicit_filters(c, filters or {})]
         if not filtered:
             return []
 
         # 2. Compute basic features (always computed)
+        user_id = user.get('id') if isinstance(user, dict) else None
+        pref_genres_set = set(self._get_user_genre_preferences(user_id))
         for c in filtered:
             c['genre_overlap'] = self._genre_overlap(user, c)
             c['popularity_norm'] = self._norm(c.get('votes', 0), 0, 100000)
             c['rating_norm'] = self._norm(c.get('rating', 0), 0, 10)
             # Filter alignment features
             c['filter_align'] = self._filter_alignment(c, filters or {})
+            # User preferred genres alignment (from Trakt thumbs-up or mood fallback)
+            cand_genres = set(g.lower() for g in (self._candidate_genres(c) or []))
+            c['user_pref_align'] = min(1.0, len(cand_genres & pref_genres_set) / max(1, len(pref_genres_set))) if pref_genres_set else 0.0
 
         # 3. Reduce to top_K by fast composite score
         for c in filtered:
-            c['fast_score'] = 0.5*c['genre_overlap'] + 0.25*c['popularity_norm'] + 0.15*c['rating_norm'] + 0.10*c['filter_align']
+            # Blend classic overlap with user preference alignment
+            profile_blend = 0.6*c['genre_overlap'] + 0.4*c['user_pref_align']
+            c['fast_score'] = 0.5*profile_blend + 0.20*c['popularity_norm'] + 0.15*c['rating_norm'] + 0.10*c['filter_align'] + 0.05
         top_k = sorted(filtered, key=lambda x: x['fast_score'], reverse=True)[:200]
 
         # 4. Advanced features for dynamic list types
@@ -265,15 +330,17 @@ class ScoringEngine:
     def _score_traditional(self, user, candidates: list, explore_factor: float, item_limit: int) -> list:
         """Traditional scoring for regular lists - simple, fast, reliable."""
         # Get user ratings once for all candidates
-        user_id = user.get("id")
+        user_id = user.get("id") if isinstance(user, dict) else None
         user_ratings = self._get_user_ratings(user_id) if user_id else {}
         
         for c in candidates:
             c['novelty'] = 1.0 - c['popularity_norm']
             # Simple weighted combination - no mood or semantic features
+            # Include alignment with explicit user preferred genres
             c['final_score'] = (
-                0.45 * c['genre_overlap'] +
-                0.25 * c['rating_norm'] +
+                0.35 * c['genre_overlap'] +
+                0.15 * c.get('user_pref_align', 0.0) +
+                0.20 * c['rating_norm'] +
                 0.15 * c['popularity_norm'] +
                 0.10 * min(c['novelty'], 0.3) +
                 0.05 * c['filter_align']
@@ -387,8 +454,8 @@ class ScoringEngine:
         }
         w = weights.get(list_type, weights['smartlist'])
         for c in candidates:
-            # User profile similarity: genre_overlap
-            profile_sim = c.get('genre_overlap', 0.0)
+            # User profile similarity: combine genre overlap and explicit preference alignment
+            profile_sim = 0.6*c.get('genre_overlap', 0.0) + 0.4*c.get('user_pref_align', 0.0)
             mood_sim = c.get('mood_score', 0.0)
             semantic_sim = c.get('semantic_sim', 0.0)
             obscurity = c.get('obscurity', 0.0)
@@ -548,7 +615,117 @@ class ScoringEngine:
 
     def _passes_filters(self, user, c):
         """Apply strict filtering based on provided filters. Returns True if candidate passes all filters."""
-        # No filters provided, pass all candidates
+        # If called without filters in score_candidates context, we can't enforce here
+        # This method needs filters dict passed explicitly; for now it's a placeholder for future
+        # filter enforcement at the candidate-level before scoring
+        # Real enforcement should happen in score_candidates where filters are available
+        return True
+    
+    def _passes_explicit_filters(self, c: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Apply strict filtering based on provided filters dict. Matches AI engine scorer pattern."""
+        if not filters:
+            return True
+        
+        # Genres
+        if "genres" in filters and filters["genres"]:
+            cand_genres = set()
+            try:
+                import json
+                cand_genres_raw = c.get("genres")
+                if isinstance(cand_genres_raw, str):
+                    if cand_genres_raw.startswith("["):
+                        cand_genres = set(json.loads(cand_genres_raw))
+                    else:
+                        cand_genres = set(g.strip() for g in cand_genres_raw.split(","))
+                elif isinstance(cand_genres_raw, list):
+                    cand_genres = set(cand_genres_raw)
+            except Exception:
+                pass
+            filter_genres = set([g.lower() for g in filters["genres"]])
+            cand_genres_lower = set([g.lower() for g in cand_genres])
+            if not (filter_genres & cand_genres_lower):
+                return False
+        
+        # Actors - check if any filtered actor appears in candidate's cast
+        if "actors" in filters and filters["actors"]:
+            cand_cast = []
+            try:
+                import json
+                cast_raw = c.get("cast")
+                if isinstance(cast_raw, str):
+                    if cast_raw.startswith("["):
+                        cand_cast = json.loads(cast_raw)
+                    else:
+                        cand_cast = [n.strip() for n in cast_raw.split(",")]
+                elif isinstance(cast_raw, list):
+                    cand_cast = cast_raw
+                cand_cast = [str(name).lower() for name in cand_cast]
+            except Exception:
+                pass
+            filter_actors = [str(name).lower() for name in filters["actors"]]
+            if not any(actor in " ".join(cand_cast) for actor in filter_actors):
+                return False
+        
+        # Studios - check if any filtered studio matches production company
+        if "studios" in filters and filters["studios"]:
+            cand_studios = []
+            try:
+                import json
+                studios_raw = c.get("production_companies")
+                if isinstance(studios_raw, str):
+                    if studios_raw.startswith("["):
+                        cand_studios = json.loads(studios_raw)
+                    else:
+                        cand_studios = [n.strip() for n in studios_raw.split(",")]
+                elif isinstance(studios_raw, list):
+                    cand_studios = studios_raw
+                cand_studios = [str(name).lower() for name in cand_studios]
+            except Exception:
+                pass
+            filter_studios = [str(name).lower() for name in filters["studios"]]
+            if not any(studio in " ".join(cand_studios) for studio in filter_studios):
+                return False
+        
+        # Languages
+        if "languages" in filters and filters["languages"]:
+            cand_lang = (c.get("language") or "").lower()
+            filter_langs = [l.lower() for l in filters["languages"]]
+            if cand_lang not in filter_langs:
+                return False
+        
+        # Years
+        if "years" in filters and filters["years"]:
+            cand_year = int(c.get("year") or 0)
+            if cand_year not in set(filters["years"]):
+                return False
+        
+        # Year range
+        year_from = filters.get("year_from") or filters.get("min_year")
+        year_to = filters.get("year_to") or filters.get("max_year")
+        if year_from or year_to:
+            cand_year = int(c.get("year") or 0)
+            if year_from and cand_year < int(year_from):
+                return False
+            if year_to and cand_year > int(year_to):
+                return False
+        
+        # Adult flag
+        if "adult" in filters and filters["adult"] is not None:
+            want_adult = filters["adult"]
+            cand_adult = c.get("adult") or c.get("is_adult")
+            if isinstance(cand_adult, bool):
+                if want_adult is True and cand_adult is False:
+                    return False
+                if want_adult is False and cand_adult is True:
+                    return False
+        
+        # Original language
+        if "original_language" in filters and filters["original_language"]:
+            ol = (c.get("original_language") or c.get("language") or "").lower()
+            filter_ol = str(filters["original_language"]).lower()
+            if ol != filter_ol:
+                return False
+        
         return True
 
     def _filter_alignment(self, c: Dict[str, Any], filters: Dict[str, Any]) -> float:
@@ -777,13 +954,20 @@ class ScoringEngine:
         return "UTC"  # Default fallback
 
     def _build_explanation_meta(self, c):
-        # TODO: build explanation meta dict for explain.py
+        # Compose a rich explanation meta used by explain.py and the UI
+        components = {
+            'genre_overlap': float(c.get('genre_overlap', 0) or 0),
+            'pref_align': float(c.get('user_pref_align', 0) or 0),
+            'semantic_sim': float(c.get('semantic_sim', 0) or 0),
+            'mood_score': float(c.get('mood_score', 0) or 0),
+            'rating_norm': float(c.get('rating_norm', 0) or 0),
+            'novelty': float(c.get('novelty', 0) or 0),
+            'popularity_norm': float(c.get('popularity_norm', 0) or 0),
+            'fast_score': float(c.get('fast_score', 0) or 0),
+        }
         return {
-            'similarity_score': c.get('genre_overlap', 0),
-            'genre_overlap': [],
-            'mood_score': c.get('mood_score', 0),
-            'novelty_score': c.get('novelty', 0),
-            'top_history_matches': [],
+            'similarity_score': components['genre_overlap'],
+            'components': components,
             'scoring_type': 'smartlist_advanced'
         }
 

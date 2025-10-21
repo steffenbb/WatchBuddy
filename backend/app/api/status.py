@@ -8,6 +8,7 @@ from sqlalchemy import func, and_
 from app.core.database import SessionLocal
 from app.core.redis_client import get_redis
 from app.models import UserList as WatchList, MediaMetadata
+from app.models_ai import AiList
 from app.services.trakt_client import TraktClient, TraktAPIError, TraktNetworkError, TraktUnavailableError
 from app.utils.timezone import format_datetime_in_timezone
 
@@ -168,23 +169,97 @@ async def get_sync_status(user_id: int = 1):
                     "sync_type": "legacy"
                 })
 
+        # Check AI list locks: lock:ai_list:* (AI-powered lists)
+        ai_list_keys = await redis.keys("lock:ai_list:*")
+        for key in ai_list_keys:
+            try:
+                lock_json = await redis.get(key)
+                if not lock_json:
+                    continue
+                lock_data = json.loads(lock_json) if isinstance(lock_json, (str, bytes)) else {}
+            except Exception:
+                lock_data = {}
+
+            # Extract AI list ID from key: lock:ai_list:{id}
+            key_str = key.decode('utf-8') if isinstance(key, bytes) else key
+            ai_list_id = key_str.split(":")[-1]
+            
+            # Skip if already in active_syncs (avoid duplicates)
+            try:
+                if any(s.get("ai_list_id") == ai_list_id for s in active_syncs):
+                    continue
+            except Exception:
+                pass
+            
+            # Get AI list title from database
+            db = SessionLocal()
+            try:
+                ai_list = db.query(AiList).filter(AiList.id == ai_list_id).first()
+            finally:
+                db.close()
+
+            if ai_list:
+                started_at = lock_data.get("started_at")
+                try:
+                    started_iso = datetime.utcfromtimestamp(float(started_at)).isoformat() if started_at else ""
+                except Exception:
+                    started_iso = ""
+                active_syncs.append({
+                    "ai_list_id": ai_list_id,
+                    "list_title": ai_list.generated_title or ai_list.prompt_text[:50] or "AI List",
+                    "started_at": started_iso,
+                    "progress": None,
+                    "message": "Generating AI recommendations...",
+                    "operation": "ai_generate",
+                    "sync_type": "ai"
+                })
+
         # Get statistics from database
         db = SessionLocal()
 
-        total_lists = db.query(func.count(WatchList.id)).scalar()
+        # Count both user_lists and ai_lists
+        total_user_lists = db.query(func.count(WatchList.id)).scalar() or 0
+        total_ai_lists = db.query(func.count(AiList.id)).scalar() or 0
+        total_lists = total_user_lists + total_ai_lists
 
-        # Lists synced today
+        # Lists synced today (both types)
         today = datetime.utcnow().date()
-        completed_today = db.query(func.count(WatchList.id)).filter(
+        user_lists_today = db.query(func.count(WatchList.id)).filter(
             func.date(WatchList.last_updated) == today
-        ).scalar()
+        ).scalar() or 0
+        ai_lists_today = db.query(func.count(AiList.id)).filter(
+            func.date(AiList.last_synced_at) == today
+        ).scalar() or 0
+        completed_today = user_lists_today + ai_lists_today
 
-        # Last sync time (formatted in user's timezone)
-        last_sync_list = db.query(WatchList).filter(
+        # Last sync time (check both tables, formatted in user's timezone)
+        last_sync_user_list = db.query(WatchList).filter(
             WatchList.last_updated.isnot(None)
         ).order_by(WatchList.last_updated.desc()).first()
-
-        last_sync = format_datetime_in_timezone(last_sync_list.last_updated, user_timezone) if last_sync_list else None
+        
+        last_sync_ai_list = db.query(AiList).filter(
+            AiList.last_synced_at.isnot(None)
+        ).order_by(AiList.last_synced_at.desc()).first()
+        
+        # Pick the most recent sync from both types
+        # Ensure both datetimes are timezone-aware for comparison
+        last_sync_time = None
+        if last_sync_user_list and last_sync_ai_list:
+            from datetime import timezone
+            user_time = last_sync_user_list.last_updated
+            ai_time = last_sync_ai_list.last_synced_at
+            # Make naive datetimes timezone-aware (assume UTC)
+            if user_time and user_time.tzinfo is None:
+                user_time = user_time.replace(tzinfo=timezone.utc)
+            if ai_time and ai_time.tzinfo is None:
+                ai_time = ai_time.replace(tzinfo=timezone.utc)
+            last_sync_time = max(user_time, ai_time)
+        elif last_sync_user_list:
+            last_sync_time = last_sync_user_list.last_updated
+        elif last_sync_ai_list:
+            last_sync_time = last_sync_ai_list.last_synced_at
+        
+        last_sync = format_datetime_in_timezone(last_sync_time, user_timezone) if last_sync_time else None
 
         db.close()
 

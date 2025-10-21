@@ -7,6 +7,7 @@ TMDB client for WatchBuddy.
 """
 import logging
 import asyncio
+import json
 from typing import Optional, Dict, List
 import httpx
 from app.core.redis_client import get_redis
@@ -20,14 +21,19 @@ async def get_tmdb_api_key() -> Optional[str]:
     return await r.get("settings:global:tmdb_api_key")
 
 async def fetch_tmdb_metadata(tmdb_id: int, media_type: str = 'movie') -> Optional[Dict]:
-    """Fetch metadata from TMDB with rate limiting and backoff."""
+    """Fetch comprehensive metadata from TMDB with rate limiting and backoff.
+    
+    Includes: credits (cast), keywords, production details, and TV-specific info.
+    """
     api_key = await get_tmdb_api_key()
     if not api_key:
         logger.warning("TMDB API key not configured")
         return None
     
     url = f"{TMDB_BASE}/{media_type}/{tmdb_id}"
-    params = {"api_key": api_key, "append_to_response": "keywords"}
+    # Request all enrichments in a single API call
+    append_to_response = "credits,keywords" if media_type == 'movie' else "credits,keywords,content_ratings"
+    params = {"api_key": api_key, "append_to_response": append_to_response}
     
     from app.services.rate_limit import with_backoff
     
@@ -315,3 +321,110 @@ async def search_tv(query: str, page: int = 1, language: str = "en-US", first_ai
     except Exception as e:
         logger.debug(f"TMDB TV search failed for '{query}': {e}")
         return None
+
+
+def extract_enriched_fields(tmdb_data: Dict, media_type: str) -> Dict:
+    """Extract all enriched fields from TMDB API response for persistent storage.
+    
+    Returns a dict with all fields needed for PersistentCandidate model including:
+    - Core metadata (title, overview, tagline, etc.)
+    - Credits (cast, directors, creators)
+    - Production details (companies, countries, languages)
+    - Financial data (budget, revenue)
+    - TV-specific fields (networks, seasons, episodes, air dates)
+    - Keywords and homepage
+    
+    Args:
+        tmdb_data: Full TMDB API response (with credits, keywords appended)
+        media_type: 'movie' or 'show'/'tv'
+    
+    Returns:
+        Dict with extracted and normalized fields
+    """
+    fields = {}
+    
+    # Core fields
+    fields['tagline'] = tmdb_data.get('tagline', '')
+    fields['homepage'] = tmdb_data.get('homepage', '')
+    fields['status'] = tmdb_data.get('status', '')
+    fields['runtime'] = tmdb_data.get('runtime') if media_type == 'movie' else None
+    
+    # Extract genres as JSON array of names
+    genres = tmdb_data.get('genres', [])
+    fields['genres'] = json.dumps([g.get('name', '') for g in genres if isinstance(g, dict)])
+    
+    # Extract keywords as JSON array of names
+    keywords_obj = tmdb_data.get('keywords', {})
+    if media_type == 'movie':
+        keywords_list = keywords_obj.get('keywords', [])
+    else:  # TV
+        keywords_list = keywords_obj.get('results', [])
+    fields['keywords'] = json.dumps([k.get('name', '') for k in keywords_list if isinstance(k, dict)])
+    
+    # Extract cast (top 20 actors)
+    credits = tmdb_data.get('credits', {})
+    cast_list = credits.get('cast', [])[:20]
+    fields['cast'] = json.dumps([c.get('name', '') for c in cast_list if isinstance(c, dict)])
+    
+    # Extract production companies as JSON array
+    prod_companies = tmdb_data.get('production_companies', [])
+    fields['production_companies'] = json.dumps([pc.get('name', '') for pc in prod_companies if isinstance(pc, dict)])
+    
+    # Extract production countries as JSON array of ISO codes
+    prod_countries = tmdb_data.get('production_countries', [])
+    fields['production_countries'] = json.dumps([pc.get('iso_3166_1', '') for pc in prod_countries if isinstance(pc, dict)])
+    
+    # Extract spoken languages as JSON array
+    spoken_langs = tmdb_data.get('spoken_languages', [])
+    fields['spoken_languages'] = json.dumps([sl.get('iso_639_1', '') for sl in spoken_langs if isinstance(sl, dict)])
+    
+    # Financial data (movies only)
+    if media_type == 'movie':
+        fields['budget'] = tmdb_data.get('budget', 0)
+        fields['revenue'] = tmdb_data.get('revenue', 0)
+        
+        # Extract director from crew
+        crew_list = credits.get('crew', [])
+        directors = [c.get('name', '') for c in crew_list if c.get('job') == 'Director']
+        fields['director'] = directors[0] if directors else ''
+        
+        # Extract writers from crew
+        writers = [c.get('name', '') for c in crew_list if c.get('department') == 'Writing'][:5]
+        fields['writers'] = json.dumps(writers) if writers else '[]'
+    else:
+        fields['budget'] = None
+        fields['revenue'] = None
+        fields['director'] = ''
+        fields['writers'] = '[]'
+    
+    # TV-specific fields
+    if media_type in ('tv', 'show'):
+        fields['number_of_seasons'] = tmdb_data.get('number_of_seasons')
+        fields['number_of_episodes'] = tmdb_data.get('number_of_episodes')
+        fields['in_production'] = tmdb_data.get('in_production', False)
+        fields['first_air_date'] = tmdb_data.get('first_air_date', '')
+        fields['last_air_date'] = tmdb_data.get('last_air_date', '')
+        
+        # Extract episode runtime as JSON array
+        episode_run_time = tmdb_data.get('episode_run_time', [])
+        fields['episode_run_time'] = json.dumps(episode_run_time) if episode_run_time else '[]'
+        
+        # Extract creators as JSON array
+        created_by = tmdb_data.get('created_by', [])
+        fields['created_by'] = json.dumps([c.get('name', '') for c in created_by if isinstance(c, dict)])
+        
+        # Extract networks as JSON array
+        networks = tmdb_data.get('networks', [])
+        fields['networks'] = json.dumps([n.get('name', '') for n in networks if isinstance(n, dict)])
+    else:
+        # Movies don't have these fields
+        fields['number_of_seasons'] = None
+        fields['number_of_episodes'] = None
+        fields['in_production'] = None
+        fields['first_air_date'] = ''
+        fields['last_air_date'] = ''
+        fields['episode_run_time'] = '[]'
+        fields['created_by'] = '[]'
+        fields['networks'] = '[]'
+    
+    return fields

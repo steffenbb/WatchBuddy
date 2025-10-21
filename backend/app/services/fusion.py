@@ -187,7 +187,8 @@ class FusionEngine:
     async def _get_user_history_texts(self) -> List[str]:
         """Get real user history texts from recent watches."""
         if not self.user_id:
-            return ["placeholder user profile"]
+            # Return generic fallback for anonymous/uninitialized users
+            return ["diverse viewer", "appreciates quality storytelling", "enjoys varied genres"]
         
         try:
             from app.core import database

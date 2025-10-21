@@ -171,99 +171,99 @@ export default function CreateListForm({ onCreated }: { onCreated?: ()=>void }){
   }
 
   return (
-    <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-xl mx-auto p-6 md:p-8 flex flex-col gap-4 transition-all duration-500">
+    <div className="relative z-10 bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 w-full max-w-xl mx-auto p-6 md:p-8 flex flex-col gap-4 transition-all duration-500">
       <div className="flex items-center gap-3 mb-4">
-        <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center">
-          <span className="text-white text-sm font-bold">📋</span>
+        <div className="w-10 h-10 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl flex items-center justify-center shadow-lg">
+          <span className="text-2xl">📋</span>
         </div>
-        <h3 className="text-xl font-bold text-gray-800">Create New List</h3>
+        <h3 className="text-2xl font-bold text-white">Create New List</h3>
       </div>
 
       {message && (
-        <div className={`mb-3 p-3 rounded-lg text-sm font-medium ${messageType === "success" ? "bg-green-100 text-green-800 border border-green-200" : "bg-red-100 text-red-800 border border-red-200"}`}>{message}</div>
+        <div className={`mb-3 p-3 rounded-xl text-sm font-medium backdrop-blur-sm ${messageType === "success" ? "bg-emerald-500/20 text-emerald-200 border border-emerald-400/30" : "bg-red-500/20 text-red-200 border border-red-400/30"}`}>{message}</div>
       )}
       <input
         value={title}
         onChange={(e)=>{ setTitle(e.target.value); setErrorTitle(e.target.value.trim() ? "" : "Title is required"); }}
-        className={`w-full p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent mb-1 ${errorTitle ? "border-red-500" : "border-gray-300"}`}
+        className={`w-full min-h-[44px] p-3 bg-white/5 border rounded-xl text-white placeholder-white/40 focus:ring-2 focus:ring-purple-400 focus:border-transparent transition ${errorTitle ? "border-red-400/50" : "border-white/20"}`}
         placeholder="Title (required)"
       />
-      {errorTitle && <div className="text-xs text-red-600 mb-2">{errorTitle}</div>}
-      <div className="mb-2 text-sm font-semibold text-gray-700">Genres</div>
+      {errorTitle && <div className="text-xs text-red-300 mb-2">{errorTitle}</div>}
+      <div className="mb-2 text-sm font-semibold text-white/90">Genres</div>
       <div className="flex flex-wrap gap-2 mb-1">
         {availableGenres.map(g => (
-          <button key={g} onClick={()=>toggleGenre(g)} className={`px-3 py-1.5 rounded-lg text-sm border transition ${genres.includes(g) ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>{g}</button>
+          <button key={g} onClick={()=>toggleGenre(g)} className={`min-h-[44px] px-4 py-2 rounded-xl text-sm border transition-all ${genres.includes(g) ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white border-transparent shadow-lg scale-105" : "bg-white/5 text-white/80 border-white/20 hover:border-purple-400 hover:bg-white/10"}`}>{g}</button>
         ))}
       </div>
       <div className="flex items-center gap-4 mb-2">
-        <label className="flex items-center gap-1 text-xs cursor-pointer">
-          <input type="radio" name="genreMode" value="any" checked={genreMode==='any'} onChange={()=>setGenreMode('any')} />
-          Match <span className="font-semibold">any</span> selected genre
+        <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+          <input type="radio" name="genreMode" value="any" checked={genreMode==='any'} onChange={()=>setGenreMode('any')} className="accent-purple-500" />
+          Match <span className="font-semibold text-white">any</span> selected genre
         </label>
-        <label className="flex items-center gap-1 text-xs cursor-pointer">
-          <input type="radio" name="genreMode" value="all" checked={genreMode==='all'} onChange={()=>setGenreMode('all')} />
-          Match <span className="font-semibold">all</span> selected genres
+        <label className="flex items-center gap-2 text-xs text-white/70 cursor-pointer">
+          <input type="radio" name="genreMode" value="all" checked={genreMode==='all'} onChange={()=>setGenreMode('all')} className="accent-purple-500" />
+          Match <span className="font-semibold text-white">all</span> selected genres
         </label>
       </div>
-      {errorGenres && <div className="text-xs text-red-600 mb-3">{errorGenres}</div>}
-      <div className="mb-2 text-sm font-semibold text-gray-700">Obscurity</div>
+      {errorGenres && <div className="text-xs text-red-300 mb-3">{errorGenres}</div>}
+      <div className="mb-2 text-sm font-semibold text-white/90">Obscurity</div>
       <div className="flex flex-wrap gap-2 mb-1">
         {["very_obscure","less_obscure","neutral","popular"].map(o => (
-          <button key={o} onClick={()=>toggleObscurity(o)} className={`px-3 py-1.5 rounded-lg text-sm border transition ${obscurity.includes(o) ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>{o.replace("_"," ")}</button>
+          <button key={o} onClick={()=>toggleObscurity(o)} className={`min-h-[44px] px-4 py-2 rounded-xl text-sm border transition-all ${obscurity.includes(o) ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white border-transparent shadow-lg scale-105" : "bg-white/5 text-white/80 border-white/20 hover:border-purple-400 hover:bg-white/10"}`}>{o.replace("_"," ")}</button>
         ))}
       </div>
-      <div className="text-xs text-gray-500 mb-4">Tip: Obscurity controls discovery (popular ↔ obscure) and is separate from your mood profile.</div>
-      <div className="mb-2 text-sm font-semibold text-gray-700">Languages</div>
+      <div className="text-xs text-white/50 mb-4">💡 Tip: Obscurity controls discovery (popular ↔ obscure) and is separate from your mood profile.</div>
+      <div className="mb-2 text-sm font-semibold text-white/90">Languages</div>
       <div className="flex flex-wrap gap-2 mb-4">
         {availableLanguages.map(l => (
-          <button key={l} onClick={()=>toggleLanguage(l)} className={`px-3 py-1.5 rounded-lg text-sm border transition ${languages.includes(l) ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>{l}</button>
+          <button key={l} onClick={()=>toggleLanguage(l)} className={`min-h-[44px] px-4 py-2 rounded-xl text-sm border transition-all ${languages.includes(l) ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white border-transparent shadow-lg scale-105" : "bg-white/5 text-white/80 border-white/20 hover:border-purple-400 hover:bg-white/10"}`}>{l}</button>
         ))}
       </div>
       <div className="mb-4 grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-1">Year from</label>
-          <input type="number" value={yearFrom} min={1900} max={yearTo} onChange={(e)=>setYearFrom(Number(e.target.value))} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <label className="block text-sm font-semibold text-white/90 mb-2">Year from</label>
+          <input type="number" value={yearFrom} min={1900} max={yearTo} onChange={(e)=>setYearFrom(Number(e.target.value))} className="w-full min-h-[44px] p-3 bg-white/5 border border-white/20 rounded-xl text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent transition" />
         </div>
         <div>
-          <label className="block text-sm font-semibold text-gray-700 mb-1">Year to</label>
-          <input type="number" value={yearTo} min={yearFrom} max={new Date().getFullYear()} onChange={(e)=>setYearTo(Number(e.target.value))} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
+          <label className="block text-sm font-semibold text-white/90 mb-2">Year to</label>
+          <input type="number" value={yearTo} min={yearFrom} max={new Date().getFullYear()} onChange={(e)=>setYearTo(Number(e.target.value))} className="w-full min-h-[44px] p-3 bg-white/5 border border-white/20 rounded-xl text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent transition" />
         </div>
       </div>
       <div className="mb-4">
-        <label className="block text-sm font-semibold text-gray-700 mb-1">Watched status</label>
-        <select value={watchedStatus} onChange={(e)=>setWatchedStatus(e.target.value)} className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent">
-          <option value="exclude_watched">Exclude already watched</option>
-          <option value="include_all">Include all</option>
-          <option value="not_watched_recently">Only if not watched in X days</option>
+        <label className="block text-sm font-semibold text-white/90 mb-2">Watched status</label>
+        <select value={watchedStatus} onChange={(e)=>setWatchedStatus(e.target.value)} className="w-full min-h-[44px] p-3 bg-white/5 border border-white/20 rounded-xl text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent transition">
+          <option value="exclude_watched" className="bg-slate-800">Exclude already watched</option>
+          <option value="include_all" className="bg-slate-800">Include all</option>
+          <option value="not_watched_recently" className="bg-slate-800">Only if not watched in X days</option>
         </select>
         {watchedStatus === "not_watched_recently" && (
-          <input type="number" value={notWatchedDays} min={1} max={3650} onChange={(e)=>setNotWatchedDays(Number(e.target.value))} className="w-24 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent mt-2" placeholder="Days" />
+          <input type="number" value={notWatchedDays} min={1} max={3650} onChange={(e)=>setNotWatchedDays(Number(e.target.value))} className="w-28 min-h-[44px] p-3 bg-white/5 border border-white/20 rounded-xl text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent mt-2 transition" placeholder="Days" />
         )}
       </div>
       <div className="mb-4">
-        <label className="block text-sm font-semibold text-gray-700 mb-1">Type</label>
+        <label className="block text-sm font-semibold text-white/90 mb-2">Type</label>
         <div className="flex gap-2 mb-1">
-          <button onClick={()=>toggleMediaType("movies")} className={`px-3 py-1.5 rounded-lg text-sm border transition ${mediaType.includes("movies") ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>Movies</button>
-          <button onClick={()=>toggleMediaType("shows")} className={`px-3 py-1.5 rounded-lg text-sm border transition ${mediaType.includes("shows") ? "bg-indigo-600 text-white border-indigo-600" : "bg-white text-gray-700 border-gray-300 hover:border-indigo-400"}`}>Shows</button>
+          <button onClick={()=>toggleMediaType("movies")} className={`flex-1 min-h-[44px] px-4 py-2 rounded-xl text-sm border transition-all ${mediaType.includes("movies") ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white border-transparent shadow-lg scale-105" : "bg-white/5 text-white/80 border-white/20 hover:border-purple-400 hover:bg-white/10"}`}>🎬 Movies</button>
+          <button onClick={()=>toggleMediaType("shows")} className={`flex-1 min-h-[44px] px-4 py-2 rounded-xl text-sm border transition-all ${mediaType.includes("shows") ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white border-transparent shadow-lg scale-105" : "bg-white/5 text-white/80 border-white/20 hover:border-purple-400 hover:bg-white/10"}`}>📺 Shows</button>
         </div>
-        {errorMediaType && <div className="text-xs text-red-600">{errorMediaType}</div>}
+        {errorMediaType && <div className="text-xs text-red-300">{errorMediaType}</div>}
       </div>
       <div className="mb-4">
-        <label className="block text-sm font-semibold text-gray-700 mb-1">Item limit</label>
-        <input type="number" value={itemLimit} min={1} max={maxItems} onChange={(e)=>setItemLimit(Math.min(Number(e.target.value), maxItems))} className="w-28 p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent" />
-        <div className="text-xs text-gray-500 mt-1">Max per list: {maxItems}</div>
+        <label className="block text-sm font-semibold text-white/90 mb-2">Item limit</label>
+        <input type="number" value={itemLimit} min={1} max={maxItems} onChange={(e)=>setItemLimit(Math.min(Number(e.target.value), maxItems))} className="w-32 min-h-[44px] p-3 bg-white/5 border border-white/20 rounded-xl text-white focus:ring-2 focus:ring-purple-400 focus:border-transparent transition" />
+        <div className="text-xs text-white/50 mt-2">Max per list: {maxItems}</div>
       </div>
       <div className="flex justify-end">
         <button
           onClick={submit}
           disabled={!isFormValid || isSubmitting || accountLoading || !canCreateMoreLists}
-          className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${(!isFormValid || isSubmitting || accountLoading || !canCreateMoreLists) ? "bg-indigo-300 text-white cursor-not-allowed" : "bg-indigo-600 text-white hover:bg-indigo-700"}`}
+          className={`min-h-[44px] px-6 py-3 rounded-xl text-sm font-semibold transition-all ${(!isFormValid || isSubmitting || accountLoading || !canCreateMoreLists) ? "bg-white/10 text-white/40 cursor-not-allowed" : "bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg hover:shadow-xl hover:scale-105"}`}
         >
           {isSubmitting 
             ? "Creating…" 
             : (accountLoading 
                 ? "Checking quota…" 
-                : (!canCreateMoreLists ? `Quota reached (${listCount}/${account?.max_lists ?? 0})` : "Create"))}
+                : (!canCreateMoreLists ? `Quota reached (${listCount}/${account?.max_lists ?? 0})` : "✨ Create"))}
         </button>
       </div>
     </div>

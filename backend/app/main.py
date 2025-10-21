@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db
 
-from app.api import lists, smartlists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists
+from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists
 from app.api.chat_prompt import router as chat_prompt_router
 from app.api.available_genres_languages import router as genres_languages_router
 from app.api.recommendations import router as recommendations_router
@@ -28,7 +28,6 @@ app.include_router(metadata_options_router, prefix="/api/metadata", tags=["Metad
 
 # Core API routers
 app.include_router(lists.router, prefix="/api/lists", tags=["Lists"])
-app.include_router(smartlists.router, prefix="/api/smartlists", tags=["SmartLists"])
 app.include_router(settings.router, prefix="/api/settings", tags=["Settings"])
 app.include_router(status.router, prefix="/api/status", tags=["Status"])
 app.include_router(trakt_auth.router, prefix="/api/trakt", tags=["Trakt"])
@@ -36,6 +35,7 @@ app.include_router(suggested.router, prefix="/api/suggested", tags=["Suggested"]
 app.include_router(ratings.router, prefix="/api/ratings", tags=["Ratings"])
 app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
 app.include_router(chatlists.router, prefix="/api/chatlists", tags=["Chat Lists"])
+app.include_router(ai_lists.router, prefix="/api/ai", tags=["AI Lists"])
 
 # Optional: Recommendations and Notifications if present
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])

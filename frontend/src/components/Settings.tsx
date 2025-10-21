@@ -155,50 +155,50 @@ export default function Settings() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-fuchsia-200 via-indigo-100 to-blue-200 flex items-center justify-center">
+      <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 flex items-center justify-center p-6">
         <div className="text-center">
-          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto mb-4"></div>
-          <p className="text-indigo-700">Loading settings...</p>
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-400 mx-auto mb-4"></div>
+          <p className="text-white/80 text-lg">Loading settings...</p>
         </div>
       </div>
     );
   }
 
     return (
-      <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-xl mx-auto p-6 md:p-8 flex flex-col gap-4 transition-all duration-500">
+      <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 p-6">
       <div className="max-w-4xl mx-auto">
         {/* Header */}
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-extrabold text-indigo-900 mb-2 tracking-tight">
-            Settings
+          <h1 className="text-5xl font-extrabold text-white mb-3 tracking-tight">
+            ⚙️ Settings
           </h1>
-          <p className="text-indigo-700 text-lg">Manage your WatchBuddy configuration</p>
+          <p className="text-white/70 text-lg">Manage your WatchBuddy configuration</p>
         </div>
 
-        <div className="space-y-8">
+        <div className="space-y-6">
           {/* Trakt Integration Card */}
-          <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-gradient-to-tr from-red-400 via-fuchsia-400 to-indigo-400 rounded-full flex items-center justify-center">
-                <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24">
+          <div className="bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-14 h-14 bg-gradient-to-tr from-red-500 via-fuchsia-500 to-indigo-500 rounded-2xl flex items-center justify-center shadow-lg">
+                <svg className="w-7 h-7 text-white" fill="currentColor" viewBox="0 0 24 24">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
                 </svg>
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-indigo-900">Trakt Integration</h2>
-                <p className="text-indigo-600">Manage your Trakt authentication</p>
+                <h2 className="text-2xl font-bold text-white">Trakt Integration</h2>
+                <p className="text-white/60">Manage your Trakt authentication</p>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-fuchsia-50 rounded-xl p-6 mb-6">
-              <div className="flex items-center justify-between">
+            <div className="bg-white/5 backdrop-blur-sm rounded-2xl p-6 mb-6 border border-white/10">
+              <div className="flex items-center justify-between flex-wrap gap-4">
                 <div>
-                  <h3 className="font-semibold text-indigo-900 mb-2">Authorization Status</h3>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <div className={`w-3 h-3 rounded-full ${traktCreds?.configured ? 'bg-green-500' : 'bg-gray-300'}`}></div>
-                      <span className="text-sm text-indigo-700">
-                        Credentials: {traktCreds?.configured ? 'Configured' : 'Not Set'}
+                  <h3 className="font-semibold text-white mb-3">Authorization Status</h3>
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-3">
+                      <div className={`w-3 h-3 rounded-full ${traktCreds?.configured ? 'bg-emerald-400 shadow-lg shadow-emerald-400/50' : 'bg-white/20'}`}></div>
+                      <span className="text-sm text-white/80">
+                        Credentials: {traktCreds?.configured ? '✅ Configured' : '❌ Not Set'}
                       </span>
                     </div>
                   </div>
@@ -206,36 +206,36 @@ export default function Settings() {
                 <button
                   onClick={reauthorizeTrakt}
                   disabled={saving === "trakt"}
-                  className="bg-gradient-to-r from-red-500 via-fuchsia-500 to-indigo-500 text-white px-6 py-3 rounded-lg font-semibold hover:from-red-600 hover:to-indigo-600 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50"
+                  className="min-h-[44px] bg-gradient-to-r from-red-500 via-fuchsia-500 to-indigo-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {saving === "trakt" ? "Clearing..." : "Re-authorize Trakt"}
+                  {saving === "trakt" ? "Clearing..." : "🔄 Re-authorize Trakt"}
                 </button>
               </div>
             </div>
 
-            <div className="text-sm text-gray-600">
-              <p>Re-authorization will clear your current Trakt connection and redirect you to set up new API credentials.</p>
+            <div className="text-sm text-white/50">
+              <p>💡 Re-authorization will clear your current Trakt connection and redirect you to set up new API credentials.</p>
             </div>
           </div>
 
           {/* Trakt Redirect URI Card */}
-          <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-gradient-to-tr from-purple-400 via-fuchsia-400 to-pink-400 rounded-full flex items-center justify-center">
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-14 h-14 bg-gradient-to-tr from-purple-500 via-fuchsia-500 to-pink-500 rounded-2xl flex items-center justify-center shadow-lg">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
                 </svg>
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-indigo-900">Trakt Redirect URI</h2>
-                <p className="text-indigo-600">Configure OAuth callback for Trakt authentication</p>
+                <h2 className="text-2xl font-bold text-white">Trakt Redirect URI</h2>
+                <p className="text-white/60">Configure OAuth callback for Trakt authentication</p>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-purple-50 via-fuchsia-50 to-pink-50 rounded-xl p-6 mb-6">
+            <div className="bg-white/5 backdrop-blur-sm rounded-2xl p-6 mb-6 border border-white/10">
               <div className="space-y-4">
                 <div>
-                  <label htmlFor="redirect-uri-input" className="block text-sm font-medium text-indigo-900 mb-2">
+                  <label htmlFor="redirect-uri-input" className="block text-sm font-medium text-white mb-3">
                     Base Domain/IP
                   </label>
                   <input
@@ -244,94 +244,94 @@ export default function Settings() {
                     value={traktRedirectUri}
                     onChange={(e) => setTraktRedirectUri(e.target.value)}
                     placeholder="localhost (default) or example.com or 192.168.1.100"
-                    className="w-full px-4 py-3 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-fuchsia-400 focus:border-fuchsia-400 transition-all duration-200 shadow-sm"
+                    className="w-full min-h-[44px] px-4 py-3 bg-white/5 border border-white/20 text-white placeholder-white/40 rounded-xl focus:ring-2 focus:ring-fuchsia-400 focus:border-transparent transition-all duration-200 shadow-sm"
                   />
                   {traktRedirectUriDisplay && (
-                    <p className="text-xs text-indigo-600 mt-2">
-                      Full callback URL: <span className="font-mono bg-white px-2 py-1 rounded">{traktRedirectUriDisplay}</span>
+                    <p className="text-xs text-white/60 mt-3 bg-white/5 px-3 py-2 rounded-lg">
+                      Full callback URL: <span className="font-mono text-purple-300">{traktRedirectUriDisplay}</span>
                     </p>
                   )}
                 </div>
 
-                <div className="flex justify-between items-center">
-                  <div className="text-sm text-indigo-700">
-                    <p>Set the domain or IP for OAuth callbacks. Default is "localhost" for local development.</p>
+                <div className="flex justify-between items-center flex-wrap gap-4">
+                  <div className="text-sm text-white/60">
+                    <p>🔗 Set the domain or IP for OAuth callbacks. Default is "localhost" for local development.</p>
                   </div>
                   <button
                     onClick={saveTraktRedirectUri}
                     disabled={saving === "trakt-redirect"}
-                    className="bg-gradient-to-r from-purple-500 via-fuchsia-500 to-pink-500 text-white px-6 py-3 rounded-lg font-semibold hover:from-purple-600 hover:to-pink-600 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50"
+                    className="min-h-[44px] bg-gradient-to-r from-purple-500 via-fuchsia-500 to-pink-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {saving === "trakt-redirect" ? "Saving..." : "Save URI"}
+                    {saving === "trakt-redirect" ? "Saving..." : "💾 Save URI"}
                   </button>
                 </div>
               </div>
             </div>
 
-            <div className="text-sm text-gray-600 space-y-2">
-              <p><strong>Important:</strong> Make sure this matches the redirect URI registered in your Trakt application settings.</p>
-              <p className="text-xs">Examples: <code className="bg-gray-100 px-1 rounded">localhost</code>, <code className="bg-gray-100 px-1 rounded">example.com</code>, <code className="bg-gray-100 px-1 rounded">192.168.1.100</code></p>
+            <div className="text-sm text-white/50 space-y-2">
+              <p><strong className="text-white/70">⚠️ Important:</strong> Make sure this matches the redirect URI registered in your Trakt application settings.</p>
+              <p className="text-xs">Examples: <code className="bg-white/10 px-2 py-1 rounded">localhost</code>, <code className="bg-white/10 px-2 py-1 rounded">example.com</code>, <code className="bg-white/10 px-2 py-1 rounded">192.168.1.100</code></p>
             </div>
           </div>
 
           {/* TMDB API Card */}
-          <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-gradient-to-tr from-green-400 via-blue-400 to-indigo-400 rounded-full flex items-center justify-center">
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-14 h-14 bg-gradient-to-tr from-green-500 via-blue-500 to-indigo-500 rounded-2xl flex items-center justify-center shadow-lg">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4V2a1 1 0 011-1h3a1 1 0 011 1v2h4a1 1 0 011 1v3a1 1 0 01-1 1h-2v9a1 1 0 01-1 1H8a1 1 0 01-1-1V9H5a1 1 0 01-1-1V5a1 1 0 011-1h2z" />
                 </svg>
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-indigo-900">TMDB API Key</h2>
-                <p className="text-indigo-600">Enhanced movie & show metadata</p>
+                <h2 className="text-2xl font-bold text-white">TMDB API Key</h2>
+                <p className="text-white/60">Enhanced movie & show metadata</p>
               </div>
             </div>
 
             {tmdbStatus?.configured ? (
-              <div className="bg-gradient-to-r from-green-50 to-blue-50 rounded-xl p-6 mb-6">
-                <div className="flex items-center justify-between">
+              <div className="bg-emerald-500/10 backdrop-blur-sm rounded-2xl p-6 mb-6 border border-emerald-400/20">
+                <div className="flex items-center justify-between flex-wrap gap-4">
                   <div>
-                    <h3 className="font-semibold text-green-900 mb-1">API Key Configured</h3>
+                    <h3 className="font-semibold text-emerald-200 mb-2">✅ API Key Configured</h3>
                     {tmdbStatus.key_preview && (
-                      <p className="text-sm text-green-700">Key: {tmdbStatus.key_preview}</p>
+                      <p className="text-sm text-emerald-300 font-mono bg-white/5 px-3 py-2 rounded-lg">Key: {tmdbStatus.key_preview}</p>
                     )}
                   </div>
                   <button
                     onClick={deleteTmdbKey}
                     disabled={saving === "tmdb"}
-                    className="bg-red-500 text-white px-4 py-2 rounded-lg font-medium hover:bg-red-600 transition-colors disabled:opacity-50"
+                    className="min-h-[44px] bg-red-500 text-white px-5 py-2 rounded-xl font-semibold hover:bg-red-600 hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {saving === "tmdb" ? "Deleting..." : "Delete Key"}
+                    {saving === "tmdb" ? "Deleting..." : "🗑️ Delete Key"}
                   </button>
                 </div>
               </div>
             ) : (
               <div className="space-y-4">
-                <div className="bg-gradient-to-r from-yellow-50 to-orange-50 rounded-xl p-6">
-                  <h3 className="font-semibold text-orange-900 mb-2">TMDB API Key Required</h3>
-                  <p className="text-sm text-orange-700">
+                <div className="bg-yellow-500/10 backdrop-blur-sm rounded-2xl p-6 border border-yellow-400/20">
+                  <h3 className="font-semibold text-yellow-200 mb-2">⚠️ TMDB API Key Required</h3>
+                  <p className="text-sm text-yellow-300">
                     Get your free API key from{" "}
-                    <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" className="underline">
+                    <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener noreferrer" className="underline text-yellow-100 hover:text-yellow-200 transition">
                       TMDB Settings
                     </a>
                   </p>
                 </div>
                 
-                <div className="flex gap-3">
+                <div className="flex gap-3 flex-wrap">
                   <input
                     type="password"
                     value={tmdbKey}
                     onChange={(e) => setTmdbKey(e.target.value)}
                     placeholder="Enter your TMDB API key..."
-                    className="flex-1 px-4 py-3 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-fuchsia-400 focus:border-fuchsia-400 transition-all duration-200 shadow-sm"
+                    className="flex-1 min-w-[250px] min-h-[44px] px-4 py-3 bg-white/5 border border-white/20 text-white placeholder-white/40 rounded-xl focus:ring-2 focus:ring-green-400 focus:border-transparent transition-all duration-200 shadow-sm"
                   />
                   <button
                     onClick={saveTmdbKey}
                     disabled={saving === "tmdb" || !tmdbKey.trim()}
-                    className="bg-gradient-to-r from-green-500 via-blue-500 to-indigo-500 text-white px-6 py-3 rounded-lg font-semibold hover:from-green-600 hover:to-indigo-600 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50"
+                    className="min-h-[44px] bg-gradient-to-r from-green-500 via-blue-500 to-indigo-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {saving === "tmdb" ? "Saving..." : "Save Key"}
+                    {saving === "tmdb" ? "Saving..." : "💾 Save Key"}
                   </button>
                 </div>
               </div>
@@ -339,30 +339,30 @@ export default function Settings() {
           </div>
 
           {/* Timezone Settings Card */}
-          <div className="bg-white/90 backdrop-blur-xl rounded-3xl shadow-2xl border border-indigo-100 p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-12 h-12 bg-gradient-to-tr from-orange-400 via-pink-400 to-indigo-400 rounded-full flex items-center justify-center">
-                <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div className="bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-14 h-14 bg-gradient-to-tr from-orange-500 via-pink-500 to-indigo-500 rounded-2xl flex items-center justify-center shadow-lg">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
               </div>
               <div>
-                <h2 className="text-2xl font-bold text-indigo-900">Timezone Settings</h2>
-                <p className="text-indigo-600">Configure your local timezone for better recommendations</p>
+                <h2 className="text-2xl font-bold text-white">Timezone Settings</h2>
+                <p className="text-white/60">Configure your local timezone for better recommendations</p>
               </div>
             </div>
 
-            <div className="bg-gradient-to-r from-orange-50 via-pink-50 to-indigo-50 rounded-xl p-6 mb-6">
+            <div className="bg-white/5 backdrop-blur-sm rounded-2xl p-6 mb-6 border border-white/10">
               <div className="space-y-4">
                 <div>
-                  <label htmlFor="timezone-select" className="block text-sm font-medium text-indigo-900 mb-2">
-                    Current Timezone
+                  <label htmlFor="timezone-select" className="block text-sm font-medium text-white mb-3">
+                    🌍 Current Timezone
                   </label>
                   <select
                     id="timezone-select"
                     value={timezone}
                     onChange={(e) => setTimezone(e.target.value)}
-                    className="w-full px-4 py-3 border border-indigo-200 rounded-lg focus:ring-2 focus:ring-pink-400 focus:border-pink-400 transition-all duration-200 shadow-sm bg-white"
+                    className="w-full min-h-[44px] px-4 py-3 bg-white/5 border border-white/20 text-white rounded-xl focus:ring-2 focus:ring-pink-400 focus:border-transparent transition-all duration-200 shadow-sm"
                   >
                     <optgroup label="Americas">
                       <option value="America/New_York">Eastern Time (New York)</option>
@@ -407,23 +407,23 @@ export default function Settings() {
                   </select>
                 </div>
 
-                <div className="flex justify-between items-center">
-                  <div className="text-sm text-indigo-700">
-                    <p>This helps improve mood-based recommendations by considering your local time context.</p>
+                <div className="flex justify-between items-center flex-wrap gap-4">
+                  <div className="text-sm text-white/60">
+                    <p>🕐 This helps improve mood-based recommendations by considering your local time context.</p>
                   </div>
                   <button
                     onClick={saveTimezone}
                     disabled={saving === "timezone"}
-                    className="bg-gradient-to-r from-orange-500 via-pink-500 to-indigo-500 text-white px-6 py-3 rounded-lg font-semibold hover:from-orange-600 hover:to-indigo-600 transition-all duration-200 shadow-md hover:shadow-lg disabled:opacity-50"
+                    className="min-h-[44px] bg-gradient-to-r from-orange-500 via-pink-500 to-indigo-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    {saving === "timezone" ? "Saving..." : "Save Timezone"}
+                    {saving === "timezone" ? "Saving..." : "💾 Save Timezone"}
                   </button>
                 </div>
               </div>
             </div>
 
-            <div className="text-sm text-gray-600">
-              <p>Your timezone setting helps WatchBuddy provide more relevant recommendations based on your local time of day and viewing patterns.</p>
+            <div className="text-sm text-white/50">
+              <p>💡 Your timezone setting helps WatchBuddy provide more relevant recommendations based on your local time of day and viewing patterns.</p>
             </div>
           </div>
         </div>

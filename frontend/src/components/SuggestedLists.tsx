@@ -184,17 +184,17 @@ export default function SuggestedLists({ onCreate }:{ onCreate?: ()=>void }){
 
   if (loading) {
     return (
-      <div className="bg-gradient-to-br from-slate-50 to-gray-100 p-6 rounded-xl shadow-lg border border-gray-200">
+      <div className="bg-white/10 backdrop-blur-lg p-6 rounded-3xl shadow-2xl border border-white/20">
         <div className="flex items-center gap-3 mb-4">
-          <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center">
-            <span className="text-white text-sm font-bold">💡</span>
+          <div className="w-10 h-10 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl flex items-center justify-center shadow-lg">
+            <span className="text-2xl">💡</span>
           </div>
-          <h3 className="text-xl font-bold text-gray-800">Suggested Lists</h3>
+          <h3 className="text-2xl font-bold text-white">Suggested Lists</h3>
         </div>
         <div className="flex items-center justify-center py-8">
           <div className="flex items-center gap-3">
-            <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin"></div>
-            <span className="text-gray-600">Analyzing your preferences...</span>
+            <div className="w-6 h-6 border-2 border-purple-400 border-t-transparent rounded-full animate-spin"></div>
+            <span className="text-white/70">Analyzing your preferences...</span>
           </div>
         </div>
       </div>
@@ -202,29 +202,29 @@ export default function SuggestedLists({ onCreate }:{ onCreate?: ()=>void }){
   }
 
   return (
-    <div className="bg-gradient-to-br from-slate-50 to-gray-100 p-6 rounded-xl shadow-lg border border-gray-200">
+    <div className="bg-white/10 backdrop-blur-lg p-6 rounded-3xl shadow-2xl border border-white/20">
       <div className="flex items-center gap-3 mb-6">
-        <div className="w-8 h-8 bg-gradient-to-r from-blue-500 to-indigo-600 rounded-lg flex items-center justify-center">
-          <span className="text-white text-sm font-bold">💡</span>
+        <div className="w-10 h-10 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl flex items-center justify-center shadow-lg">
+          <span className="text-2xl">💡</span>
         </div>
-          <h3 className="text-xl font-bold text-gray-800">Suggested Lists</h3>
+          <h3 className="text-2xl font-bold text-white">Suggested Lists</h3>
       </div>
 
       {error && (
-        <div className="mb-4 p-3 bg-red-100 border border-red-200 rounded-lg text-red-800 text-sm">
+        <div className="mb-4 p-3 bg-red-500/20 border border-red-400/30 rounded-xl text-red-200 text-sm backdrop-blur-sm">
           {error}
         </div>
       )}
 
       {suggestions.length === 0 ? (
         <div className="text-center py-8">
-          <div className="text-gray-500 mb-4">
+          <div className="text-white/50 mb-4">
             <span className="text-4xl">📋</span>
           </div>
-          <p className="text-gray-600">No suggestions available at the moment.</p>
+          <p className="text-white/70 mb-4">No suggestions available at the moment.</p>
           <button 
             onClick={loadSuggestions}
-            className="mt-3 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+            className="min-h-[44px] px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl hover:shadow-xl transition-all hover:scale-105"
           >
             Refresh
           </button>
@@ -236,42 +236,42 @@ export default function SuggestedLists({ onCreate }:{ onCreate?: ()=>void }){
             const isCreating = creatingId === suggestionId;
             const isRemoving = removingId === suggestionId;
             return (
-              <div key={i} className={`bg-white rounded-lg border border-gray-200 p-4 hover:shadow-md transition-shadow relative ${suggestion._removing ? "opacity-60" : ""}`}
+              <div key={i} className={`bg-white/5 backdrop-blur-sm rounded-2xl border border-white/20 p-4 hover:bg-white/10 hover:shadow-lg transition-all relative ${suggestion._removing ? "opacity-60" : ""}`}
                 aria-live="polite" aria-busy={isRemoving}>
                 <div className="flex items-start gap-3 mb-3">
-                  <div className={`w-8 h-8 bg-gradient-to-r ${getColorClasses(suggestion.color)} rounded-lg flex items-center justify-center text-white text-sm`}>
+                  <div className={`w-10 h-10 bg-gradient-to-r ${getColorClasses(suggestion.color)} rounded-xl flex items-center justify-center text-white text-lg shadow-lg`}>
                     {suggestion.icon}
                   </div>
                   <div className="flex-1">
-                    <h4 className="font-semibold text-gray-800 mb-1">{suggestion.title}</h4>
-                    <p className="text-xs text-gray-600 leading-relaxed">{suggestion.description}</p>
+                    <h4 className="font-semibold text-white text-lg mb-1">{suggestion.title}</h4>
+                    <p className="text-xs text-white/60 leading-relaxed">{suggestion.description}</p>
                   </div>
                   <button
                     aria-label="Remove and regenerate suggestion"
                     title="Remove and regenerate suggestion"
                     onClick={() => removeSuggestion(suggestion, i)}
                     disabled={isRemoving}
-                    className={`ml-2 px-2 py-1 text-xs rounded border border-gray-300 bg-gray-100 hover:bg-red-100 text-gray-500 hover:text-red-600 transition ${isRemoving ? "opacity-60 cursor-not-allowed" : ""}`}
+                    className={`ml-2 min-h-[36px] min-w-[36px] px-2 py-1 text-sm rounded-xl border border-white/20 bg-white/5 hover:bg-red-500/20 hover:border-red-400/30 text-white/70 hover:text-red-300 transition ${isRemoving ? "opacity-60 cursor-not-allowed" : ""}`}
                   >
                     {isRemoving ? (
-                      <span className="inline-flex items-center gap-1"><span className="w-3 h-3 border border-red-400 border-t-transparent rounded-full animate-spin"></span>Removing…</span>
+                      <span className="inline-flex items-center gap-1"><span className="w-3 h-3 border border-red-400 border-t-transparent rounded-full animate-spin"></span></span>
                     ) : (
                       <span>✕</span>
                     )}
                   </button>
                 </div>
                 <div className="flex items-center justify-between mt-4">
-                  <div className="text-xs text-gray-500">
-                    {suggestion.item_limit} items
+                  <div className="text-xs text-white/50">
+                    🎬 {suggestion.item_limit} items
                   </div>
                   <button 
                     aria-label="Create list from suggestion"
                     onClick={() => createList(suggestion, i)}
                     disabled={isCreating}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                    className={`min-h-[44px] px-5 py-2 rounded-xl text-sm font-semibold transition-all ${
                       isCreating
-                        ? "bg-gray-400 text-white cursor-not-allowed"
-                        : `bg-gradient-to-r ${getColorClasses(suggestion.color)} text-white hover:shadow-lg transform hover:scale-105 active:scale-95`
+                        ? "bg-white/10 text-white/40 cursor-not-allowed"
+                        : `bg-gradient-to-r ${getColorClasses(suggestion.color)} text-white shadow-lg hover:shadow-xl transform hover:scale-105 active:scale-95`
                     }`}
                   >
                     {isCreating ? (
@@ -280,23 +280,23 @@ export default function SuggestedLists({ onCreate }:{ onCreate?: ()=>void }){
                         Creating...
                       </div>
                     ) : (
-                      "Create List"
+                      "✨ Create List"
                     )}
                   </button>
                 </div>
                 {/* Confirmation dialog */}
                 {confirmIdx === i && (
-                  <div className="absolute inset-0 bg-black bg-opacity-30 flex items-center justify-center z-10 rounded-lg">
-                    <div className="bg-white border border-gray-300 rounded-lg p-4 shadow-xl flex flex-col items-center">
-                      <p className="mb-3 text-gray-800 text-sm">Remove this suggestion and get a new one?</p>
-                      <div className="flex gap-2">
+                  <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-10 rounded-2xl">
+                    <div className="bg-white/10 backdrop-blur-lg border border-white/30 rounded-2xl p-5 shadow-2xl flex flex-col items-center">
+                      <p className="mb-4 text-white text-sm font-medium">Remove this suggestion and get a new one?</p>
+                      <div className="flex gap-3">
                         <button
-                          className="px-3 py-1 rounded bg-red-600 text-white text-xs hover:bg-red-700"
+                          className="min-h-[44px] px-5 py-2 rounded-xl bg-gradient-to-r from-red-500 to-red-600 text-white text-sm font-semibold hover:shadow-lg transition hover:scale-105"
                           onClick={() => confirmRemove(suggestion, i)}
                           autoFocus
                         >Yes, remove</button>
                         <button
-                          className="px-3 py-1 rounded bg-gray-200 text-gray-700 text-xs hover:bg-gray-300"
+                          className="min-h-[44px] px-5 py-2 rounded-xl bg-white/10 border border-white/20 text-white text-sm font-semibold hover:bg-white/20 transition"
                           onClick={() => setConfirmIdx(null)}
                         >Cancel</button>
                       </div>
@@ -309,9 +309,9 @@ export default function SuggestedLists({ onCreate }:{ onCreate?: ()=>void }){
         </div>
       )}
 
-      <div className="mt-6 p-3 bg-blue-50 rounded-lg border border-blue-100">
-        <p className="text-xs text-blue-700">
-          <strong>Personalized for you:</strong> These suggestions are based on your viewing history, 
+      <div className="mt-6 p-4 bg-purple-500/10 backdrop-blur-sm rounded-2xl border border-purple-400/20">
+        <p className="text-xs text-purple-200">
+          <strong className="text-purple-100">💫 Personalized for you:</strong> These suggestions are based on your viewing history, 
           ratings, and preferences. Lists automatically update as your tastes evolve.
         </p>
       </div>

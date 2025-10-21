@@ -1,5 +1,4 @@
 from . import lists
-from . import smartlists
 from . import settings
 from . import status
 from . import trakt_auth
@@ -7,3 +6,4 @@ from . import suggested
 from . import ratings
 from . import metadata
 from . import chatlists
+from . import ai_lists

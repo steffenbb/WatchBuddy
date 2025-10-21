@@ -1,4 +1,4 @@
-"""
+1"""
 Test script for Trakt redirect URI endpoints.
 """
 import http.client

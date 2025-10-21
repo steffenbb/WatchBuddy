@@ -34,6 +34,7 @@ from datetime import datetime
 from celery import shared_task
 from celery.exceptions import Retry
 from app.core.redis_client import get_redis
+from app.utils.timezone import utc_now
 from app.services.scoring_engine import ScoringEngine
 from app.services.mood import get_user_mood
 from app.core.database import SessionLocal
@@ -117,170 +118,6 @@ def format_sync_notification(list_title: str, trigger: str, updated: int = 0, re
         msg += "No changes."
     return msg
 
-@shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def score_smartlist(self, user_id: int, smartlist_id: int):
-    """Score SmartList items with user/list locking."""
-    async def _score_smartlist():
-        try:
-            # Acquire per-list lock
-            async with SyncLock(user_id, smartlist_id, "scoring"):
-                engine = ScoringEngine()
-                try:
-                    # Fetch SmartList and items from DB
-                    from app.core.database import get_async_session
-                    from app.models import SmartList, ListItem
-                    from sqlalchemy import select
-                    
-                    async with get_async_session() as session:
-                        # Get SmartList
-                        stmt = select(SmartList).where(SmartList.id == smartlist_id)
-                        result = await session.execute(stmt)
-                        smartlist = result.scalar_one_or_none()
-                        
-                        if not smartlist:
-                            logger.error(f"SmartList {smartlist_id} not found")
-                            return
-                        
-                        # Get user mood
-                        mood = await get_user_mood(user_id)
-
-                        # Fetch existing trakt_ids for freshness
-                        existing_trakt_ids = set()
-                        if smartlist.items:
-                            for item in smartlist.items:
-                                if item.trakt_id:
-                                    existing_trakt_ids.add(item.trakt_id)
-
-                        # Parse criteria from SmartList (assume JSON in .criteria)
-                        import json
-                        criteria = {}
-                        if smartlist.criteria:
-                            try:
-                                criteria = json.loads(smartlist.criteria)
-                            except Exception:
-                                logger.warning(f"Could not parse criteria for SmartList {smartlist_id}")
-
-                        # Use BulkCandidateProvider to fetch candidates
-                        from app.services.bulk_candidate_provider import BulkCandidateProvider
-                        provider = BulkCandidateProvider(user_id)
-                        candidates = await provider.get_candidates(
-                            media_type=criteria.get("media_type", "movies"),
-                            limit=criteria.get("item_limit", 50),
-                            mood=mood,
-                            discovery=criteria.get("discovery"),
-                            include_watched=not smartlist.exclude_watched if hasattr(smartlist, 'exclude_watched') else False,
-                            genres=criteria.get("genres"),
-                            languages=criteria.get("languages"),
-                            min_year=criteria.get("min_year"),
-                            max_year=criteria.get("max_year"),
-                            min_rating=criteria.get("min_rating"),
-                            search_keywords=criteria.get("search_keywords"),
-                            enrich_with_tmdb=True,
-                            genre_mode=criteria.get("genre_mode", "any"),
-                            existing_list_ids=existing_trakt_ids
-                        )
-
-                        # Score items
-                        scored_items = engine.score_candidates(
-                            user={"id": user_id},
-                            candidates=candidates,
-                            list_type="smartlist",
-                            item_limit=criteria.get("item_limit", 50),
-                            filters={
-                                "genres": criteria.get("genres"),
-                                "languages": criteria.get("languages"),
-                                "min_year": criteria.get("min_year"),
-                                "max_year": criteria.get("max_year")
-                            }
-                        )
-
-                        # Save results (placeholder)
-                        # TODO: update ListItem records
-                        
-                        await send_toast_notification(
-                            user_id,
-                            f"SmartList '{smartlist.name}' updated with {len(scored_items)} items",
-                            "success"
-                        )
-                        
-                finally:
-                    # Memory cleanup
-                    del engine
-                    gc.collect()
-                    
-        except SyncLockBusy:
-            # Retry later if lock is busy
-            logger.info(f"SmartList scoring queued for user {user_id}, list {smartlist_id}")
-            raise self.retry(countdown=30)
-        except Exception as exc:
-            msg = extract_error_message(exc)
-            logger.error(f"Error scoring SmartList {smartlist_id}: {msg}")
-            await send_toast_notification(
-                user_id,
-                f"Failed to update SmartList: {msg}",
-                "error"
-            )
-            if self.request.retries < self.max_retries:
-                raise self.retry(countdown=60 * (2 ** self.request.retries))
-            raise
-    
-    # Run async function
-    import asyncio
-    asyncio.run(_score_smartlist())
-
-@shared_task(bind=True, max_retries=3, default_retry_delay=30)
-def sync_user_lists(self, user_id: int):
-    """Sync all lists for a user with global user lock."""
-    async def _sync_user_lists():
-        try:
-            # Acquire per-user lock
-            async with SyncLock(user_id, lock_type="user_sync"):
-                from app.core.database import get_async_session
-                from app.models import SmartList
-                from sqlalchemy import select
-                
-                async with get_async_session() as session:
-                    # Get user's lists
-                    stmt = select(SmartList).where(SmartList.user_id == user_id)
-                    result = await session.execute(stmt)
-                    smartlists = result.scalars().all()
-                    
-                    synced_count = 0
-                    for smartlist in smartlists:
-                        try:
-                            # Queue individual list scoring tasks
-                            score_smartlist.delay(user_id, smartlist.id)
-                            synced_count += 1
-                        except Exception as e:
-                            logger.error(f"Failed to queue SmartList {smartlist.id}: {e}")
-                    
-                    await send_toast_notification(
-                        user_id,
-                        f"Queued {synced_count} lists for sync",
-                        "info"
-                    )
-                    
-        except SyncLockBusy:
-            logger.info(f"User sync already in progress for user {user_id}")
-            await send_toast_notification(
-                user_id,
-                "Sync already in progress",
-                "warning"
-            )
-        except Exception as exc:
-            msg = extract_error_message(exc)
-            logger.error(f"Error syncing user {user_id}: {msg}")
-            await send_toast_notification(
-                user_id,
-                f"Sync failed: {msg}",
-                "error"
-            )
-            if self.request.retries < self.max_retries:
-                raise self.retry(countdown=30 * (2 ** self.request.retries))
-            raise
-    
-    asyncio.run(_sync_user_lists())
-
 @shared_task(bind=True, max_retries=3)
 def send_user_notification(self, user_id: int, message: str):
     """Send user notification."""
@@ -290,26 +127,280 @@ def send_user_notification(self, user_id: int, message: str):
     asyncio.run(_send_notification())
 
 @shared_task(bind=True, max_retries=3)
-def refresh_smartlists(self):
-    """Refresh all SmartLists for all users (scheduled task)."""
-    async def _refresh_all():
-        from app.core.database import get_async_session
-        from app.models import User
-        from sqlalchemy import select
-        
-        async with get_async_session() as session:
-            # Get all active users
-            stmt = select(User.id).distinct()
-            result = await session.execute(stmt)
-            user_ids = [row[0] for row in result]
-            
-            # Queue sync for each user
-            for user_id in user_ids:
-                sync_user_lists.delay(user_id)
-            
-            logger.info(f"Queued SmartList refresh for {len(user_ids)} users")
+def run_nightly_maintenance(self):
+    """Check timezone-aware local time and, if within 7 hours from local midnight, run metadata builder and AI index prerequisites.
+    - Timezone loaded from Redis settings: settings:global:user_timezone
+    - Window: [00:00, 07:00) local time
+    - Always runs on new installs as well; safe to no-op if already complete
+    """
+    async def _maybe_run():
+        try:
+            from app.core.redis_client import get_redis
+            from app.utils.timezone import utc_now
+            import pytz
+            r = get_redis()
+            tz_str = await r.get("settings:global:user_timezone")
+            tz_name = tz_str.decode("utf-8") if isinstance(tz_str, bytes) else (tz_str or "UTC")
+            try:
+                tz = pytz.timezone(tz_name)
+            except Exception:
+                tz = pytz.UTC
+            now_local = utc_now().astimezone(tz)
+            if 0 <= now_local.hour < 7:
+                # Run metadata builder (retry missing trakt_ids)
+                try:
+                    build_metadata.delay(user_id=1, force=False)
+                except Exception as e:
+                    logger.warning(f"Nightly: failed to queue metadata build: {e}")
+                # Run comprehensive AI optimization for all candidates
+                try:
+                    await _backfill_ai_segments(max_minutes=420)  # 7 hours max
+                except Exception as e:
+                    logger.warning(f"Nightly: AI optimization failed: {e}")
+        except Exception as e:
+            logger.warning(f"Nightly maintenance dispatcher error: {e}")
+    asyncio.run(_maybe_run())
+
+async def _backfill_ai_segments(max_minutes: int = 420):
+    """Comprehensive AI optimization for persistent candidates during nightly maintenance window.
     
-    asyncio.run(_refresh_all())
+    This is NOT lightweight - it's designed to run during the 7-hour nightly window (00:00-07:00)
+    to prepare the AI index for fast daytime queries. Processes ALL candidates that need optimization:
+    
+    1. Generates embeddings for items missing them (prioritizing high-quality content)
+    2. Builds rich text segments from metadata (title, overview, genres, keywords, cast, studios)
+    3. Updates FAISS index incrementally
+    4. Prioritizes candidates with:
+       - Good ratings (vote_average >= 6.0)
+       - Sufficient vote count (vote_count >= 50)
+       - Complete metadata (cast, genres, keywords populated)
+    
+    Args:
+        max_minutes: Maximum runtime in minutes (default 420 = 7 hours)
+    
+    Returns:
+        Number of candidates processed
+    """
+    from app.core.database import SessionLocal
+    from sqlalchemy import text, and_, or_
+    from app.utils.timezone import utc_now
+    from app.services.ai_engine.embeddings import EmbeddingService
+    from app.services.ai_engine.metadata_processing import compose_text_for_embedding
+    from app.models import PersistentCandidate
+    import time
+    import json
+    
+    start_time = time.time()
+    max_seconds = max_minutes * 60
+    db = SessionLocal()
+    
+    try:
+        logger.info(f"[AI Optimization] Starting comprehensive nightly backfill (max {max_minutes} minutes)")
+        
+        # Step 1: Identify candidates needing AI optimization
+        # Priority: Active items with trakt_id, ordered by quality and completeness
+        sql = text("""
+            SELECT 
+                id, tmdb_id, trakt_id, media_type, title, original_title, 
+                overview, genres, keywords, "cast", production_companies,
+                vote_average, vote_count, popularity, year, language, runtime,
+                tagline, homepage, budget, revenue,
+                production_countries, spoken_languages,
+                networks, created_by, number_of_seasons, number_of_episodes,
+                episode_run_time, first_air_date, last_air_date, in_production,
+                status
+            FROM persistent_candidates
+            WHERE 
+                active = true 
+                AND trakt_id IS NOT NULL
+                AND tmdb_id IS NOT NULL
+                AND embedding IS NULL
+            ORDER BY 
+                -- Prioritize high-quality content
+                CASE 
+                    WHEN vote_average >= 7.0 AND vote_count >= 100 THEN 1
+                    WHEN vote_average >= 6.0 AND vote_count >= 50 THEN 2
+                    WHEN vote_count >= 20 THEN 3
+                    ELSE 4
+                END,
+                -- Then by completeness (more metadata = better)
+                CASE 
+                    WHEN "cast" IS NOT NULL AND genres IS NOT NULL AND keywords IS NOT NULL THEN 1
+                    WHEN genres IS NOT NULL AND keywords IS NOT NULL THEN 2
+                    WHEN overview IS NOT NULL AND overview != '' THEN 3
+                    ELSE 4
+                END,
+                -- Finally by popularity and recency
+                popularity DESC,
+                year DESC NULLS LAST,
+                inserted_at DESC
+        """)
+        
+        rows = db.execute(sql).fetchall()
+        total_candidates = len(rows)
+        logger.info(f"[AI Optimization] Found {total_candidates} candidates to process")
+        
+        if not rows:
+            logger.info("[AI Optimization] No candidates to process")
+            return 0
+        
+        # Step 2: Build rich text segments and generate embeddings in batches
+        embedding_service = EmbeddingService()
+        batch_size = 64
+        processed = 0
+        embeddings_generated = 0
+        segments_updated = 0
+        
+        # Process in batches to manage memory
+        for batch_start in range(0, total_candidates, batch_size):
+            # Check time limit
+            elapsed = time.time() - start_time
+            if elapsed > max_seconds:
+                logger.info(f"[AI Optimization] Time limit reached ({elapsed/60:.1f} minutes), stopping gracefully")
+                break
+            
+            batch_end = min(batch_start + batch_size, total_candidates)
+            batch_rows = rows[batch_start:batch_end]
+            
+            # Build candidate dicts with all metadata
+            candidates = []
+            candidate_ids = []
+            texts_for_embedding = []
+            
+            for row in batch_rows:
+                (rid, tmdb_id, trakt_id, media_type, title, original_title,
+                 overview, genres, keywords, cast, production_companies,
+                 vote_average, vote_count, popularity, year, language, runtime,
+                 tagline, homepage, budget, revenue,
+                 production_countries, spoken_languages,
+                 networks, created_by, number_of_seasons, number_of_episodes,
+                 episode_run_time, first_air_date, last_air_date, in_production,
+                 status) = row
+                
+                candidate = {
+                    'id': rid,
+                    'tmdb_id': tmdb_id,
+                    'trakt_id': trakt_id,
+                    'media_type': media_type,
+                    'title': title or '',
+                    'original_title': original_title or '',
+                    'overview': overview or '',
+                    'genres': genres or '[]',
+                    'keywords': keywords or '[]',
+                    'cast': cast or '[]',
+                    'production_companies': production_companies or '[]',
+                    'vote_average': vote_average or 0,
+                    'vote_count': vote_count or 0,
+                    'popularity': popularity or 0,
+                    'year': year,
+                    'language': language or '',
+                    'runtime': runtime or 0,
+                    'tagline': tagline or '',
+                    'homepage': homepage or '',
+                    'budget': budget or 0,
+                    'revenue': revenue or 0,
+                    'production_countries': production_countries or '[]',
+                    'spoken_languages': spoken_languages or '[]',
+                    'networks': networks or '[]',
+                    'created_by': created_by or '[]',
+                    'number_of_seasons': number_of_seasons,
+                    'number_of_episodes': number_of_episodes,
+                    'episode_run_time': episode_run_time or '[]',
+                    'first_air_date': first_air_date or '',
+                    'last_air_date': last_air_date or '',
+                    'in_production': in_production,
+                    'status': status or '',
+                }
+                
+                candidates.append(candidate)
+                candidate_ids.append(rid)
+                
+                # Compose rich text for embedding
+                text_segment = compose_text_for_embedding(candidate)
+                texts_for_embedding.append(text_segment)
+            
+            # Generate embeddings for entire batch
+            try:
+                embeddings = embedding_service.encode_texts(texts_for_embedding, batch_size=batch_size)
+                embeddings_generated += len(embeddings)
+                
+                # Import serialization helper
+                from app.services.ai_engine.faiss_index import serialize_embedding
+                
+                # Store embeddings and update segments
+                for i, candidate in enumerate(candidates):
+                    try:
+                        embedding_blob = serialize_embedding(embeddings[i])
+                        
+                        # Update with rich composed text segment AND store embedding
+                        db.execute(text("""
+                            UPDATE persistent_candidates 
+                            SET 
+                                overview = :segment,
+                                embedding = :embedding_blob,
+                                last_refreshed = :ts
+                            WHERE id = :id
+                        """), {
+                            'segment': texts_for_embedding[i][:5000],  # Store full segment (truncate if needed)
+                            'embedding_blob': embedding_blob,
+                            'ts': utc_now(),
+                            'id': candidate_ids[i]
+                        })
+                        segments_updated += 1
+                    except Exception as e:
+                        logger.warning(f"[AI Optimization] Failed to update candidate {candidate_ids[i]}: {e}")
+                        db.rollback()
+                        continue
+                
+                # Commit batch
+                db.commit()
+                processed += len(candidates)
+                
+                # Add embeddings to FAISS index incrementally
+                try:
+                    from app.services.ai_engine.faiss_index import add_to_index
+                    success = add_to_index(embeddings, [c['tmdb_id'] for c in candidates], embeddings.shape[1])
+                    if not success:
+                        logger.warning("[AI Optimization] FAISS index not found - will be built on first AI list generation")
+                except Exception as e:
+                    logger.warning(f"[AI Optimization] FAISS index update failed: {e}")
+                
+                # Log progress
+                if processed % 500 == 0 or processed == total_candidates:
+                    elapsed_min = (time.time() - start_time) / 60
+                    rate = processed / elapsed_min if elapsed_min > 0 else 0
+                    remaining = total_candidates - processed
+                    eta_min = remaining / rate if rate > 0 else 0
+                    logger.info(
+                        f"[AI Optimization] Progress: {processed}/{total_candidates} "
+                        f"({processed/total_candidates*100:.1f}%) | "
+                        f"Embeddings: {embeddings_generated} | "
+                        f"Rate: {rate:.1f}/min | "
+                        f"ETA: {eta_min:.1f}min"
+                    )
+                
+            except Exception as e:
+                logger.error(f"[AI Optimization] Batch embedding failed: {e}", exc_info=True)
+                db.rollback()
+                continue
+        
+        # Step 3: Log completion (FAISS updates happen incrementally above)
+        logger.info(
+            f"[AI Optimization] Completed: "
+            f"{processed} candidates processed, "
+            f"{embeddings_generated} embeddings generated, "
+            f"{segments_updated} segments updated | "
+            f"Runtime: {(time.time() - start_time)/60:.1f} minutes"
+        )
+        
+        return processed
+        
+    except Exception as e:
+        logger.error(f"[AI Optimization] Fatal error: {e}", exc_info=True)
+        db.rollback()
+        return 0
+    finally:
+        db.close()
 
 @shared_task
 def cleanup_orphaned_items():
@@ -573,7 +664,8 @@ def populate_new_list_async(
                     if trakt_id:
                         try:
                             pc = db_session.query(PersistentCandidate).filter(
-                                PersistentCandidate.tmdb_id == tmdb_id
+                                PersistentCandidate.tmdb_id == tmdb_id,
+                                PersistentCandidate.media_type == media_type
                             ).first()
                             if pc and not pc.trakt_id:
                                 pc.trakt_id = trakt_id

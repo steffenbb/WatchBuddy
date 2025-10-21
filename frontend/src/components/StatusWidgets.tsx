@@ -166,11 +166,11 @@ export const StatusWidgets: React.FC = () => {
 
   if (loading) {
     return (
-      <div className="space-y-4 bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100 p-2 md:p-4 rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-xl mx-auto transition-all duration-500">
+      <div className="space-y-4">
         {[1, 2, 3].map(i => (
-          <div key={i} className="relative z-10 bg-white/80 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 animate-pulse transition-all duration-500">
-            <div className="h-4 bg-gray-200 rounded w-1/2 mb-2"></div>
-            <div className="h-6 bg-gray-200 rounded w-3/4"></div>
+          <div key={i} className="bg-white/10 backdrop-blur-lg rounded-2xl border border-white/20 p-4 md:p-6 flex flex-col gap-2 animate-pulse">
+            <div className="h-4 bg-white/20 rounded w-1/2 mb-2"></div>
+            <div className="h-6 bg-white/20 rounded w-3/4"></div>
           </div>
         ))}
       </div>
@@ -178,156 +178,156 @@ export const StatusWidgets: React.FC = () => {
   }
 
   return (
-    <div className="space-y-4 bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100 p-2 md:p-4 rounded-3xl shadow-2xl border border-indigo-100 w-full max-w-xl mx-auto transition-all duration-500">
+    <div className="space-y-4">
       {/* Active Syncs Widget */}
-  <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6">
         <div className="flex items-center justify-between mb-3">
-          <h4 className="font-semibold text-gray-900 text-sm">Active Syncs</h4>
+          <h4 className="font-semibold text-white text-base">⏱️ Active Syncs</h4>
           <button
             onClick={fetchStatus}
-            className="text-gray-400 hover:text-gray-600 text-sm p-1 rounded hover:bg-gray-100 transition-colors touch-manipulation flex items-center gap-1"
+            className="text-white/60 hover:text-white text-sm p-2 rounded-xl hover:bg-white/10 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
             title="Refresh"
             aria-busy={refreshing}
           >
             {refreshing ? (
-              <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-transparent rounded-full animate-spin" />
-            ) : '↻'}
+              <span className="inline-block w-4 h-4 border-2 border-white/60 border-t-transparent rounded-full animate-spin" />
+            ) : <span className="text-xl">↻</span>}
           </button>
         </div>
         
         {syncStatus?.active_syncs.length ? (
-          <div className="space-y-2">
+          <div className="space-y-3">
             {syncStatus.active_syncs.map((sync) => (
-              <div key={sync.list_id} className="border border-blue-200 bg-blue-50 p-3 rounded-lg">
+              <div key={sync.list_id} className="border border-purple-400/30 bg-purple-500/20 p-4 rounded-xl">
                 <div className="flex items-center justify-between">
                   <div className="min-w-0 flex-1">
-                    <div className="font-medium text-sm text-gray-900 truncate">{sync.list_title}</div>
-                    <div className="text-xs text-gray-600 mt-1">
+                    <div className="font-medium text-white truncate">{sync.list_title}</div>
+                    <div className="text-sm text-white/60 mt-1">
                       Running for {formatDuration(sync.started_at)}
                     </div>
                   </div>
                   <div className="flex items-center ml-3">
-                    <div className="animate-spin w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full"></div>
+                    <div className="animate-spin w-5 h-5 border-2 border-purple-300 border-t-transparent rounded-full"></div>
                   </div>
                 </div>
                 {sync.progress !== undefined && (
                   <div className="mt-3">
-                    <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div className="w-full bg-white/10 rounded-full h-2">
                       <div 
-                        className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                        className="bg-gradient-to-r from-purple-400 to-pink-400 h-2 rounded-full transition-all duration-300"
                         style={{ width: `${sync.progress}%` }}
                       ></div>
                     </div>
-                    <div className="text-xs text-gray-600 mt-1 text-right">{sync.progress}%</div>
+                    <div className="text-xs text-white/70 mt-1 text-right">{sync.progress}%</div>
                   </div>
                 )}
               </div>
             ))}
           </div>
         ) : (
-          <div className="text-gray-500 text-sm py-2">No active syncs</div>
+          <div className="text-white/50 text-sm py-2">No active syncs</div>
         )}
       </div>
 
       {/* Lists Overview Widget */}
-  <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
-        <h4 className="font-semibold text-gray-900 mb-3 text-sm">Lists Overview</h4>
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6">
+        <h4 className="font-semibold text-white mb-4 text-base">📊 Lists Overview</h4>
         <div className="grid grid-cols-2 gap-4">
-          <div className="text-center">
-            <div className="text-xl md:text-2xl font-bold text-indigo-600">
+          <div className="text-center bg-indigo-500/20 border border-indigo-400/30 rounded-xl p-4">
+            <div className="text-2xl md:text-3xl font-bold text-white">
               {syncStatus?.total_lists || 0}
             </div>
-            <div className="text-xs text-gray-600 mt-1">Total Lists</div>
+            <div className="text-sm text-white/70 mt-2">Total Lists</div>
           </div>
-          <div className="text-center">
-            <div className="text-xl md:text-2xl font-bold text-green-600">
+          <div className="text-center bg-emerald-500/20 border border-emerald-400/30 rounded-xl p-4">
+            <div className="text-2xl md:text-3xl font-bold text-white">
               {syncStatus?.completed_today || 0}
             </div>
-            <div className="text-xs text-gray-600 mt-1">Synced Today</div>
+            <div className="text-sm text-white/70 mt-2">Synced Today</div>
           </div>
         </div>
         
-        <div className="mt-3 pt-3 border-t border-gray-200">
-          <div className="text-sm text-gray-600 flex items-center gap-2">
+        <div className="mt-4 pt-4 border-t border-white/20">
+          <div className="text-sm text-white/80 flex items-center gap-2">
             <span>Last sync:</span>
-            <span className="font-medium">{formatLastSync(syncStatus?.last_sync || null)}</span>
+            <span className="font-medium text-white">{formatLastSync(syncStatus?.last_sync || null)}</span>
             {refreshing && (
-              <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-transparent rounded-full animate-spin" />
+              <span className="inline-block w-3 h-3 border-2 border-white/60 border-t-transparent rounded-full animate-spin" />
             )}
           </div>
         </div>
       </div>
 
       {/* Lists Quick Actions */}
-  <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6">
         <div className="flex items-center justify-between mb-3">
-          <h4 className="font-semibold text-gray-900 text-sm">Lists Quick Actions</h4>
+          <h4 className="font-semibold text-white text-base">⚡ Quick Actions</h4>
           <button
             onClick={fetchStatus}
-            className="text-gray-400 hover:text-gray-600 text-sm p-1 rounded hover:bg-gray-100 transition-colors touch-manipulation flex items-center gap-1"
+            className="text-white/60 hover:text-white text-sm p-2 rounded-xl hover:bg-white/10 transition-all min-h-[44px] min-w-[44px] flex items-center justify-center"
             title="Refresh"
             aria-busy={refreshing}
           >
             {refreshing ? (
-              <span className="inline-block w-3 h-3 border-2 border-gray-500 border-t-transparent rounded-full animate-spin" />
-            ) : '↻'}
+              <span className="inline-block w-4 h-4 border-2 border-white/60 border-t-transparent rounded-full animate-spin" />
+            ) : <span className="text-xl">↻</span>}
           </button>
         </div>
-  <QuickActions addToast={(msg, type)=>addToast({ message: msg, type: type || 'info' })} />
+        <QuickActions addToast={(msg, type)=>addToast({ message: msg, type: type || 'info' })} />
       </div>
 
       {/* System Health Widget */}
-  <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
-        <h4 className="font-semibold text-gray-900 mb-3 text-sm">System Health</h4>
+      <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6">
+        <h4 className="font-semibold text-white mb-4 text-base">💚 System Health</h4>
         
         {health ? (
           <div className="space-y-2">
-            <div className="flex items-center justify-between text-sm py-1">
-              <span>Redis</span>
-              <span className={getHealthColor(health.redis)}>
-                {getHealthIcon(health.redis)} {health.redis ? 'Online' : 'Offline'}
+            <div className="flex items-center justify-between text-sm py-2 px-3 bg-white/5 rounded-lg">
+              <span className="text-white/90">Redis</span>
+              <span className={`font-medium ${health.redis ? 'text-emerald-300' : 'text-red-300'}`}>
+                {health.redis ? '● Online' : '● Offline'}
               </span>
             </div>
-            <div className="flex items-center justify-between text-sm py-1">
-              <span>Database</span>
-              <span className={getHealthColor(health.database)}>
-                {getHealthIcon(health.database)} {health.database ? 'Online' : 'Offline'}
+            <div className="flex items-center justify-between text-sm py-2 px-3 bg-white/5 rounded-lg">
+              <span className="text-white/90">Database</span>
+              <span className={`font-medium ${health.database ? 'text-emerald-300' : 'text-red-300'}`}>
+                {health.database ? '● Online' : '● Offline'}
               </span>
             </div>
-            <div className="flex items-center justify-between text-sm py-1">
-              <span>Celery</span>
-              <span className={getHealthColor(health.celery)}>
-                {getHealthIcon(health.celery)} {health.celery ? 'Online' : 'Offline'}
+            <div className="flex items-center justify-between text-sm py-2 px-3 bg-white/5 rounded-lg">
+              <span className="text-white/90">Celery</span>
+              <span className={`font-medium ${health.celery ? 'text-emerald-300' : 'text-red-300'}`}>
+                {health.celery ? '● Online' : '● Offline'}
               </span>
             </div>
-            <div className="flex items-center justify-between text-sm py-1">
-              <span>Trakt API</span>
-              <span className={getHealthColor(health.trakt_api)}>
-                {getHealthIcon(health.trakt_api)} {health.trakt_api ? 'Online' : 'Offline'}
+            <div className="flex items-center justify-between text-sm py-2 px-3 bg-white/5 rounded-lg">
+              <span className="text-white/90">Trakt API</span>
+              <span className={`font-medium ${health.trakt_api ? 'text-emerald-300' : 'text-red-300'}`}>
+                {health.trakt_api ? '● Online' : '● Offline'}
               </span>
             </div>
-            <div className="flex items-center justify-between text-sm py-1">
-              <span>TMDB API</span>
-              <span className={getHealthColor(health.tmdb_api)}>
-                {getHealthIcon(health.tmdb_api)} {health.tmdb_api ? 'Online' : 'Offline'}
+            <div className="flex items-center justify-between text-sm py-2 px-3 bg-white/5 rounded-lg">
+              <span className="text-white/90">TMDB API</span>
+              <span className={`font-medium ${health.tmdb_api ? 'text-emerald-300' : 'text-red-300'}`}>
+                {health.tmdb_api ? '● Online' : '● Offline'}
               </span>
             </div>
             
             {/* Worker Status Section */}
             {workerStatus && (
               <>
-                <div className="border-t border-gray-200 my-2"></div>
-                <div className="text-xs font-semibold text-gray-700 mb-1">Background Workers</div>
+                <div className="border-t border-white/20 my-3"></div>
+                <div className="text-sm font-semibold text-white/90 mb-2">Background Workers</div>
                 
                 {/* Movie Worker */}
-                <div className="bg-gray-50 rounded-lg p-2 space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-gray-700">Movie Ingestion</span>
-                    <span className={`font-medium ${
-                      workerStatus.movie.status === 'running' ? 'text-blue-600' :
-                      workerStatus.movie.status === 'completed' ? 'text-green-600' :
-                      workerStatus.movie.status === 'error' ? 'text-red-600' :
-                      'text-gray-500'
+                <div className="bg-white/5 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-white/90">🎬 Movie Ingestion</span>
+                    <span className={`font-medium text-xs px-2 py-1 rounded-full ${
+                      workerStatus.movie.status === 'running' ? 'bg-blue-500/20 text-blue-300' :
+                      workerStatus.movie.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' :
+                      workerStatus.movie.status === 'error' ? 'bg-red-500/20 text-red-300' :
+                      'bg-white/10 text-white/50'
                     }`}>
                       {workerStatus.movie.status === 'running' && '⏳ Running'}
                       {workerStatus.movie.status === 'completed' && '✓ Completed'}
@@ -336,36 +336,36 @@ export const StatusWidgets: React.FC = () => {
                     </span>
                   </div>
                   {workerStatus.movie.last_run && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Last: {workerStatus.movie.last_run}
                     </div>
                   )}
                   {workerStatus.movie.next_run && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Next: {workerStatus.movie.next_run}
                     </div>
                   )}
                   {workerStatus.movie.items_processed > 0 && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Processed: {workerStatus.movie.items_processed} items
                     </div>
                   )}
                   {workerStatus.movie.error && (
-                    <div className="text-xs text-red-600 truncate" title={workerStatus.movie.error}>
+                    <div className="text-xs text-red-300 truncate" title={workerStatus.movie.error}>
                       Error: {workerStatus.movie.error}
                     </div>
                   )}
                 </div>
                 
                 {/* TV Show Worker */}
-                <div className="bg-gray-50 rounded-lg p-2 space-y-1">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="font-medium text-gray-700">TV Show Ingestion</span>
-                    <span className={`font-medium ${
-                      workerStatus.show.status === 'running' ? 'text-blue-600' :
-                      workerStatus.show.status === 'completed' ? 'text-green-600' :
-                      workerStatus.show.status === 'error' ? 'text-red-600' :
-                      'text-gray-500'
+                <div className="bg-white/5 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="font-medium text-white/90">📺 TV Show Ingestion</span>
+                    <span className={`font-medium text-xs px-2 py-1 rounded-full ${
+                      workerStatus.show.status === 'running' ? 'bg-blue-500/20 text-blue-300' :
+                      workerStatus.show.status === 'completed' ? 'bg-emerald-500/20 text-emerald-300' :
+                      workerStatus.show.status === 'error' ? 'bg-red-500/20 text-red-300' :
+                      'bg-white/10 text-white/50'
                     }`}>
                       {workerStatus.show.status === 'running' && '⏳ Running'}
                       {workerStatus.show.status === 'completed' && '✓ Completed'}
@@ -374,22 +374,22 @@ export const StatusWidgets: React.FC = () => {
                     </span>
                   </div>
                   {workerStatus.show.last_run && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Last: {workerStatus.show.last_run}
                     </div>
                   )}
                   {workerStatus.show.next_run && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Next: {workerStatus.show.next_run}
                     </div>
                   )}
                   {workerStatus.show.items_processed > 0 && (
-                    <div className="text-xs text-gray-600">
+                    <div className="text-xs text-white/60">
                       Processed: {workerStatus.show.items_processed} items
                     </div>
                   )}
                   {workerStatus.show.error && (
-                    <div className="text-xs text-red-600 truncate" title={workerStatus.show.error}>
+                    <div className="text-xs text-red-300 truncate" title={workerStatus.show.error}>
                       Error: {workerStatus.show.error}
                     </div>
                   )}
@@ -398,14 +398,14 @@ export const StatusWidgets: React.FC = () => {
             )}
           </div>
         ) : (
-          <div className="text-gray-500 text-sm py-2">Unable to check health</div>
+          <div className="text-white/50 text-sm py-2">Unable to check health</div>
         )}
       </div>
 
       {/* Fusion Mode Widget (removed per requirements) */}
       {false && (
-        <div className="relative z-10 bg-white/90 backdrop-blur-xl rounded-2xl shadow-xl border border-indigo-100 p-4 md:p-6 flex flex-col gap-2 transition-all duration-500">
-          <h4 className="font-semibold text-gray-900 mb-3 text-sm">Fusion Mode</h4>
+        <div className="bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg p-4 md:p-6">
+          <h4 className="font-semibold text-white mb-3 text-base">Fusion Mode</h4>
           {/* Content intentionally disabled */}
         </div>
       )}
@@ -475,21 +475,21 @@ const QuickActions: React.FC<{ addToast: (msg: string, type?: 'success'|'error'|
     }
   };
 
-  if(loading) return <div className="text-gray-500 text-sm">Loading…</div>;
-  if(!lists.length) return <div className="text-gray-500 text-sm">No lists yet</div>;
+  if(loading) return <div className="text-white/50 text-sm">Loading…</div>;
+  if(!lists.length) return <div className="text-white/50 text-sm">No lists yet</div>;
 
   return (
     <div className="space-y-3">
-      <div className="text-xs text-gray-600 mb-2">
+      <div className="text-sm text-white/70">
         {lists.length} list{lists.length !== 1 ? 's' : ''} total
       </div>
       <button
         onClick={syncAllWatchedOnly}
         disabled={syncing}
-        className={`w-full px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+        className={`w-full px-4 py-3 rounded-xl text-sm font-medium transition-all min-h-[44px] ${
           syncing
-            ? 'bg-gray-400 text-white cursor-not-allowed'
-            : 'bg-blue-600 text-white hover:bg-blue-700 active:scale-95'
+            ? 'bg-white/5 text-white/40 cursor-not-allowed'
+            : 'bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white shadow-lg'
         }`}
       >
         {syncing ? (

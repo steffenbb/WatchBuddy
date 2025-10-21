@@ -135,7 +135,10 @@ async def get_user_ratings(
         # Enrich with media metadata if available
         result = []
         for rating in ratings:
-            media = db.query(MediaMetadata).filter(MediaMetadata.trakt_id == rating.trakt_id).first()
+            media = db.query(MediaMetadata).filter(
+                MediaMetadata.trakt_id == rating.trakt_id,
+                MediaMetadata.media_type == rating.media_type
+            ).first()
             
             result.append({
                 "id": rating.id,

@@ -368,6 +368,17 @@ async def chat_generate_list(
         if "year_to" in filters:
             q = q.filter(PersistentCandidate.year <= filters["year_to"])
         
+        # NEW: Actor filtering - check if any actor appears in cast field (JSON array)
+        if "actors" in filters and filters["actors"]:
+            # Build SQL pattern for each actor (case-insensitive substring match in JSON array)
+            for actor in filters["actors"]:
+                q = q.filter(PersistentCandidate.cast.ilike(f"%{actor}%"))
+        
+        # NEW: Studio filtering - check if any studio appears in production_companies field
+        if "studios" in filters and filters["studios"]:
+            for studio in filters["studios"]:
+                q = q.filter(PersistentCandidate.production_companies.ilike(f"%{studio}%"))
+        
         # Query all matching candidates from the full persistent DB (no limit)
         candidates = q.all()
         logger.info(f"Fetched {len(candidates)} persistent candidates for chat list generation")
@@ -379,9 +390,15 @@ async def chat_generate_list(
         candidate_dicts = []
         for c in candidates:
             genres = []
+            cast = []
+            production_companies = []
             try:
                 if c.genres:
                     genres = json.loads(c.genres) if isinstance(c.genres, str) else c.genres
+                if c.cast:
+                    cast = json.loads(c.cast) if isinstance(c.cast, str) else c.cast
+                if c.production_companies:
+                    production_companies = json.loads(c.production_companies) if isinstance(c.production_companies, str) else c.production_companies
             except:
                 pass
             
@@ -395,6 +412,8 @@ async def chat_generate_list(
                 'rating': c.vote_average,
                 'votes': c.vote_count,
                 'genres': genres,
+                'cast': cast,
+                'production_companies': production_companies,
                 'overview': c.overview,
                 'popularity': c.popularity,
                 'language': c.language,
@@ -416,7 +435,7 @@ async def chat_generate_list(
                 anchor_text = anchor_title
                 logger.info(f"Using prompt-provided anchor: {anchor_title}")
         
-        # Score candidates
+        # Score candidates (now with actors/studios in filters)
         scoring_engine = ScoringEngine()
         user_ctx = {"id": user_id}
         scored = scoring_engine.score_candidates(

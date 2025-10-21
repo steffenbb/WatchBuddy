@@ -2,7 +2,7 @@
 """
 schemas.py
 
-Pydantic schemas for User, SmartList, ListItem, and Secret.
+Pydantic schemas for User, ListItem, and Secret.
 """
 from pydantic import BaseModel
 from typing import Optional, Dict, Any
@@ -11,15 +11,6 @@ import datetime
 class UserSchema(BaseModel):
     id: int
     email: str
-    created_at: datetime.datetime
-    class Config:
-        orm_mode = True
-
-class SmartListSchema(BaseModel):
-    id: int
-    user_id: int
-    name: str
-    criteria: Optional[str]
     created_at: datetime.datetime
     class Config:
         orm_mode = True

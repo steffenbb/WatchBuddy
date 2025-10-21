@@ -16,6 +16,7 @@ if os.getenv("POSTGRES_HOST_AUTH_METHOD") == "trust":
 else:
     DATABASE_URL = f"postgresql://{user}:{password}@db:5432/{db}"
 
+
 # Increase connection pool to handle concurrent operations
 # pool_size: base connections (default 5 -> 20)
 # max_overflow: additional connections allowed (default 10 -> 30)
@@ -39,9 +40,38 @@ def get_db():
     finally:
         db.close()
 
+# --- ASYNC SESSION SUPPORT FOR CELERY TASKS ---
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker as async_sessionmaker
+
+ASYNC_DATABASE_URL = DATABASE_URL.replace('postgresql://', 'postgresql+asyncpg://')
+async_engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    pool_size=10,
+    max_overflow=20,
+    pool_timeout=30,
+    pool_recycle=3600,
+    pool_pre_ping=True
+)
+AsyncSessionLocal = async_sessionmaker(async_engine, expire_on_commit=False, class_=AsyncSession)
+
+async def get_async_session():
+    async with AsyncSessionLocal() as session:
+        yield session
+
 async def init_db():
     from app.models import Base
     loop = asyncio.get_running_loop()
+    
+    # Run pre-create migrations first (before create_all) to fix constraints
+    def _run_pre_migrations():
+        with engine.begin() as conn:
+            # Fix trakt_id constraint: drop old single-column unique index if it exists
+            # This must run before create_all() which would try to create the new composite index
+            conn.execute(text("DROP INDEX IF EXISTS ix_persistent_candidates_trakt_id"))
+    
+    await loop.run_in_executor(None, _run_pre_migrations)
+    
     def _create_all():
         Base.metadata.create_all(bind=engine)
     await loop.run_in_executor(None, _create_all)
@@ -79,7 +109,28 @@ async def init_db():
             "CREATE INDEX IF NOT EXISTS idx_persistent_candidates_freshness ON persistent_candidates (freshness_score)",
             # Trigram index to accelerate ILIKE on genres JSON text
             "CREATE INDEX IF NOT EXISTS idx_persistent_candidates_genres_trgm ON persistent_candidates USING gin (genres gin_trgm_ops)",
-            "CREATE INDEX IF NOT EXISTS idx_candidate_ingestion_state_media_type ON candidate_ingestion_state (media_type)"
+            "CREATE INDEX IF NOT EXISTS idx_candidate_ingestion_state_media_type ON candidate_ingestion_state (media_type)",
+            # Ensure new AI columns exist on persistent_candidates
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS embedding BYTEA",
+            # Guard columns for entity filtering (if older DBs missing them)
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS \"cast\" TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS production_companies TEXT",
+            # New TMDB dataset fields (budget, tagline, etc.)
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS production_countries TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS spoken_languages TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS budget INTEGER",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS revenue INTEGER",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS tagline VARCHAR(500)",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS homepage VARCHAR(500)",
+            # TV-specific fields
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS number_of_seasons INTEGER",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS number_of_episodes INTEGER",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS in_production BOOLEAN",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS created_by TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS networks TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS episode_run_time TEXT",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS first_air_date VARCHAR(50)",
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS last_air_date VARCHAR(50)"
         ]
         try:
             with engine.begin() as conn:
@@ -141,7 +192,8 @@ async def init_db():
                     logger.warning("Data directory /app/data does not exist, skipping CSV import")
                     return
                 # Accept multiple CSVs (movies/shows). Import using simplified inline parser to avoid circular imports.
-                csv_files = list(data_dir.glob('*.csv'))
+                # Exclude trakt_mappings_export.csv as that's processed separately
+                csv_files = [f for f in data_dir.glob('*.csv') if 'trakt_mappings' not in f.name.lower()]
                 if not csv_files:
                     logger.warning("No CSV files found in /app/data, skipping bootstrap")
                     return
@@ -150,7 +202,7 @@ async def init_db():
                 total_imported = 0
                 
                 for csv_path in csv_files:
-                    logger.info(f"Processing CSV file: {csv_path.name}")
+                    logger.warning(f"Processing CSV file: {csv_path.name}")
                     file_imported = 0
                     seen_ids = set()  # Track (tmdb_id, media_type) to avoid duplicates
                     try:
@@ -208,6 +260,10 @@ async def init_db():
                                     return [p.strip() for p in raw_val.split(',') if p.strip()]
                                 genres_list = parse_list(row.get('genres') or '')
                                 keywords_list = parse_list(row.get('keywords') or '')
+                                production_companies_list = parse_list(row.get('production_companies') or '')
+                                production_countries_list = parse_list(row.get('production_countries') or '')
+                                spoken_languages_list = parse_list(row.get('spoken_languages') or '')
+                                
                                 try:
                                     popularity = float(row.get('popularity') or 0.0)
                                 except Exception:
@@ -220,6 +276,36 @@ async def init_db():
                                     vote_count = int(float(row.get('vote_count') or 0))
                                 except Exception:
                                     vote_count = 0
+                                try:
+                                    budget = int(float(row.get('budget') or 0))
+                                except Exception:
+                                    budget = None
+                                try:
+                                    revenue = int(float(row.get('revenue') or 0))
+                                except Exception:
+                                    revenue = None
+                                try:
+                                    runtime = int(float(row.get('runtime') or 0))
+                                except Exception:
+                                    runtime = None
+                                
+                                # TV-specific fields
+                                try:
+                                    number_of_seasons = int(float(row.get('number_of_seasons') or 0)) or None
+                                except Exception:
+                                    number_of_seasons = None
+                                try:
+                                    number_of_episodes = int(float(row.get('number_of_episodes') or 0)) or None
+                                except Exception:
+                                    number_of_episodes = None
+                                
+                                in_production_val = row.get('in_production', '')
+                                in_production = str(in_production_val).lower() in ('1', 'true', 't', 'yes', 'y', 'True') if in_production_val else None
+                                
+                                created_by_list = parse_list(row.get('created_by') or '')
+                                networks_list = parse_list(row.get('networks') or '')
+                                episode_run_time_list = parse_list(row.get('episode_run_time') or '')
+                                
                                 # Handle is_adult properly
                                 adult_val = row.get('adult', 'False')
                                 is_adult = str(adult_val).lower() in ('1', 'true', 't', 'yes', 'y', 'True')
@@ -235,12 +321,30 @@ async def init_db():
                                     language=language,
                                     genres=json.dumps(genres_list) if genres_list else None,
                                     keywords=json.dumps(keywords_list) if keywords_list else None,
+                                    production_companies=json.dumps(production_companies_list) if production_companies_list else None,
+                                    production_countries=json.dumps(production_countries_list) if production_countries_list else None,
+                                    spoken_languages=json.dumps(spoken_languages_list) if spoken_languages_list else None,
                                     overview=row.get('overview') or '',
                                     popularity=popularity,
                                     vote_average=vote_average,
                                     vote_count=vote_count,
+                                    runtime=runtime,
+                                    status=row.get('status'),
                                     poster_path=row.get('poster_path'),
                                     backdrop_path=row.get('backdrop_path'),
+                                    budget=budget,
+                                    revenue=revenue,
+                                    tagline=row.get('tagline'),
+                                    homepage=row.get('homepage'),
+                                    # TV-specific fields
+                                    number_of_seasons=number_of_seasons,
+                                    number_of_episodes=number_of_episodes,
+                                    in_production=in_production,
+                                    created_by=json.dumps(created_by_list) if created_by_list else None,
+                                    networks=json.dumps(networks_list) if networks_list else None,
+                                    episode_run_time=json.dumps(episode_run_time_list) if episode_run_time_list else None,
+                                    first_air_date=row.get('first_air_date'),
+                                    last_air_date=row.get('last_air_date'),
                                     is_adult=is_adult,
                                     manual=True
                                 )
@@ -257,18 +361,45 @@ async def init_db():
                                 file_imported += len(batch)
                         
                         total_imported += file_imported
-                        logger.info(f"Successfully imported {file_imported} items from {csv_path.name}")
+                        logger.warning(f"Successfully imported {file_imported} items from {csv_path.name}")
                         
                     except Exception as e:
-                        logger.error(f"Failed to import {csv_path.name}: {str(e)}", exc_info=True)
+                        logger.warning(f"Failed to import {csv_path.name}: {str(e)}", exc_info=True)
                         db.rollback()
                         continue
                 
-                logger.info(f"CSV bootstrap complete. Total items imported: {total_imported}")
+                logger.warning(f"CSV bootstrap complete. Total items imported: {total_imported}")
                 _bootstrap_lock['done'] = True
                 
+                # Auto-import trakt_id mappings if file exists
+                trakt_imported = 0
+                try:
+                    from app.scripts.auto_import_trakt import auto_import_trakt_mappings
+                    trakt_imported = auto_import_trakt_mappings(db)
+                    if trakt_imported > 0:
+                        logger.info(f"Auto-imported {trakt_imported} trakt_id mappings from trakt_mappings_export.csv")
+                except Exception as e:
+                    logger.debug(f"Trakt ID auto-import skipped or failed: {e}")
+                
+                # Mark metadata scan as completed to avoid showing setup UI
+                # The nightly Celery task will continue to fill in missing trakt_ids
+                try:
+                    import asyncio
+                    from app.core.redis_client import get_redis
+                    async def _set_completion_flag():
+                        r = get_redis()
+                        await r.set("metadata_build:scan_completed", "true")
+                        if trakt_imported > 0:
+                            logger.info(f"Metadata scan marked as completed (auto-import successful with {trakt_imported} mappings)")
+                        else:
+                            logger.info("Metadata scan marked as completed (bootstrap finished, nightly task will populate trakt_ids)")
+                    asyncio.run(_set_completion_flag())
+                except Exception as flag_err:
+                    logger.warning(f"Failed to set metadata completion flag: {flag_err}")
+
+                
         except Exception as e:
-            logger.error(f"Critical error during CSV bootstrap: {str(e)}", exc_info=True)
+            logger.warning(f"Critical error during CSV bootstrap: {str(e)}", exc_info=True)
             _bootstrap_lock['done'] = True
 
     await loop.run_in_executor(None, _bootstrap_candidates_if_needed)

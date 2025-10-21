@@ -36,8 +36,11 @@ class MetadataManager:
                 logger.warning("No Trakt ID found in item")
                 return None
 
-            # Check if metadata already exists
-            metadata = session.query(MediaMetadata).filter(MediaMetadata.trakt_id == trakt_id).first()
+            # Check if metadata already exists (scope by media_type)
+            metadata = session.query(MediaMetadata).filter(
+                MediaMetadata.trakt_id == trakt_id,
+                MediaMetadata.media_type == media_type
+            ).first()
 
             if metadata and metadata.last_updated and metadata.last_updated > datetime.utcnow() - timedelta(days=7):
                 # Recent metadata, mark as active and return
@@ -99,13 +102,19 @@ class MetadataManager:
             session.close()
     
     @staticmethod
-    async def get_metadata(trakt_id: int) -> Optional[MediaMetadata]:
+    async def get_metadata(trakt_id: int, media_type: Optional[str] = None) -> Optional[MediaMetadata]:
         """Get metadata by Trakt ID."""
         session = SessionLocal()
         try:
             from sqlalchemy.orm import Session
             from sqlalchemy import select
-            stmt = select(MediaMetadata).where(MediaMetadata.trakt_id == trakt_id)
+            if media_type:
+                stmt = select(MediaMetadata).where(
+                    MediaMetadata.trakt_id == trakt_id,
+                    MediaMetadata.media_type == media_type
+                )
+            else:
+                stmt = select(MediaMetadata).where(MediaMetadata.trakt_id == trakt_id)
             result = session.execute(stmt)
             return result.scalars().first()
         finally:

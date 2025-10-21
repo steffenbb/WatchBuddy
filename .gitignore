@@ -7,6 +7,9 @@ __pycache__/
 *.pyd
 *.sqlite3
 watchbuddy.db
+.venv/
+venv/
+env/
 
 # Frontend build
 node_modules/
@@ -68,6 +71,12 @@ WatchBuddy.code-workspace
 
 # Exclude example/override compose files
 docker-compose.override.yml.example
+docker-compose.yml.broken
+
+# Test and debug scripts
+check_counts.py
+test_api.py
+test_auto_import.py
 
 # Exclude internal docs and reports not needed on remote
 SETUP_FLOW_ENHANCEMENT.md
@@ -79,7 +88,24 @@ IMPLEMENTATION_UPDATES.md
 IMPORT_COMPLETE.md
 PERSISTENT_POOL_GUIDE.md
 METADATA_BUILD_IMPLEMENTATION.md
-ISSUES_DISCOVERY_REPORT.md
 LIST_QUALITY_FIXES.md
 DYNAMIC_LISTS_IMPLEMENTATION.md
 TRAKT_REDIRECT_URI_IMPLEMENTATION.md
+TRAKT_ID_WORKFLOW.md
+TRAKT_ID_EXPORT_IMPORT_FINAL.md
+SETUP_REDIRECT_URI_FIX.md
+SETUP_UI_FIX.md
+SCHEMA_ENHANCEMENT_COMPLETE.md
+EMBEDDING_STORAGE_FIX.md
+AI_ENGINE_ENRICHED_FIELDS_INTEGRATION.md
+AI_OPTIMIZATION_IMPLEMENTATION.md
+UI_AI_MODERNIZATION_COMPLETE.md
+
+# Keep essential docs
+!README.md
+!LICENSE
+!VERSION
+!DEPLOYMENT.md
+!backend/data/README.md
+!frontend/src/help.md
+!tests/README.md

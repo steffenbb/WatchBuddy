@@ -189,7 +189,10 @@ def compute_mood_vector_from_items(history_items: List[Dict]) -> Dict[str, float
             # Combined weight emphasizes both recency and time
             final_weight = time_weight * position_decay
             
-            meta = session.query(MediaMetadata).filter_by(tmdb_id=tmdb_id).first()
+            meta = session.query(MediaMetadata).filter(
+                MediaMetadata.tmdb_id == tmdb_id,
+                MediaMetadata.media_type == item.get('media_type', 'movie')
+            ).first()
             if not meta:
                 continue
             

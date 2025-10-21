@@ -24,6 +24,7 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
     clientSecret: '',
     tmdbApiKey: ''
   });
+  const [traktRedirectUri, setTraktRedirectUri] = useState('localhost');
   const [hasCredentials, setHasCredentials] = useState(false);
   const [hasTmdbKey, setHasTmdbKey] = useState(false);
   const { addToast } = useToast();
@@ -132,6 +133,18 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
 
     setIsSaving(true);
     try {
+      // Save redirect URI first
+      if (traktRedirectUri.trim()) {
+        await fetch('/api/trakt/redirect-uri', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            redirect_uri: traktRedirectUri.trim()
+          })
+        });
+      }
+
+      // Then save credentials
       const response = await fetch('/api/settings/trakt-credentials', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -297,10 +310,13 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
                     <li>1. Visit <a href="https://trakt.tv/oauth/applications/new" target="_blank" rel="noopener noreferrer" className="underline">trakt.tv/oauth/applications/new</a></li>
                     <li>2. Set Redirect URI to: 
                       <div className="flex items-center gap-2 mt-1">
-                        <code className="bg-blue-100 px-2 py-1 rounded text-xs">http://localhost:5173/auth/trakt/callback</code>
+                        <code className="bg-blue-100 px-2 py-1 rounded text-xs">
+                          {traktRedirectUri === 'localhost' ? 'http://localhost:5173' : `http://${traktRedirectUri}:5173`}/auth/trakt/callback
+                        </code>
                         <button
                           onClick={() => {
-                            navigator.clipboard.writeText('http://localhost:5173/auth/trakt/callback');
+                            const uri = traktRedirectUri === 'localhost' ? 'http://localhost:5173/auth/trakt/callback' : `http://${traktRedirectUri}:5173/auth/trakt/callback`;
+                            navigator.clipboard.writeText(uri);
                             addToast({ message: 'Copied!', type: 'success' });
                           }}
                           className="px-2 py-1 text-xs bg-blue-200 hover:bg-blue-300 rounded"
@@ -329,6 +345,21 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
                     placeholder="Your Trakt Client Secret"
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-fuchsia-400"
                   />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Redirect URI Base (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={traktRedirectUri}
+                    onChange={(e) => setTraktRedirectUri(e.target.value)}
+                    placeholder="localhost (default) or your domain/IP"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-fuchsia-400"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    💡 Use "localhost" for local development, or enter your domain (e.g., "example.com") or IP (e.g., "192.168.1.100") for remote access
+                  </p>
                 </div>
                 <button
                   onClick={saveCredentials}

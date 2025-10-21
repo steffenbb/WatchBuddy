@@ -4,8 +4,8 @@ models.py
 
 SQLAlchemy models for User, SmartList, ListItem, and encrypted Secret.
 """
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, Float, Text, UniqueConstraint, Index
-from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import Column, Integer, BigInteger, String, Boolean, ForeignKey, DateTime, Float, Text, UniqueConstraint, Index, text, LargeBinary
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import relationship
 import datetime
 from app.utils.timezone import utc_now
@@ -19,18 +19,6 @@ class User(Base):
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=utc_now)
     # ... other fields ...
-
-class SmartList(Base):
-    __tablename__ = "smartlists"
-    id = Column(Integer, primary_key=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    name = Column(String, nullable=False)
-    criteria = Column(Text)
-    created_at = Column(DateTime, default=utc_now)
-    user = relationship("User", back_populates="smartlists")
-    # ... other fields ...
-
-User.smartlists = relationship("SmartList", order_by=SmartList.id, back_populates="user")
 
 class ListItem(Base):
     __tablename__ = "list_items"
@@ -60,7 +48,7 @@ class Secret(Base):
 class MediaMetadata(Base):
     __tablename__ = "media_metadata"
     id = Column(Integer, primary_key=True)
-    trakt_id = Column(Integer, unique=True, nullable=False, index=True)
+    trakt_id = Column(Integer, nullable=False, index=True)
     tmdb_id = Column(Integer, index=True)
     imdb_id = Column(String, index=True)
     media_type = Column(String, nullable=False)  # 'movie' or 'show'
@@ -79,6 +67,10 @@ class MediaMetadata(Base):
     last_updated = Column(DateTime, default=utc_now)
     created_at = Column(DateTime, default=utc_now)
 
+    __table_args__ = (
+        Index('ix_media_metadata_trakt_media', 'trakt_id', 'media_type', unique=True),
+    )
+
 class PersistentCandidate(Base):
     """Persistent pool of candidate media items (movies & shows) used for fast recommendation sourcing.
 
@@ -94,7 +86,7 @@ class PersistentCandidate(Base):
     __tablename__ = "persistent_candidates"
     
     id = Column(Integer, primary_key=True)
-    trakt_id = Column(Integer, unique=True, nullable=True, index=True)  # May be null if unmapped yet
+    trakt_id = Column(Integer, nullable=True)  # Not globally unique - same ID can exist for movie and show - indexed via composite unique index
     tmdb_id = Column(Integer, nullable=False, index=True)  # UNIQUE with media_type via __table_args__
     imdb_id = Column(String, index=True, nullable=True)
     media_type = Column(String, nullable=False, index=True)  # 'movie' or 'show'
@@ -113,6 +105,24 @@ class PersistentCandidate(Base):
     status = Column(String, nullable=True)
     poster_path = Column(String, nullable=True)
     backdrop_path = Column(String, nullable=True)
+    cast = Column(Text, nullable=True)  # JSON array of cast member names for actor filtering
+    production_companies = Column(Text, nullable=True)  # JSON array of studio/production company names
+    production_countries = Column(Text, nullable=True)  # JSON array of production countries from TMDB
+    spoken_languages = Column(Text, nullable=True)  # JSON array of spoken languages from TMDB
+    budget = Column(BigInteger, nullable=True)  # Budget in USD (BigInteger for blockbuster budgets >2B)
+    revenue = Column(BigInteger, nullable=True)  # Revenue in USD (BigInteger for blockbuster revenues >2B)
+    tagline = Column(String, nullable=True)  # Marketing tagline
+    homepage = Column(String, nullable=True)  # Official homepage URL
+    embedding = Column(LargeBinary, nullable=True)  # Serialized numpy array (float16) for AI semantic search
+    # TV-specific fields
+    number_of_seasons = Column(Integer, nullable=True)  # Total seasons (TV shows only)
+    number_of_episodes = Column(Integer, nullable=True)  # Total episodes (TV shows only)
+    in_production = Column(Boolean, nullable=True)  # Still in production (TV shows)
+    created_by = Column(Text, nullable=True)  # JSON array of creators (TV shows)
+    networks = Column(Text, nullable=True)  # JSON array of networks (TV shows)
+    episode_run_time = Column(Text, nullable=True)  # JSON array of episode runtimes (TV shows)
+    first_air_date = Column(String, nullable=True)  # First air date for TV shows
+    last_air_date = Column(String, nullable=True)  # Last air date for TV shows
     # Derived / heuristic fields
     obscurity_score = Column(Float, index=True)  # Lower popularity & vote_count but decent rating => higher obscurity
     mainstream_score = Column(Float, index=True)  # Opposite weighting for quick mainstream queries
@@ -125,6 +135,7 @@ class PersistentCandidate(Base):
 
     __table_args__ = (
         UniqueConstraint('tmdb_id', 'media_type', name='uq_persistent_candidates_tmdb_media'),
+        Index('ix_persistent_candidates_trakt_id', 'trakt_id', 'media_type', unique=True, postgresql_where=text('trakt_id IS NOT NULL')),
         {'comment': 'Persistent combined TMDB/Trakt candidate pool'}
     )
 

@@ -229,9 +229,15 @@ class BulkCandidateProvider:
                         tmdb_id = (ids_for_lookup or {}).get('tmdb')
                         meta = None
                         if trakt_id:
-                            meta = db.query(MediaMetadata).filter_by(trakt_id=trakt_id).first()
+                            meta = db.query(MediaMetadata).filter(
+                                MediaMetadata.trakt_id == trakt_id,
+                                MediaMetadata.media_type == mt
+                            ).first()
                         if not meta and tmdb_id:
-                            meta = db.query(MediaMetadata).filter_by(tmdb_id=tmdb_id).first()
+                            meta = db.query(MediaMetadata).filter(
+                                MediaMetadata.tmdb_id == tmdb_id,
+                                MediaMetadata.media_type == mt
+                            ).first()
                         if meta and meta.title:
                             it['title'] = meta.title
                         else:
@@ -352,7 +358,7 @@ class BulkCandidateProvider:
         list_title: Optional[str] = None,  # List title for fusion mode genre extraction
         fusion_mode: bool = False,  # Enable fusion mode logic
         exclude_ids: Optional[Set] = None,  # NEW: Exclude these trakt/tmdb/item_ids from candidates
-        persistent_only: bool = False  # NEW: Only use persistent DB, skip TMDB fallback
+        persistent_only: bool = False  # NEW: Only use persistent DB, skip all external discovery/enrichment
     ) -> List[Dict[str, Any]]:
         """
         Fetch enhanced candidates with mood-based filtering and search.
@@ -383,8 +389,22 @@ class BulkCandidateProvider:
                     PersistentCandidate.active == True,
                     PersistentCandidate.media_type == ("movie" if media_type == "movies" else "show"),
                     (PersistentCandidate.is_adult == False),
-                    PersistentCandidate.title != None
+                    PersistentCandidate.title != None,
+                    PersistentCandidate.trakt_id.isnot(None)
                 )
+                
+                # Minimum vote count filter to avoid spam/garbage entries with fake ratings
+                # Apply stricter filters for discovery modes - increased thresholds for better quality
+                if discovery in ("obscure", "very_obscure"):
+                    # For obscure content, require at least 100 votes to ensure quality
+                    q = q.filter(PersistentCandidate.vote_count >= 100)
+                elif discovery in ("popular", "mainstream"):
+                    # For popular content, require at least 500 votes
+                    q = q.filter(PersistentCandidate.vote_count >= 500)
+                else:
+                    # Balanced/default: require at least 100 votes
+                    q = q.filter(PersistentCandidate.vote_count >= 100)
+                
                 if languages:
                     q = q.filter(PersistentCandidate.language.in_([l.lower() for l in languages]))
                 if min_year:
@@ -484,11 +504,17 @@ class BulkCandidateProvider:
                     return any(r in have for r in required_genres)
 
                 # First pass: fetch all matching candidates from persistent DB (no artificial cap)
-                stored_candidates = []
+                import time
+                logger.warning(f"[BULK_PROVIDER] Executing DB query for media_type={media_type}, limit={limit}, filters: languages={languages}, min_year={min_year}, max_year={max_year}, min_rating={min_rating}, genres={genres}")
+                t0 = time.time()
                 rows = q.all()
+                logger.warning(f"[BULK_PROVIDER] DB query returned {len(rows)} rows in {time.time()-t0:.2f}s")
+                stored_candidates = []
                 for row in rows:
+                    row_start = time.time()
                     try:
                         # Robustly parse genres JSON (can be malformed or non-list)
+                        logger.warning(f"[BULK_PROVIDER] Filtering candidate tmdb_id={getattr(row, 'tmdb_id', None)}, title={getattr(row, 'title', None)}")
                         if row.genres:
                             try:
                                 parsed_genres = json.loads(row.genres)
@@ -514,76 +540,8 @@ class BulkCandidateProvider:
                         cid = row.trakt_id or row.tmdb_id or row.id
                         if exclude_ids and cid in exclude_ids:
                             continue
-                        item = {
-                            'title': row.title,
-                            'year': row.year,
-                            'ids': {'tmdb': row.tmdb_id, 'trakt': row.trakt_id},
-                            'media_type': row.media_type,
-                            'language': row.language,
-                            'obscurity_score': row.obscurity_score,
-                            'mainstream_score': row.mainstream_score,
-                            'freshness_score': row.freshness_score,
-                            'tmdb_data': {
-                                'popularity': row.popularity,
-                                'vote_average': row.vote_average,
-                                'vote_count': row.vote_count,
-                                'genres': parsed_genres,
-                                'poster_path': row.poster_path,
-                                'backdrop_path': row.backdrop_path,
-                                'overview': row.overview
-                            },
-                            'scoring_features': {
-                                'tmdb_popularity': row.popularity,
-                                'tmdb_rating': row.vote_average,
-                                'tmdb_votes': row.vote_count,
-                                'has_overview': bool(row.overview),
-                                'has_poster': bool(row.poster_path),
-                                'genre_count': len(parsed_genres)
-                            },
-                            '_from_persistent_store': True
-                        }
-                        stored_candidates.append(item)
-                    except Exception as row_err:
-                        # Skip bad rows rather than failing the entire request
-                        logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
-                # If we have some but not enough, broaden within DB and try again quickly
-                if len(stored_candidates) < limit:
-                    # Second pass: larger cap without min_rating constraint (but still exclude adult)
-                    q2 = self.db.query(PersistentCandidate).filter(
-                        PersistentCandidate.active == True,
-                        PersistentCandidate.media_type == ("movie" if media_type == "movies" else "show"),
-                        (PersistentCandidate.is_adult == False)
-                    )
-                    # Apply exclude_ids filter to second pass as well for diversity
-                    if exclude_ids:
-                        q2 = q2.filter(~PersistentCandidate.trakt_id.in_(exclude_ids))
-                    if languages:
-                        # Keep language filter strict - no automatic broadening
-                        q2 = q2.filter(PersistentCandidate.language.in_([l.lower() for l in languages]))
-                    if min_year:
-                        q2 = q2.filter(PersistentCandidate.year >= max(1900, min_year - 5))
-                    if max_year:
-                        q2 = q2.filter(PersistentCandidate.year <= max_year + 2)
-                    if discovery in ("popular","mainstream"):
-                        q2 = q2.order_by(PersistentCandidate.mainstream_score.desc(), PersistentCandidate.popularity.desc())
-                    elif discovery in ("obscure","very_obscure"):
-                        q2 = q2.order_by(PersistentCandidate.obscurity_score.desc())
-                    else:
-                        from sqlalchemy import desc
-                        q2 = q2.order_by(desc(PersistentCandidate.freshness_score), desc(PersistentCandidate.mainstream_score))
-                    # Second pass: fetch all matching candidates (no cap)
-                    rows2 = q2.all()
-                    for row in rows2:
-                        try:
-                            parsed_genres = []
-                            if row.genres:
-                                try:
-                                    parsed = json.loads(row.genres)
-                                    parsed_genres = parsed if isinstance(parsed, list) else []
-                                except Exception:
-                                    parsed_genres = []
-                            if not _genres_match(parsed_genres):
-                                continue
+                        # Only include candidates with a valid trakt_id
+                        if row.trakt_id is not None:
                             item = {
                                 'title': row.title,
                                 'year': row.year,
@@ -613,8 +571,11 @@ class BulkCandidateProvider:
                                 '_from_persistent_store': True
                             }
                             stored_candidates.append(item)
-                        except Exception:
-                            continue
+                            logger.warning(f"[BULK_PROVIDER] Candidate accepted tmdb_id={getattr(row, 'tmdb_id', None)}, title={getattr(row, 'title', None)}, filter_time={time.time()-row_start:.3f}s")
+                    except Exception as row_err:
+                        # Skip bad rows rather than failing the entire request
+                        logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
+                # Second pass removed: always return all matching candidates from first pass
                 if stored_candidates:
                     logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
                     # Return all matching candidates for scoring engine to rank
@@ -623,6 +584,17 @@ class BulkCandidateProvider:
             except Exception as e_pc:
                 logger.debug(f"PersistentCandidate sourcing failed or not available: {e_pc}")
                 stored_candidates = []  # Ensure it's defined for later merge
+
+            # In persistent-only mode we must not hit external APIs (TMDB/Trakt) at all.
+            # Return whatever the persistent store provided (possibly empty) and skip discovery/enrichment.
+            if persistent_only:
+                logger.info(
+                    f"[PERSISTENT_ONLY] Skipping external discovery/enrichment; returning {len(stored_candidates)} persistent candidates"
+                )
+                # Defensive: ensure items are the correct media_type
+                expected_type = "movie" if media_type == "movies" else "show"
+                stored_candidates = [c for c in stored_candidates if c.get("media_type") == expected_type]
+                return stored_candidates
             # For fusion mode lists without explicit genres, extract from title
             if fusion_mode and list_title and not genres:
                 title_genres = self._extract_genres_from_title(list_title)
@@ -778,8 +750,8 @@ class BulkCandidateProvider:
             else:
                 filtered = filtered[:limit]
 
-            # TMDB enrichment: always attempt if we have candidates, even without explicit request
-            if filtered:
+            # TMDB enrichment: skip entirely in persistent-only mode to avoid any external calls
+            if filtered and not persistent_only:
                 from app.services.tmdb_client import get_tmdb_api_key
                 tmdb_api_key = None
                 try:
@@ -841,10 +813,10 @@ class BulkCandidateProvider:
                     enhanced_filtered = await self._enhance_with_trakt_metadata(filtered, media_type, genres)
                     return self._ensure_downstream_fields(enhanced_filtered[:limit], media_type)
             else:
-                # If enrichment not requested, ensure fallback fields
+                # If enrichment not requested or persistent-only, ensure minimal compatibility fields
                 for it in filtered:
                     if 'tmdb_data' not in it and 'cached_metadata' not in it:
-                        it['tmdb_data'] = None
+                        it['tmdb_data'] = it.get('tmdb_data')  # preserve if present; otherwise remain None
                 return self._ensure_downstream_fields(filtered[:limit], media_type)
 
         except TraktAuthError as e:
@@ -2204,7 +2176,10 @@ class BulkCandidateProvider:
             imdb_id = item.get('ids', {}).get('imdb')
             
             # Check if exists
-            existing = self.db.query(MediaMetadata).filter_by(trakt_id=trakt_id).first()
+            existing = self.db.query(MediaMetadata).filter(
+                MediaMetadata.trakt_id == trakt_id,
+                MediaMetadata.media_type == media_type
+            ).first()
             
             metadata_dict = {
                 'trakt_id': trakt_id,
@@ -2749,7 +2724,10 @@ class BulkCandidateProvider:
                     continue
                 
                 # Check if already exists
-                existing = self.db.query(PersistentCandidate).filter_by(tmdb_id=tmdb_id).first()
+                existing = self.db.query(PersistentCandidate).filter(
+                    PersistentCandidate.tmdb_id == tmdb_id,
+                    PersistentCandidate.media_type == ('movie' if media_type == 'movies' else 'show')
+                ).first()
                 if existing:
                     continue
                 

@@ -12,7 +12,6 @@ from ..schemas import ListCreate
 from .. import crud
 from ..core.database import SessionLocal
 from ..models import UserList  # Import here for Trakt list creation
-from ..tasks import score_smartlist
 from app.services.list_sync import ListSyncService
 from fastapi import Body
 import json
@@ -215,7 +214,14 @@ async def update_list(list_id: int,
                 full_sync_days: int = Body(None),
                 discovery: str = Body(None),
                 fusion_mode: bool = Body(None),
-                media_types: list = Body(None)):
+                media_types: list = Body(None),
+                # Custom/Suggested list filters
+                genres: list = Body(None),
+                genre_mode: str = Body(None),
+                languages: list = Body(None),
+                year_from: int = Body(None),
+                year_to: int = Body(None),
+                min_rating: float = Body(None)):
     db = SessionLocal()
     user_id = 1  # TODO: Replace with real user_id from auth
     try:
@@ -265,13 +271,50 @@ async def update_list(list_id: int,
                         filters_updated = True
             except Exception:
                 pass
+        # Custom/Suggested list filters
+        if genres is not None:
+            try:
+                if isinstance(genres, list):
+                    f["genres"] = [str(g).lower() for g in genres]
+                    filters_updated = True
+            except Exception:
+                pass
+        if genre_mode is not None:
+            if genre_mode in ("any", "all"):
+                f["genre_mode"] = genre_mode
+                filters_updated = True
+        if languages is not None:
+            try:
+                if isinstance(languages, list):
+                    f["languages"] = [str(lang).lower() for lang in languages]
+                    filters_updated = True
+            except Exception:
+                pass
+        if year_from is not None:
+            try:
+                f["year_from"] = int(year_from)
+                filters_updated = True
+            except Exception:
+                pass
+        if year_to is not None:
+            try:
+                f["year_to"] = int(year_to)
+                filters_updated = True
+            except Exception:
+                pass
+        if min_rating is not None:
+            try:
+                f["min_rating"] = float(min_rating)
+                filters_updated = True
+            except Exception:
+                pass
         if filters_updated:
             l.filters = json.dumps(f)
             changed = True
         db.commit()
         # Send notification if anything changed
         if changed or filters_updated:
-            await send_notification(user_id, f"List {list_id} updated.", "info")
+            await send_notification(user_id, f"List '{l.title}' updated successfully. Full sync triggered.", "success")
         return {"status":"ok"}
     finally:
         db.close()
@@ -391,11 +434,20 @@ async def get_list_items(
         items = query.offset(offset).limit(limit).all()
         
         # Bulk-load metadata to avoid N+1 queries
-        trakt_ids = [it.trakt_id for it in items if it.trakt_id]
+        # Load metadata per media_type to avoid show/movie collisions on same trakt_id
+        ids_by_type = {"movie": [], "show": []}
+        for it in items:
+            if it.trakt_id:
+                ids_by_type[it.media_type].append(it.trakt_id)
         meta_by_trakt: dict[int, MediaMetadata] = {}
-        if trakt_ids:
-            metas = db.query(MediaMetadata).filter(MediaMetadata.trakt_id.in_(trakt_ids)).all()
-            meta_by_trakt = {m.trakt_id: m for m in metas}
+        for mt, ids in ids_by_type.items():
+            if ids:
+                metas = db.query(MediaMetadata).filter(
+                    MediaMetadata.trakt_id.in_(ids),
+                    MediaMetadata.media_type == mt
+                ).all()
+                for m in metas:
+                    meta_by_trakt[m.trakt_id] = m
 
         # Identify which items lack a poster and should fetch from Trakt/TMDB
         missing: list[tuple[int, str]] = []  # (trakt_id, media_type)

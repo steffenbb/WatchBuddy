@@ -99,7 +99,7 @@ export default function App() {
 
   return (
     <ToastProvider>
-      <div className="min-h-screen bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100">
+      <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900">
         <Header onLogoClick={onNavigateHome || undefined} />
         <main className="container mx-auto px-4 py-4 max-w-7xl">
           <Dashboard onRegisterNavigateHome={setOnNavigateHome} />

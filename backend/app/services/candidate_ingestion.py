@@ -105,6 +105,7 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                 title = item.get('title') or item.get('name')
                 if not title:
                     continue
+                
                 # Build or update existing record
                 existing: Optional[PersistentCandidate] = db.query(PersistentCandidate).filter_by(tmdb_id=tmdb_id).one_or_none()
                 if existing:
@@ -119,6 +120,17 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                         existing.last_refreshed = dt.datetime.utcnow()
                         existing.compute_scores()
                 else:
+                    # Fetch comprehensive metadata for new items
+                    tmdb_metadata = None
+                    enriched_fields = {}
+                    try:
+                        from app.services.tmdb_client import fetch_tmdb_metadata, extract_enriched_fields
+                        tmdb_metadata = await fetch_tmdb_metadata(tmdb_id, 'movie' if media_type=='movies' else 'tv')
+                        if tmdb_metadata:
+                            enriched_fields = extract_enriched_fields(tmdb_metadata, 'movie' if media_type=='movies' else 'show')
+                    except Exception as e:
+                        logger.debug(f"Failed to fetch enriched metadata for {tmdb_id}: {e}")
+                    
                     pc = PersistentCandidate(
                         tmdb_id=tmdb_id,
                         trakt_id=None,
@@ -134,12 +146,18 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                         overview=item.get('overview'),
                         poster_path=item.get('poster_path'),
                         backdrop_path=item.get('backdrop_path'),
-                        manual=False
+                        manual=False,
+                        # Add enriched fields if available
+                        **enriched_fields
                     )
                     pc.compute_scores()
                     batch_objs.append(pc)
                     if not new_last_date or release_date > new_last_date:
                         new_last_date = release_date
+                    
+                    # Add small delay after fetching detailed metadata to respect rate limits
+                    if tmdb_metadata:
+                        await asyncio.sleep(0.05)
             if batch_objs:
                 db.bulk_save_objects(batch_objs)
                 db.commit()
@@ -281,7 +299,7 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
         prev_page = cur["page"]
         prev_letter = cur["letter_index"]
         cur["page"] += 1
-        if cur["page"] > 50:  # sane upper bound
+        if cur["page"] > 500:  # increased from 50 for better coverage
             cur["page"] = 1
             cur["letter_index"] = (cur["letter_index"] + 1) % len(letters)
             logger.debug(f"Cursor advanced to next letter: {letters[cur['letter_index']]} (from {letters[prev_letter]}), page reset to 1")
