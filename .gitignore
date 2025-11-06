@@ -70,6 +70,11 @@ backend/data/watchbuddy_bootstrap.tar.gz
 **/watchbuddy_bootstrap/
 **/watchbuddy_bootstrap.tar.gz
 
+# Model cache directories
+models/
+cache/
+models/cache/
+
 # Exclude local workspace/ide and GitHub configs
 .vscode/
 .github/
