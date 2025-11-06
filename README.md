@@ -119,7 +119,7 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 ## Technical Architecture
 
 ### Persistent Candidate Pool
-- Database table pre-populated with **20,000+ movies and shows** from TMDB CSVs.
+- Database table pre-populated.
 - Enables fast list generation and filtering without external API calls.
 - Advanced SQL filtering: genres, languages, media types, years, networks, countries, creators, directors.
 
