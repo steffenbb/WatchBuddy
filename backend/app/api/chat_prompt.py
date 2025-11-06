@@ -496,6 +496,24 @@ async def chat_generate_list(
             db.add(li)
         db.commit()
         logger.info(f"Inserted {len(top_items)} ListItems for UserList id={user_list.id}")
+
+        # Generate poster for this chat list
+        try:
+            from app.services.poster_generator import generate_list_poster, delete_list_poster
+            old_poster = user_list.poster_path
+            poster_filename = generate_list_poster(
+                user_list.id,
+                scored,
+                list_type="chat",
+                max_items=5
+            )
+            if poster_filename:
+                if old_poster and old_poster != poster_filename:
+                    delete_list_poster(old_poster)
+                user_list.poster_path = poster_filename
+                db.commit()
+        except Exception as e:
+            logger.warning(f"[CHAT_POSTER] Failed generating poster for chat list {user_list.id}: {e}")
         
         return {
             "id": user_list.id,

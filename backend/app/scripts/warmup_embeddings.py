@@ -18,7 +18,7 @@ from sqlalchemy import text
 from app.core.database import SessionLocal
 from app.services.ai_engine.metadata_processing import compose_text_for_embedding
 from app.services.ai_engine.embeddings import EmbeddingService
-from app.services.ai_engine.faiss_index import serialize_embedding, add_to_index, train_build_ivfpq
+from app.services.ai_engine.faiss_index import serialize_embedding, add_to_index, train_build_hnsw
 
 
 logger = logging.getLogger(__name__)
@@ -30,13 +30,13 @@ def warmup(count: int = 5000, batch_size: int = 64) -> int:
         logger.warning("Querying top %d candidates missing embeddings...", count)
         rows = db.execute(text(
             """
-            SELECT id, tmdb_id, media_type, title, original_title, overview, genres, keywords, "cast",
+            SELECT id, tmdb_id, trakt_id, media_type, title, original_title, overview, genres, keywords, "cast",
                    production_companies, vote_average, vote_count, popularity, year, language, runtime,
                    tagline, homepage, budget, revenue, production_countries, spoken_languages, networks,
                    created_by, number_of_seasons, number_of_episodes, episode_run_time, first_air_date,
                    last_air_date, in_production, status
             FROM persistent_candidates
-            WHERE active=true AND embedding IS NULL AND tmdb_id IS NOT NULL
+            WHERE active=true AND embedding IS NULL AND trakt_id IS NOT NULL
             ORDER BY popularity DESC
             LIMIT :lim
             """
@@ -50,13 +50,14 @@ def warmup(count: int = 5000, batch_size: int = 64) -> int:
         cands = []
         for r in rows:
             try:
-                (rid, tmdb_id, media_type, title, original_title, overview, genres, keywords, cast, prod_comp,
+                (rid, tmdb_id, trakt_id, media_type, title, original_title, overview, genres, keywords, cast, prod_comp,
                  vote_average, vote_count, popularity, year, language, runtime, tagline, homepage, budget, revenue,
                  prod_countries, spoken_languages, networks, created_by, number_of_seasons, number_of_episodes,
                  episode_run_time, first_air_date, last_air_date, in_production, status) = r
                 c = {
                     'id': rid,
                     'tmdb_id': tmdb_id,
+                    'trakt_id': trakt_id,
                     'media_type': media_type,
                     'title': title or '',
                     'original_title': original_title or '',
@@ -117,16 +118,16 @@ def warmup(count: int = 5000, batch_size: int = 64) -> int:
         logger.warning("Persisted %d embeddings to DB.", embedded)
 
         # Update or create FAISS
-        tmdb_ids = [int(c['tmdb_id']) for c in cands]
-        logger.warning("Updating FAISS index with %d vectors...", len(tmdb_ids))
+        trakt_ids = [int(c['trakt_id']) for c in cands]  # Use trakt_id for better coverage
+        logger.warning("Updating FAISS HNSW index with %d vectors...", len(trakt_ids))
         try:
-            ok = add_to_index(embs, tmdb_ids, embs.shape[1])
+            ok = add_to_index(embs, trakt_ids, embs.shape[1])
             if ok:
-                logger.warning("Successfully added vectors to FAISS index.")
+                logger.warning("Successfully added vectors to FAISS HNSW index.")
             else:
-                logger.warning("FAISS index not found, building new index from batch.")
-                train_build_ivfpq(embs, tmdb_ids, embs.shape[1])
-                logger.info("Built new FAISS index from batch.")
+                logger.warning("FAISS index not found, building new HNSW index from batch.")
+                train_build_hnsw(embs, trakt_ids, embs.shape[1])
+                logger.info("Built new FAISS HNSW index from batch.")
         except Exception as e:
             logger.error(f"FAISS index update/build failed: {e}")
 

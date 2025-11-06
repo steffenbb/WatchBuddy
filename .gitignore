@@ -64,6 +64,12 @@ desktop.ini
 TMDB_movie_dataset_v11.csv
 TMDB_tv_dataset_v3.csv
 
+# Bootstrap bundle (too large for git)
+watchbuddy_bootstrap.tar.gz
+backend/data/watchbuddy_bootstrap.tar.gz
+**/watchbuddy_bootstrap/
+**/watchbuddy_bootstrap.tar.gz
+
 # Exclude local workspace/ide and GitHub configs
 .vscode/
 .github/
@@ -77,8 +83,20 @@ docker-compose.yml.broken
 check_counts.py
 test_api.py
 test_auto_import.py
+test_custom_list_create.py
+test_fresh_install.ps1
+test_overview.py
+fix_indent.py
 
-# Exclude internal docs and reports not needed on remote
+# Temporary/debug JSON files
+api_search_result.json
+api_search_result_after_fix.json
+es_client_out.json
+faiss_out.json
+res.json
+temp_search.json
+
+# Exclude internal docs and implementation notes (not needed on GitHub)
 SETUP_FLOW_ENHANCEMENT.md
 SYNC_ANALYSIS_REPORT.md
 TRAKT_SYNC_FIX.md
@@ -93,13 +111,34 @@ DYNAMIC_LISTS_IMPLEMENTATION.md
 TRAKT_REDIRECT_URI_IMPLEMENTATION.md
 TRAKT_ID_WORKFLOW.md
 TRAKT_ID_EXPORT_IMPORT_FINAL.md
+TRAKT_ID_ONDEMAND_IMPLEMENTATION.md
 SETUP_REDIRECT_URI_FIX.md
 SETUP_UI_FIX.md
 SCHEMA_ENHANCEMENT_COMPLETE.md
 EMBEDDING_STORAGE_FIX.md
 AI_ENGINE_ENRICHED_FIELDS_INTEGRATION.md
 AI_OPTIMIZATION_IMPLEMENTATION.md
+AI_LIST_ROTATION_FIX.md
 UI_AI_MODERNIZATION_COMPLETE.md
+UI_SETTINGS_REBUILD_UPDATE.md
+BOOTSTRAP_BUNDLE_GUIDE.md
+BOOTSTRAP_IMPLEMENTATION_SUMMARY.md
+BOOTSTRAP_QUICK_REFERENCE.md
+BOOTSTRAP_SYSTEM_README.md
+COMPREHENSIVE_OPTIMIZATION_PLAN.md
+CROSS_BROWSER_TESTING_CHECKLIST.md
+FAISS_HNSW_OPTIMIZATION.md
+FAISS_SCORING_ANALYSIS.md
+OVERVIEW_FEATURE_PROGRESS.md
+OPTIMIZATION_IMPLEMENTATION_SUMMARY.md
+QUESTIONS_ANSWERED.md
+PC_DASHBOARD_TIMEOUT_FIX.md
+PHASE_TIMELINE_IMPLEMENTATION.md
+MEMORY_OPTIMIZATION.md
+ES_AI_MEMORY_OPTIMIZATION.md
+
+# Exclude docs directory (contains duplicates of root MD files)
+docs/
 
 # Keep essential docs
 !README.md

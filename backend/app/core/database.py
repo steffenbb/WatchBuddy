@@ -63,19 +63,6 @@ async def init_db():
     from app.models import Base
     loop = asyncio.get_running_loop()
     
-    # Run pre-create migrations first (before create_all) to fix constraints
-    def _run_pre_migrations():
-        with engine.begin() as conn:
-            # Fix trakt_id constraint: drop old single-column unique index if it exists
-            # This must run before create_all() which would try to create the new composite index
-            conn.execute(text("DROP INDEX IF EXISTS ix_persistent_candidates_trakt_id"))
-    
-    await loop.run_in_executor(None, _run_pre_migrations)
-    
-    def _create_all():
-        Base.metadata.create_all(bind=engine)
-    await loop.run_in_executor(None, _create_all)
-
     # Safe, idempotent migrations for new columns (PostgreSQL)
     def _run_safe_migrations():
         stmts = [
@@ -96,6 +83,8 @@ async def init_db():
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS persistent_id integer NULL",
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS dynamic_theme varchar(255) NULL",
             "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS trakt_list_id varchar(255) NULL",
+            # Posters for generated list artwork
+            "ALTER TABLE IF EXISTS user_lists ADD COLUMN IF NOT EXISTS poster_path varchar(500) NULL",
             "CREATE INDEX IF NOT EXISTS idx_user_lists_trakt_list_id ON user_lists (trakt_list_id)",
             "CREATE INDEX IF NOT EXISTS ix_userlist_type_pid ON user_lists (user_id, list_type, persistent_id)",
             # persistent_candidates index / columns (table created by create_all)
@@ -130,7 +119,9 @@ async def init_db():
             "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS networks TEXT",
             "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS episode_run_time TEXT",
             "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS first_air_date VARCHAR(50)",
-            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS last_air_date VARCHAR(50)"
+            "ALTER TABLE IF EXISTS persistent_candidates ADD COLUMN IF NOT EXISTS last_air_date VARCHAR(50)",
+            # Overview feature: add rating column to trakt_watch_history
+            "ALTER TABLE IF EXISTS trakt_watch_history ADD COLUMN IF NOT EXISTS user_trakt_rating INTEGER"
         ]
         try:
             with engine.begin() as conn:
@@ -140,11 +131,83 @@ async def init_db():
                     except Exception:
                         # Ignore individual failures to keep startup resilient
                         pass
+            # Late-add columns for Individual Lists (separate to survive partial failures)
+            with engine.begin() as conn:
+                try:
+                    conn.execute(text("ALTER TABLE IF EXISTS individual_lists ADD COLUMN IF NOT EXISTS poster_path varchar(500) NULL"))
+                except Exception:
+                    pass
+            # Late-add columns for AI Lists
+            with engine.begin() as conn:
+                try:
+                    conn.execute(text("ALTER TABLE IF EXISTS ai_lists ADD COLUMN IF NOT EXISTS poster_path varchar(500) NULL"))
+                except Exception:
+                    pass
         except Exception:
             # Don't block startup if migrations fail; logs are available in container
             pass
 
-    await loop.run_in_executor(None, _run_safe_migrations)
+    # Quick schema check to skip migrations on already-initialized DBs
+    def _schema_is_up_to_date() -> bool:
+        try:
+            with engine.connect() as conn:
+                # Check a few sentinel artifacts that represent our latest schema
+                sentinels = [
+                    # Extension
+                    ("SELECT 1 FROM pg_extension WHERE extname='pg_trgm'", 1),
+                    # Columns on list_items
+                    ("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='list_items' AND column_name IN ('is_watched','watched_at','trakt_id','media_type')", 4),
+                    # Columns on user_lists
+                    ("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='user_lists' AND column_name IN ('poster_path','trakt_list_id','list_type')", 3),
+                    # Columns on persistent_candidates
+                    ("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='persistent_candidates' AND column_name IN ('embedding','production_companies','spoken_languages','number_of_seasons')", 4),
+                    # Performance indexes
+                    ("SELECT COUNT(*) FROM pg_indexes WHERE tablename='persistent_candidates' AND indexname IN ('idx_persistent_candidates_media_type','idx_persistent_candidates_genres_trgm')", 2)
+                ]
+                for sql, expected in sentinels:
+                    val = conn.execute(text(sql)).scalar() or 0
+                    if int(val) < expected:
+                        return False
+                return True
+        except Exception:
+            return False
+
+    # Wrap all DDL operations in a Postgres advisory lock to avoid race conditions
+    # when multiple Uvicorn workers execute startup concurrently.
+    def _perform_migrations_with_lock():
+        LOCK_KEY = 748392615  # Arbitrary constant; must be same across workers
+        try:
+            # If schema already looks current, skip migration phase entirely
+            if _schema_is_up_to_date():
+                logger.info("Database schema appears up-to-date; skipping migrations")
+                return
+            with engine.connect() as conn:
+                try:
+                    logger.warning("Acquiring DB advisory lock for migrations …")
+                    conn.execute(text("SELECT pg_advisory_lock(:key)"), {"key": LOCK_KEY})
+                    logger.warning("DB advisory lock acquired; running migrations …")
+                    # Pre-create migrations (drop old indexes, etc.)
+                    with engine.begin() as ddl_conn:
+                        ddl_conn.execute(text("DROP INDEX IF EXISTS ix_persistent_candidates_trakt_id"))
+
+                    # Create tables
+                    Base.metadata.create_all(bind=engine)
+
+                    # Safe, idempotent column/index migrations
+                    _run_safe_migrations()
+                finally:
+                    try:
+                        conn.execute(text("SELECT pg_advisory_unlock(:key)"), {"key": LOCK_KEY})
+                        logger.warning("DB advisory lock released")
+                    except Exception:
+                        # If unlock fails, the connection closing will release the lock
+                        pass
+        except Exception as e:
+            # Never fail startup due to migration errors
+            logger.warning(f"Migration phase failed or partially applied: {e}", exc_info=True)
+
+    # Execute the migration block synchronously (in executor) so startup awaits completion
+    await loop.run_in_executor(None, _perform_migrations_with_lock)
 
     # Create default user if none exists
     def _create_default_user():
@@ -171,59 +234,313 @@ async def init_db():
     # Bootstrap persistent candidate pool from bundled CSVs if empty
     _bootstrap_lock = {'done': False}
     
+    def _import_supplementary_data(db, data_dir):
+        """
+        Import missing field data from supplementary CSV files (e.g., cast data).
+        Only updates fields that are NULL in the database.
+        
+        Looks for files matching: *_supplementary.csv, *_enrichment.csv, *_cast.csv
+        Expected columns: id (tmdb_id), and any field names matching PersistentCandidate columns
+        """
+        from app.models import PersistentCandidate
+        from sqlalchemy import inspect
+        import csv, json
+        from pathlib import Path
+        
+        # Find supplementary CSV files (avoid main dataset files and trakt mappings)
+        supplementary_patterns = ['*_supplementary.csv', '*_enrichment.csv', '*_cast.csv', '*cast*.csv']
+        supplementary_files = []
+        for pattern in supplementary_patterns:
+            found = [f for f in data_dir.glob(pattern) 
+                    if 'tmdb_movie_dataset' not in f.name.lower() 
+                    and 'tmdb_tv_dataset' not in f.name.lower()
+                    and 'trakt_mappings' not in f.name.lower()]
+            supplementary_files.extend(found)
+        
+        if not supplementary_files:
+            logger.debug("No supplementary CSV files found for enrichment")
+            return 0
+        
+        # Get valid column names from PersistentCandidate model
+        mapper = inspect(PersistentCandidate)
+        valid_columns = {col.key for col in mapper.columns}
+        
+        total_updated = 0
+        
+        for csv_path in supplementary_files:
+            logger.info(f"Processing supplementary CSV: {csv_path.name}")
+            file_updated = 0
+            
+            try:
+                with csv_path.open('r', encoding='utf-8', newline='') as f:
+                    reader = csv.DictReader(f)
+                    
+                    # Validate that 'id' column exists (this is tmdb_id)
+                    if 'id' not in reader.fieldnames:
+                        logger.warning(f"Skipping {csv_path.name}: missing 'id' column")
+                        continue
+                    
+                    # Map CSV column names to DB column names
+                    # Filter to only valid columns that exist in the model
+                    csv_to_db_mapping = {}
+                    for csv_col in reader.fieldnames:
+                        if csv_col == 'id':
+                            continue  # Skip id, we use it for lookup
+                        
+                        # Convert CSV column name to snake_case if needed
+                        db_col = csv_col.lower().replace(' ', '_')
+                        
+                        if db_col in valid_columns:
+                            csv_to_db_mapping[csv_col] = db_col
+                        else:
+                            logger.debug(f"Skipping unknown column: {csv_col}")
+                    
+                    if not csv_to_db_mapping:
+                        logger.warning(f"No valid columns found in {csv_path.name}")
+                        continue
+                    
+                    logger.info(f"Mapped columns: {list(csv_to_db_mapping.values())}")
+                    
+                    batch_updates = []
+                    batch_size = 500
+                    
+                    for row in reader:
+                        tmdb_id = row.get('id', '').strip()
+                        if not tmdb_id:
+                            continue
+                        
+                        try:
+                            tmdb_id = int(tmdb_id)
+                        except ValueError:
+                            continue
+                        
+                        # Prepare update data for fields that have values in CSV
+                        update_data = {'tmdb_id': tmdb_id}
+                        has_data = False
+                        
+                        for csv_col, db_col in csv_to_db_mapping.items():
+                            csv_value = row.get(csv_col, '').strip()
+                            if not csv_value or csv_value.lower() in ('null', 'none', ''):
+                                continue
+                            
+                            # Parse value based on column type
+                            try:
+                                # Get column type from model
+                                col_obj = mapper.columns[db_col]
+                                col_type = str(col_obj.type)
+                                
+                                if 'TEXT' in col_type or 'VARCHAR' in col_type:
+                                    # Text columns - check if it's a list format
+                                    if csv_value.startswith('[') or ',' in csv_value:
+                                        # Parse as list and store as JSON
+                                        if csv_value.startswith('['):
+                                            try:
+                                                parsed = json.loads(csv_value)
+                                                update_data[db_col] = json.dumps(parsed)
+                                            except json.JSONDecodeError:
+                                                # Clean brackets and split
+                                                cleaned = csv_value.strip('[]').replace('"', '').replace("'", "")
+                                                items = [x.strip() for x in cleaned.split(',') if x.strip()]
+                                                update_data[db_col] = json.dumps(items)
+                                        else:
+                                            # Comma-separated list
+                                            items = [x.strip() for x in csv_value.split(',') if x.strip()]
+                                            update_data[db_col] = json.dumps(items)
+                                    else:
+                                        # Regular text value
+                                        update_data[db_col] = csv_value
+                                    has_data = True
+                                    
+                                elif 'INTEGER' in col_type:
+                                    try:
+                                        update_data[db_col] = int(float(csv_value))
+                                        has_data = True
+                                    except ValueError:
+                                        pass
+                                        
+                                elif 'NUMERIC' in col_type or 'FLOAT' in col_type or 'REAL' in col_type:
+                                    try:
+                                        update_data[db_col] = float(csv_value)
+                                        has_data = True
+                                    except ValueError:
+                                        pass
+                                        
+                                elif 'BOOLEAN' in col_type:
+                                    update_data[db_col] = csv_value.lower() in ('1', 'true', 't', 'yes', 'y')
+                                    has_data = True
+                                    
+                                else:
+                                    # Default: store as-is
+                                    update_data[db_col] = csv_value
+                                    has_data = True
+                                    
+                            except Exception as e:
+                                logger.debug(f"Error parsing column {db_col}: {e}")
+                                continue
+                        
+                        if has_data:
+                            batch_updates.append(update_data)
+                        
+                        # Process batch
+                        if len(batch_updates) >= batch_size:
+                            updated = _update_missing_fields_batch(db, batch_updates, csv_to_db_mapping)
+                            file_updated += updated
+                            batch_updates = []
+                    
+                    # Process remaining batch
+                    if batch_updates:
+                        updated = _update_missing_fields_batch(db, batch_updates, csv_to_db_mapping)
+                        file_updated += updated
+                
+                total_updated += file_updated
+                logger.info(f"Updated {file_updated} records from {csv_path.name}")
+                
+            except Exception as e:
+                logger.warning(f"Failed to process {csv_path.name}: {str(e)}", exc_info=True)
+                continue
+        
+        return total_updated
+    
+    def _update_missing_fields_batch(db, batch_updates, csv_to_db_mapping):
+        """Update only fields that are NULL in database."""
+        updated_count = 0
+        
+        try:
+            for update_data in batch_updates:
+                tmdb_id = update_data['tmdb_id']
+                
+                # Build dynamic UPDATE query that only sets NULL fields
+                set_clauses = []
+                params = {'tmdb_id': tmdb_id}
+                
+                for db_col in csv_to_db_mapping.values():
+                    if db_col in update_data:
+                        set_clauses.append(f"{db_col} = COALESCE({db_col}, :{db_col})")
+                        params[db_col] = update_data[db_col]
+                
+                if not set_clauses:
+                    continue
+                
+                sql = f"""
+                    UPDATE persistent_candidates 
+                    SET {', '.join(set_clauses)}
+                    WHERE tmdb_id = :tmdb_id
+                """
+                
+                result = db.execute(text(sql), params)
+                if result.rowcount > 0:
+                    updated_count += result.rowcount
+            
+            db.commit()
+            
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Error updating batch: {str(e)}")
+            raise
+        
+        return updated_count
+    
     def _bootstrap_candidates_if_needed():
-        """Bootstrap persistent_candidates from CSV files in /app/data if table is empty."""
-        # Check lock first to prevent duplicate runs in same process
+        """Bootstrap persistent_candidates from bundle or CSV files if table is empty."""
         if _bootstrap_lock['done']:
             return
-            
+
+        from app.models import PersistentCandidate
+        from pathlib import Path
+        import csv, json
+
+        # Check if already populated (in separate session to avoid lock issues)
+        db = SessionLocal()
         try:
-            from app.models import PersistentCandidate
-            from pathlib import Path
-            import csv, json
-            with SessionLocal() as db:
-                count = db.query(PersistentCandidate).limit(1).count()
-                if count > 0:
-                    logger.info("Persistent candidates already bootstrapped, skipping CSV import")
-                    _bootstrap_lock['done'] = True
-                    return  # Already bootstrapped
+            if db.query(PersistentCandidate).limit(1).count() > 0:
+                logger.info("Persistent candidates already bootstrapped, skipping import")
+                _bootstrap_lock['done'] = True
+                return
+        finally:
+            db.close()
+        
+        # Try bootstrap bundle first (much faster than CSV)
+        # This runs OUTSIDE any session context to avoid transaction locks
+        try:
+            from app.scripts.import_bootstrap_data import import_bootstrap_bundle
+            logger.info("Attempting to import from bootstrap bundle...")
+            if import_bootstrap_bundle():
+                logger.info("✅ Bootstrap bundle imported successfully")
+                _bootstrap_lock['done'] = True
+                return
+            else:
+                logger.info("Bootstrap bundle import failed or not available, falling back to CSV import")
+        except Exception as e:
+            logger.warning(f"Bootstrap bundle import error: {e}, falling back to CSV import")
+        
+        # CSV import uses its own session with advisory lock
+        with SessionLocal() as db:
+            lock_id = 999999
+            try:
+                # Acquire advisory lock so only one worker bootstraps CSV import
+                has_lock = db.execute(text("SELECT pg_try_advisory_lock(:id)"), {"id": lock_id}).scalar()
+                if not has_lock:
+                    logger.info("Another worker is already bootstrapping CSV, skipping")
+                    return
+
+                # Fallback to CSV import
                 data_dir = Path('/app/data')
                 if not data_dir.exists():
                     logger.warning("Data directory /app/data does not exist, skipping CSV import")
                     return
-                # Accept multiple CSVs (movies/shows). Import using simplified inline parser to avoid circular imports.
-                # Exclude trakt_mappings_export.csv as that's processed separately
+
                 csv_files = [f for f in data_dir.glob('*.csv') if 'trakt_mappings' not in f.name.lower()]
                 if not csv_files:
                     logger.warning("No CSV files found in /app/data, skipping bootstrap")
                     return
-                
+
                 logger.info(f"Starting CSV bootstrap from {len(csv_files)} file(s)")
                 total_imported = 0
-                
+
+                # Helper parsers (file-scope)
+                def parse_list(raw_val):
+                    if not raw_val:
+                        return []
+                    raw_val = str(raw_val).strip()
+                    if (raw_val.startswith('[') and raw_val.endswith(']')) or (raw_val.startswith('{') and raw_val.endswith('}')):
+                        try:
+                            data = json.loads(raw_val)
+                            if isinstance(data, list):
+                                return [str(x).strip() for x in data if str(x).strip()]
+                        except Exception:
+                            pass
+                    cleaned = raw_val.strip('[]').replace('"', '').replace("'", "")
+                    delimiter = '|' if '|' in cleaned else (';' if ';' in cleaned else ',')
+                    return [p.strip() for p in cleaned.split(delimiter) if p.strip()]
+
+                def get_first_present(row_dict, names):
+                    for n in names:
+                        v = row_dict.get(n)
+                        if v not in (None, ''):
+                            return v
+                    return ''
+
                 for csv_path in csv_files:
                     logger.warning(f"Processing CSV file: {csv_path.name}")
                     file_imported = 0
-                    seen_ids = set()  # Track (tmdb_id, media_type) to avoid duplicates
+                    seen_ids = set()
                     try:
                         with csv_path.open('r', encoding='utf-8', newline='') as f:
                             reader = csv.DictReader(f)
                             batch = []
                             for row in reader:
-                                # Basic required fields: id, title/name, language
+                                # Required fields
                                 tmdb_id = row.get('id')
                                 title = row.get('title') or row.get('name')
                                 language = (row.get('original_language') or '').lower()[:5]
-                                
-                                # Skip items without required fields
                                 if not tmdb_id or not title or not language:
                                     continue
                                 try:
                                     tmdb_id_int = int(tmdb_id)
                                 except Exception:
                                     continue
-                                    
-                                # Infer media type from filename or columns
+
+                                # Media type inference
                                 if 'name' in row and 'first_air_date' in row:
                                     media_type = 'show'
                                 elif 'movie' in csv_path.name.lower():
@@ -232,13 +549,13 @@ async def init_db():
                                     media_type = 'show'
                                 else:
                                     media_type = 'movie'
-                                
-                                # Skip duplicates within CSV
+
+                                # Deduplicate within file
                                 dup_key = (tmdb_id_int, media_type)
                                 if dup_key in seen_ids:
                                     continue
                                 seen_ids.add(dup_key)
-                                
+
                                 release_date = row.get('release_date') or row.get('first_air_date')
                                 year = None
                                 if release_date and len(release_date) >= 4:
@@ -246,24 +563,14 @@ async def init_db():
                                         year = int(release_date[:4])
                                     except Exception:
                                         year = None
-                                def parse_list(raw_val):
-                                    if not raw_val or raw_val == '':
-                                        return []
-                                    raw_val = str(raw_val).strip()
-                                    if raw_val.startswith('[') and raw_val.endswith(']'):
-                                        try:
-                                            data = json.loads(raw_val)
-                                            if isinstance(data, list):
-                                                return [str(x) for x in data]
-                                        except Exception:
-                                            pass
-                                    return [p.strip() for p in raw_val.split(',') if p.strip()]
+
                                 genres_list = parse_list(row.get('genres') or '')
-                                keywords_list = parse_list(row.get('keywords') or '')
+                                kw_raw = get_first_present(row, ['keywords', 'keyword', 'keywords_names', 'keyword_names', 'tmdb_keywords', 'tmdb_keyword_names', 'tags'])
+                                keywords_list = parse_list(kw_raw)
                                 production_companies_list = parse_list(row.get('production_companies') or '')
                                 production_countries_list = parse_list(row.get('production_countries') or '')
                                 spoken_languages_list = parse_list(row.get('spoken_languages') or '')
-                                
+
                                 try:
                                     popularity = float(row.get('popularity') or 0.0)
                                 except Exception:
@@ -288,8 +595,7 @@ async def init_db():
                                     runtime = int(float(row.get('runtime') or 0))
                                 except Exception:
                                     runtime = None
-                                
-                                # TV-specific fields
+
                                 try:
                                     number_of_seasons = int(float(row.get('number_of_seasons') or 0)) or None
                                 except Exception:
@@ -298,17 +604,16 @@ async def init_db():
                                     number_of_episodes = int(float(row.get('number_of_episodes') or 0)) or None
                                 except Exception:
                                     number_of_episodes = None
-                                
+
                                 in_production_val = row.get('in_production', '')
-                                in_production = str(in_production_val).lower() in ('1', 'true', 't', 'yes', 'y', 'True') if in_production_val else None
-                                
+                                in_production = str(in_production_val).lower() in ('1', 'true', 't', 'yes', 'y', 'true') if in_production_val else None
+
                                 created_by_list = parse_list(row.get('created_by') or '')
                                 networks_list = parse_list(row.get('networks') or '')
                                 episode_run_time_list = parse_list(row.get('episode_run_time') or '')
-                                
-                                # Handle is_adult properly
                                 adult_val = row.get('adult', 'False')
-                                is_adult = str(adult_val).lower() in ('1', 'true', 't', 'yes', 'y', 'True')
+                                is_adult = str(adult_val).lower() in ('1', 'true', 't', 'yes', 'y', 'true')
+
                                 pc = PersistentCandidate(
                                     tmdb_id=tmdb_id_int,
                                     trakt_id=None,
@@ -336,7 +641,6 @@ async def init_db():
                                     revenue=revenue,
                                     tagline=row.get('tagline'),
                                     homepage=row.get('homepage'),
-                                    # TV-specific fields
                                     number_of_seasons=number_of_seasons,
                                     number_of_episodes=number_of_episodes,
                                     in_production=in_production,
@@ -350,58 +654,108 @@ async def init_db():
                                 )
                                 pc.compute_scores()
                                 batch.append(pc)
+
                                 if len(batch) >= 500:
+                                    try:
+                                        db.bulk_save_objects(batch)
+                                        db.commit()
+                                        file_imported += len(batch)
+                                    except Exception:
+                                        db.rollback()
+                                        for item in batch:
+                                            try:
+                                                db.merge(item)
+                                                file_imported += 1
+                                            except Exception:
+                                                pass
+                                        db.commit()
+                                    batch = []
+
+                            # flush remaining
+                            if batch:
+                                try:
                                     db.bulk_save_objects(batch)
                                     db.commit()
                                     file_imported += len(batch)
-                                    batch = []
-                            if batch:
-                                db.bulk_save_objects(batch)
-                                db.commit()
-                                file_imported += len(batch)
-                        
+                                except Exception:
+                                    db.rollback()
+                                    for item in batch:
+                                        try:
+                                            db.merge(item)
+                                            file_imported += 1
+                                        except Exception:
+                                            pass
+                                    db.commit()
+
                         total_imported += file_imported
                         logger.warning(f"Successfully imported {file_imported} items from {csv_path.name}")
-                        
+
                     except Exception as e:
-                        logger.warning(f"Failed to import {csv_path.name}: {str(e)}", exc_info=True)
+                        logger.warning(f"Failed to import {csv_path.name}: {e}", exc_info=True)
                         db.rollback()
                         continue
-                
+
                 logger.warning(f"CSV bootstrap complete. Total items imported: {total_imported}")
                 _bootstrap_lock['done'] = True
-                
-                # Auto-import trakt_id mappings if file exists
-                trakt_imported = 0
+
+                # Supplementary enrichment
                 try:
-                    from app.scripts.auto_import_trakt import auto_import_trakt_mappings
-                    trakt_imported = auto_import_trakt_mappings(db)
-                    if trakt_imported > 0:
-                        logger.info(f"Auto-imported {trakt_imported} trakt_id mappings from trakt_mappings_export.csv")
+                    updated = _import_supplementary_data(db, data_dir)
+                    if updated > 0:
+                        logger.info(f"Supplementary data import: updated {updated} records with missing fields")
                 except Exception as e:
-                    logger.debug(f"Trakt ID auto-import skipped or failed: {e}")
-                
-                # Mark metadata scan as completed to avoid showing setup UI
-                # The nightly Celery task will continue to fill in missing trakt_ids
+                    logger.debug(f"Supplementary data import skipped or failed: {e}")
+
+                # Skip Trakt CSV auto-import
+                logger.info("Skipping trakt_mappings_export.csv import: using on-demand TMDB→Trakt resolution with cache")
+
+                # Mark metadata scan as completed
                 try:
                     import asyncio
                     from app.core.redis_client import get_redis
                     async def _set_completion_flag():
                         r = get_redis()
                         await r.set("metadata_build:scan_completed", "true")
-                        if trakt_imported > 0:
-                            logger.info(f"Metadata scan marked as completed (auto-import successful with {trakt_imported} mappings)")
-                        else:
-                            logger.info("Metadata scan marked as completed (bootstrap finished, nightly task will populate trakt_ids)")
+                        logger.info("Metadata scan marked as completed (bootstrap finished; nightly task will populate trakt_ids)")
                     asyncio.run(_set_completion_flag())
                 except Exception as flag_err:
                     logger.warning(f"Failed to set metadata completion flag: {flag_err}")
 
-                
-        except Exception as e:
-            logger.warning(f"Critical error during CSV bootstrap: {str(e)}", exc_info=True)
-            _bootstrap_lock['done'] = True
+            except Exception as e:
+                logger.warning(f"Critical error during CSV bootstrap: {e}", exc_info=True)
+                _bootstrap_lock['done'] = True
+            finally:
+                try:
+                    db.execute(text("SELECT pg_advisory_unlock(:id)"), {"id": lock_id})
+                    logger.debug("Released CSV bootstrap advisory lock")
+                except Exception:
+                    pass
 
-    await loop.run_in_executor(None, _bootstrap_candidates_if_needed)
+    # CSV bootstrap of persistent candidates can be heavy. If the database already
+    # contains candidates, skip bootstrap entirely. This both speeds up startup and
+    # avoids unnecessary work on persistent environments.
+    def _has_persistent_candidates() -> bool:
+        try:
+            with engine.connect() as conn:
+                row = conn.execute(text("SELECT 1 FROM persistent_candidates LIMIT 1")).first()
+                return row is not None
+        except Exception as e:
+            logger.warning(f"Failed to check persistent_candidates existence: {e}")
+            return False
+
+    try:
+        if _has_persistent_candidates():
+            logger.info("persistent_candidates already populated; skipping CSV bootstrap scheduling")
+        else:
+            # When needed, schedule bootstrap in background (non-blocking). Force synchronous
+            # via WB_BOOTSTRAP_SYNC=1 if desired for one-time setups.
+            if os.getenv("WB_BOOTSTRAP_SYNC", "0") == "1":
+                logger.info("WB_BOOTSTRAP_SYNC=1 detected; running CSV bootstrap synchronously during startup")
+                await loop.run_in_executor(None, _bootstrap_candidates_if_needed)
+            else:
+                logger.info("Scheduling CSV bootstrap in background (only because table is empty)")
+                loop.run_in_executor(None, _bootstrap_candidates_if_needed)
+    except Exception as e:
+        logger.warning(f"Failed to schedule or skip CSV bootstrap: {e}")
 
 

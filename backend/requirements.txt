@@ -15,6 +15,7 @@ numpy==1.24.3
 cryptography==41.0.2
 aiofiles==23.1.0
 pytz==2023.3
+elasticsearch==8.11.0
 
 # AI/ML dependencies for semantic search
 sentence-transformers==2.2.2
@@ -25,5 +26,9 @@ huggingface-hub==0.14.1
 # NLP
 spacy==3.7.2
 nltk==3.8.1
+
+# Clustering for phase detection
+# Note: hdbscan disabled due to wheel build issues in this image. PhaseDetector
+# falls back to scikit-learn clustering when HDBSCAN isn't available.
 
 pytest==7.4.0

@@ -36,7 +36,7 @@ class TraktClient:
     async def _get_refresh_token(self) -> Optional[str]:
         # Try to get refresh token from user-specific storage
         if self.user_id:
-            token_json = await self._redis.get(f"trakt_tokens:{self.user_id}")
+            token_json = await self._r().get(f"trakt_tokens:{self.user_id}")
             if token_json:
                 try:
                     data = json.loads(token_json)
@@ -48,34 +48,40 @@ class TraktClient:
     async def _store_tokens(self, access_token: str, refresh_token: Optional[str] = None, expires_in: Optional[int] = None):
         # Store new tokens in both new and legacy locations for compatibility
         if self.user_id:
-            await self._redis.set(f"{REDIS_USER_PREFIX}{self.user_id}:trakt_access_token", access_token)
+            await self._r().set(f"{REDIS_USER_PREFIX}{self.user_id}:trakt_access_token", access_token)
             token_data = {"access_token": access_token}
             if refresh_token:
                 token_data["refresh_token"] = refresh_token
             if expires_in:
                 token_data["expires_in"] = expires_in
-            await self._redis.set(f"trakt_tokens:{self.user_id}", json.dumps(token_data))
+            await self._r().set(f"trakt_tokens:{self.user_id}", json.dumps(token_data))
 
     def __init__(self, user_id: Optional[int] = None):
         self.user_id = user_id
         self._client_id = None
         self._client_secret = None
         self._access_token = None
-        self._redis = get_redis()
+        # Do NOT capture an async Redis client outside an event loop.
+        # We'll fetch a loop-bound client lazily via _r().
+        self._redis = None
+
+    def _r(self):
+        """Return a Redis asyncio client bound to the current event loop."""
+        return get_redis()
 
     async def _load_secrets(self):
         # Load secrets from Redis-based settings
-        self._client_id = await self._redis.get(REDIS_GLOBAL_PREFIX + "trakt_client_id")
-        self._client_secret = await self._redis.get(REDIS_GLOBAL_PREFIX + "trakt_client_secret")
+        self._client_id = await self._r().get(REDIS_GLOBAL_PREFIX + "trakt_client_id")
+        self._client_secret = await self._r().get(REDIS_GLOBAL_PREFIX + "trakt_client_secret")
         # Prefer user-specific token if available
         if self.user_id:
             # New storage location
-            token = await self._redis.get(f"{REDIS_USER_PREFIX}{self.user_id}:trakt_access_token")
+            token = await self._r().get(f"{REDIS_USER_PREFIX}{self.user_id}:trakt_access_token")
             if token:
                 self._access_token = token
             else:
                 # Back-compat: token stored as JSON under trakt_tokens:{user_id}
-                token_json = await self._redis.get(f"trakt_tokens:{self.user_id}")
+                token_json = await self._r().get(f"trakt_tokens:{self.user_id}")
                 if token_json:
                     try:
                         data = json.loads(token_json)
@@ -108,10 +114,11 @@ class TraktClient:
         headers = await self._get_headers()
         cache_key = f"trakt:{method}:{endpoint}:{json.dumps(params, sort_keys=True) if params else ''}:{json.dumps(data, sort_keys=True) if data else ''}"
 
-        # Check Redis cache
-        cached = await self._redis.get(cache_key)
-        if cached:
-            return json.loads(cached)
+        # Check Redis cache ONLY for GET requests (never cache POST/PUT/DELETE)
+        if method.upper() == "GET":
+            cached = await self._r().get(cache_key)
+            if cached:
+                return json.loads(cached)
 
         # No fallback to global access token: always require user-specific token
         if not self._access_token:
@@ -156,7 +163,9 @@ class TraktClient:
                                     resp = await client.request(method, url, headers=new_headers, params=params, json=data)
                                     resp.raise_for_status()
                                     result = resp.json()
-                                    await self._redis.set(cache_key, json.dumps(result), ex=300)
+                                    # Only cache GET responses
+                                    if method.upper() == "GET":
+                                        await self._r().set(cache_key, json.dumps(result), ex=300)
                                     return result
                             # If refresh fails, raise error
                             logger.error("Trakt access token expired and refresh failed.")
@@ -166,7 +175,9 @@ class TraktClient:
                             raise TraktAuthError("Trakt access token expired and no refresh token available. Please reauthorize your Trakt account.")
                     resp.raise_for_status()
                     result = resp.json()
-                    await self._redis.set(cache_key, json.dumps(result), ex=300)
+                    # Only cache GET responses
+                    if method.upper() == "GET":
+                        await self._r().set(cache_key, json.dumps(result), ex=300)
                     return result
             except httpx.ConnectTimeout:
                 logger.error("Network timeout connecting to Trakt API.")
@@ -216,8 +227,7 @@ class TraktClient:
         return await self._request("GET", endpoint, params=params)
 
     async def get_my_history(self, media_type: str = "movies", limit: int = 1000) -> List[Dict]:
-        """Fetch authenticated user's watch history in bulk (first N)."""
-        # Trakt supports pagination; do a couple of pages to get up to limit
+        """Fetch authenticated user's watch history up to limit (paged)."""
         collected: List[Dict] = []
         page = 1
         per_page = min(100, limit)
@@ -232,6 +242,25 @@ class TraktClient:
                 break
             page += 1
         return collected[:limit]
+
+    async def get_full_history(self, media_type: str = "movies", page_size: int = 100, max_pages: int = 2000) -> List[Dict]:
+        """Fetch the authenticated user's entire history for the media type.
+        Pages until an empty/short page is returned or max_pages is reached.
+        """
+        collected: List[Dict] = []
+        page = 1
+        per_page = max(1, min(100, page_size))
+        while page <= max_pages:
+            endpoint = f"/users/me/history/{media_type}"
+            params = {"limit": per_page, "page": page}
+            batch = await self._request("GET", endpoint, params=params)
+            if not batch:
+                break
+            collected.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+        return collected
 
     async def search(self, query: str, media_type: str = "movie", limit: int = 10) -> Any:
         endpoint = f"/search/{media_type}"
@@ -286,6 +315,51 @@ class TraktClient:
         endpoint = "/users/me/watched/shows"
         return await self._request("GET", endpoint)
 
+    async def get_user_ratings(self, media_type: str = "movies", limit: int = 5000) -> List[Dict]:
+        """
+        Fetch user's ratings from Trakt.
+        
+        Returns list of dicts with structure:
+        {
+            "rated_at": "2023-01-15T10:30:00.000Z",
+            "rating": 8,  # 1-10 scale
+            "type": "movie",
+            "movie": {"title": "...", "year": 2023, "ids": {"trakt": 12345, "tmdb": 67890}}
+        }
+        or for shows:
+        {
+            "rated_at": "...",
+            "rating": 9,
+            "type": "show",
+            "show": {"title": "...", "year": 2020, "ids": {"trakt": 54321, "tmdb": 98765}}
+        }
+        """
+        endpoint = f"/users/me/ratings/{media_type}"
+        params = {"limit": min(5000, limit)}
+        return await self._request("GET", endpoint, params=params)
+
+    async def get_all_ratings(self) -> Dict[str, List[Dict]]:
+        """
+        Fetch all user ratings (movies + shows).
+        
+        Returns dict:
+        {
+            "movies": [...],
+            "shows": [...]
+        }
+        """
+        movies_ratings = await self.get_user_ratings("movies")
+        shows_ratings = await self.get_user_ratings("shows")
+        return {
+            "movies": movies_ratings or [],
+            "shows": shows_ratings or []
+        }
+
+    async def get_user_stats(self) -> Dict[str, Any]:
+        """Get user's Trakt statistics (movies watched, shows watched, ratings, etc)."""
+        endpoint = "/users/me/stats"
+        return await self._request("GET", endpoint)
+
     async def get_watched_status(self, media_type: str = "movies") -> Dict[int, Dict]:
         """Get watched status for all items of a media type, indexed by Trakt ID.
         
@@ -296,7 +370,7 @@ class TraktClient:
         
         # Check cache first
         cache_key = f"trakt_watched:{self.user_id}:{media_type}"
-        cached_data = await self._redis.get(cache_key)
+        cached_data = await self._r().get(cache_key)
         if cached_data:
             try:
                 logger.debug(f"Using cached watched status for {media_type} (user {self.user_id})")
@@ -331,7 +405,7 @@ class TraktClient:
         
         # Cache for 5 minutes (300 seconds)
         try:
-            await self._redis.setex(cache_key, 300, json.dumps(watched_dict))
+            await self._r().setex(cache_key, 300, json.dumps(watched_dict))
             logger.debug(f"Cached watched status for {media_type} (user {self.user_id}, {len(watched_dict)} items)")
         except Exception as e:
             logger.warning(f"Failed to cache watched status: {e}")
@@ -345,6 +419,156 @@ class TraktClient:
         if item_status:
             return True, item_status.get("watched_at")
         return False, None
+
+    async def get_top_genre(self) -> Optional[Dict[str, Any]]:
+        """Get user's top watched genre.
+        
+        Strategy:
+        1) Try database (TraktWatchHistory) - fastest and most reliable
+        2) Fallback: Try Trakt user stats API (if genres are present)
+        3) Final fallback: derive from user's watched movies/shows joined with MediaMetadata
+        
+        Returns:
+            Dict with 'genre' (str) and 'count' (int), or None if unavailable
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            # Cache first
+            cache_key = f"trakt_top_genre:{self.user_id}"
+            cached = await self._r().get(cache_key)
+            if cached:
+                try:
+                    import json as _json
+                    return _json.loads(cached)
+                except Exception:
+                    pass
+
+            # 1) Primary: Use database watch history (fastest, no API calls)
+            try:
+                from app.services.watch_history_helper import WatchHistoryHelper
+                from ..core.database import SessionLocal
+                
+                db = SessionLocal()
+                try:
+                    helper = WatchHistoryHelper(self.user_id, db)
+                    top_genre = helper.get_top_genre()
+                    
+                    if top_genre:
+                        result = {
+                            "genre": top_genre["genre"],
+                            "count": top_genre["count"]
+                        }
+                        logger.info(f"Top genre from DB: {result}")
+                        
+                        # Cache for 6 hours
+                        try:
+                            import json as _json
+                            await self._r().setex(cache_key, 21600, _json.dumps(result))
+                        except Exception:
+                            pass
+                        
+                        return result
+                finally:
+                    db.close()
+            except Exception as db_err:
+                logger.warning(f"Failed to get top genre from DB, trying API: {db_err}")
+
+            # 2) Fallback: Attempt from Trakt stats API
+            stats = await self.get_user_stats()
+            if stats:
+                genres_data = stats.get("movies", {}).get("genres", []) or stats.get("shows", {}).get("genres", [])
+                if genres_data:
+                    top_genre_data = max(genres_data, key=lambda x: x.get("watched", 0) or x.get("plays", 0))
+                    result = {
+                        "genre": (top_genre_data.get("name") or "Unknown").title(),
+                        "count": top_genre_data.get("watched", 0) or top_genre_data.get("plays", 0) or 0,
+                    }
+                    try:
+                        import json as _json
+                        # Cache for 6 hours
+                        await self._r().setex(cache_key, 21600, _json.dumps(result))
+                    except Exception:
+                        pass
+                    return result
+
+            # 3) Final fallback: compute from watched IDs using local metadata
+            # Gather watched Trakt IDs for movies and shows
+            try:
+                watched_movies = await self.get_watched_movies()
+            except Exception:
+                watched_movies = []
+            try:
+                watched_shows = await self.get_watched_shows()
+            except Exception:
+                watched_shows = []
+
+            movie_ids = []
+            for item in watched_movies or []:
+                tid = (item or {}).get("movie", {}).get("ids", {}).get("trakt")
+                if tid:
+                    movie_ids.append(int(tid))
+            show_ids = []
+            for item in watched_shows or []:
+                tid = (item or {}).get("show", {}).get("ids", {}).get("trakt")
+                if tid:
+                    show_ids.append(int(tid))
+
+            ids = movie_ids + show_ids
+            if not ids:
+                return None
+
+            # Query local metadata for genres
+            from ..core.database import SessionLocal
+            from ..models import MediaMetadata
+            import json
+
+            db = SessionLocal()
+            try:
+                # Limit to a reasonable number to avoid heavy queries
+                BATCH = 500
+                genre_counts: dict[str, int] = {}
+                for offset in range(0, len(ids), BATCH):
+                    batch = ids[offset:offset + BATCH]
+                    rows = (
+                        db.query(MediaMetadata)
+                        .filter(MediaMetadata.trakt_id.in_(batch))
+                        .all()
+                    )
+                    for row in rows:
+                        if not row.genres:
+                            continue
+                        try:
+                            genres = json.loads(row.genres) if isinstance(row.genres, str) else row.genres
+                        except Exception:
+                            genres = []
+                        if not isinstance(genres, list):
+                            continue
+                        for g in genres:
+                            if not g or str(g).strip().lower() == "n/a":
+                                continue
+                            key = str(g).strip().lower()
+                            genre_counts[key] = genre_counts.get(key, 0) + 1
+
+                if not genre_counts:
+                    return None
+
+                # Select top genre
+                top_key, top_count = max(genre_counts.items(), key=lambda kv: kv[1])
+                result = {"genre": top_key.title(), "count": int(top_count)}
+                try:
+                    import json as _json
+                    # Cache for 6 hours
+                    await self._r().setex(cache_key, 21600, _json.dumps(result))
+                except Exception:
+                    pass
+                return result
+            finally:
+                db.close()
+
+        except Exception as e:
+            logger.warning(f"Failed to get top genre: {e}")
+            return None
 
     async def create_list(self, name: str, description: str = "Created and managed by WatchBuddy", 
                          privacy: str = "private") -> Dict[str, Any]:
@@ -469,16 +693,18 @@ class TraktClient:
         
         return await self._request("POST", endpoint, data=payload)
     
-    async def get_list_items(self, trakt_list_id: str) -> List[Dict[str, Any]]:
+    async def get_list_items(self, trakt_list_id: str, username: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all items from a Trakt list.
         
         Args:
             trakt_list_id: Trakt list ID (slug or numeric ID)
+            username: Optional username for external lists (defaults to 'me' for own lists)
             
         Returns:
             List of items with their details
         """
-        endpoint = f"/users/me/lists/{trakt_list_id}/items"
+        user_part = username if username else "me"
+        endpoint = f"/users/{user_part}/lists/{trakt_list_id}/items"
         return await self._request("GET", endpoint)
     
     async def sync_list_items(self, trakt_list_id: str, desired_items: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -557,11 +783,11 @@ class TraktClient:
 
     async def close(self):
         # Explicit resource cleanup
-        if self._redis:
-            await self._redis.close()
+        # Do not close the shared Redis client here; it's managed per-loop
+        # and reused across the application. Just drop references.
         del self._client_id
         del self._client_secret
         del self._access_token
-        del self._redis
+    # No persistent client to delete; each call fetches a loop-bound client.
         import gc
         gc.collect()

@@ -1,10 +1,17 @@
 """
-FAISS index helpers for IVF+PQ (float16).
-- train_build_ivfpq: trains and builds index from embeddings and mapping
+FAISS index helpers for HNSW (float32).
+- train_build_hnsw: builds HNSW index from embeddings and mapping (no training needed)
 - load_index: loads index from disk
-- search_index: queries index and returns mapped tmdb_ids
+- search_index: queries index and returns mapped trakt_ids
 - add_to_index: incrementally add new embeddings to existing index
 - serialize_embedding/deserialize_embedding: convert embeddings to/from bytes for DB storage
+
+HNSW Optimization:
+- IndexHNSWFlat with L2 metric (normalized vectors = cosine similarity)
+- M=32 (bidirectional links per layer) - good balance of speed/quality
+- efConstruction=200 (build-time quality) - higher = better index quality
+- efSearch=200-350 (search-time quality) - tunable per query
+- Float32 for best CPU performance
 """
 import numpy as np
 import faiss
@@ -21,41 +28,76 @@ DATA_DIR.mkdir(exist_ok=True, parents=True)
 INDEX_FILE = DATA_DIR / "faiss_index.bin"
 MAPPING_FILE = DATA_DIR / "faiss_map.json"
 
+# HNSW hyperparameters
+HNSW_M = 32  # Bidirectional links per layer (higher = better recall, slower build)
+HNSW_EF_CONSTRUCTION = 200  # Build-time quality (higher = better index)
+HNSW_EF_SEARCH = 250  # Search-time quality (200-350 range, tunable)
+
+# Simple in-process cache to avoid re-reading FAISS index on every request
+_INDEX_CACHE = None
+_MAP_CACHE = None
+
 
 def _l2_normalize(mat: np.ndarray) -> np.ndarray:
+    """Normalize vectors to unit length for cosine similarity via L2 distance."""
     norms = np.linalg.norm(mat, axis=1, keepdims=True) + 1e-8
-    return (mat / norms).astype(np.float16)
+    return (mat / norms).astype(np.float32)  # Keep float32 for CPU performance
 
 
 def serialize_embedding(embedding: np.ndarray) -> bytes:
     """Convert numpy embedding array to bytes for database storage."""
-    # Store as float16 to save space
-    return embedding.astype(np.float16).tobytes()
+    # Keep float32 for CPU performance (faster than float16)
+    return embedding.astype(np.float32).tobytes()
 
 
 def deserialize_embedding(blob: bytes) -> np.ndarray:
-    """Convert bytes from database back to numpy float16 array."""
-    return np.frombuffer(blob, dtype=np.float16)
+    """Convert bytes from database back to numpy float32 array."""
+    return np.frombuffer(blob, dtype=np.float32)
 
 
-def train_build_ivfpq(embeddings: np.ndarray, tmdb_ids: List[int], dim: int, nlist: int = 4096, m: int = 64, nbits: int = 8):
+def train_build_hnsw(embeddings: np.ndarray, trakt_ids: List[int], dim: int):
     """
-    Train and build IVF+PQ index, save to disk, and export mapping.
+    Build HNSW index (no training needed), save to disk, and export mapping.
+    
+    HNSW is a graph-based ANN algorithm that's much faster than IVF+PQ:
+    - No training phase required
+    - Better recall at same speed
+    - Scales well for up to 10M+ vectors
+    
+    Args:
+        embeddings: Embedding vectors (N x dim) as float32
+        trakt_ids: Trakt IDs for each embedding
+        dim: Embedding dimension
     """
-    quantizer = faiss.IndexFlatIP(dim)
-    index = faiss.IndexIVFPQ(quantizer, dim, nlist, m, nbits)
-    print("Training FAISS index...")
-    # Cosine sim via inner-product requires normalized vectors
-    embeddings = _l2_normalize(embeddings.astype(np.float32))
-    index.train(embeddings)
-    print("Adding embeddings to index...")
-    index.add(embeddings)
+    # Create HNSW index with L2 metric
+    index = faiss.IndexHNSWFlat(dim, HNSW_M)
+    index.hnsw.efConstruction = HNSW_EF_CONSTRUCTION
+    
+    logger.info(f"[FAISS] Building HNSW index with {len(trakt_ids)} vectors (dim={dim}, M={HNSW_M}, efConstruction={HNSW_EF_CONSTRUCTION})...")
+    
+    # Normalize for cosine similarity via L2 distance
+    embeddings_normalized = _l2_normalize(embeddings.astype(np.float32))
+    
+    # Add all vectors (HNSW builds incrementally, no separate training)
+    index.add(embeddings_normalized)
+    
+    # Save index
     faiss.write_index(index, str(INDEX_FILE))
-    # Save mapping
-    mapping = {int(i): int(tmdb_ids[i]) for i in range(len(tmdb_ids))}
+    
+    # Save mapping (use trakt_id now instead of tmdb_id for better coverage)
+    mapping = {int(i): int(trakt_ids[i]) for i in range(len(trakt_ids))}
     with open(MAPPING_FILE, "w") as f:
         json.dump(mapping, f)
-    print(f"✅ FAISS index and mapping saved to {INDEX_FILE} and {MAPPING_FILE}")
+    
+    logger.info(f"[FAISS] ✅ HNSW index and mapping saved to {INDEX_FILE} and {MAPPING_FILE}")
+    logger.info(f"[FAISS] Index stats: {len(trakt_ids)} vectors, M={HNSW_M}, efSearch will be {HNSW_EF_SEARCH}")
+
+
+# Keep old function name for backwards compatibility
+def train_build_ivfpq(embeddings: np.ndarray, trakt_ids: List[int], dim: int, nlist: int = 4096, m: int = 64, nbits: int = 8):
+    """Legacy wrapper - redirects to HNSW build."""
+    logger.warning("[FAISS] train_build_ivfpq() is deprecated, using HNSW instead")
+    train_build_hnsw(embeddings, trakt_ids, dim)
 
 
 def _rebuild_index_from_db() -> bool:
@@ -70,13 +112,13 @@ def _rebuild_index_from_db() -> bool:
         
         db = SessionLocal()
         try:
-            # Count candidates with embeddings and trakt_id
+            # Count candidates with embeddings (trakt_id optional)
             total = db.execute(text(
-                "SELECT COUNT(*) FROM persistent_candidates WHERE embedding IS NOT NULL AND trakt_id IS NOT NULL"
+                "SELECT COUNT(*) FROM persistent_candidates WHERE embedding IS NOT NULL"
             )).scalar()
             
             if total == 0:
-                logger.error("[FAISS] No candidates with embeddings and trakt_id found for rebuild")
+                logger.error("[FAISS] No candidates with embeddings found for rebuild")
                 return False
             
             logger.info(f"[FAISS] Found {total} candidates for index rebuild")
@@ -89,9 +131,9 @@ def _rebuild_index_from_db() -> bool:
             while offset < total:
                 rows = db.execute(text(
                     """
-                    SELECT trakt_id, embedding
+                    SELECT COALESCE(trakt_id, tmdb_id) AS trakt_id, embedding
                     FROM persistent_candidates
-                    WHERE embedding IS NOT NULL AND trakt_id IS NOT NULL
+                    WHERE embedding IS NOT NULL
                     ORDER BY id
                     OFFSET :off LIMIT :lim
                     """
@@ -119,8 +161,8 @@ def _rebuild_index_from_db() -> bool:
             # Build index
             embeddings_array = np.array(all_embeddings, dtype=np.float32)
             dim = embeddings_array.shape[1]
-            logger.info(f"[FAISS] Building index with {len(all_trakt_ids)} vectors (dim={dim})...")
-            train_build_ivfpq(embeddings_array, all_trakt_ids, dim)
+            logger.info(f"[FAISS] Building HNSW index with {len(all_trakt_ids)} vectors (dim={dim})...")
+            train_build_hnsw(embeddings_array, all_trakt_ids, dim)
             logger.info("[FAISS] ✅ Index rebuild successful!")
             return True
             
@@ -132,11 +174,14 @@ def _rebuild_index_from_db() -> bool:
         return False
 
 
-def load_index() -> Tuple[faiss.IndexIVFPQ, Dict[int, int]]:
+def load_index() -> Tuple[faiss.IndexHNSWFlat, Dict[int, int]]:
     """
-    Load FAISS index and mapping from disk.
+    Load FAISS HNSW index and mapping from disk.
     If index files are missing, attempts to rebuild from database embeddings.
     """
+    global _INDEX_CACHE, _MAP_CACHE
+    if _INDEX_CACHE is not None and _MAP_CACHE is not None:
+        return _INDEX_CACHE, _MAP_CACHE
     # Check if index exists, rebuild if missing
     if not INDEX_FILE.exists() or not MAPPING_FILE.exists():
         logger.warning("[FAISS] Index files not found, attempting rebuild...")
@@ -144,40 +189,77 @@ def load_index() -> Tuple[faiss.IndexIVFPQ, Dict[int, int]]:
             raise FileNotFoundError(f"FAISS index not found at {INDEX_FILE} and rebuild failed")
     
     index = faiss.read_index(str(INDEX_FILE))
-    with open(MAPPING_FILE) as f:
-        mapping = json.load(f)
-    mapping = {int(k): int(v) for k, v in mapping.items()}
-    return index, mapping
-
-
-def search_index(index: faiss.IndexIVFPQ, query_vec: np.ndarray, top_k: int = 100) -> Tuple[List[int], List[float]]:
-    """
-    Search FAISS index and return top_k tmdb_ids and scores.
-    """
-    # Set nprobe to search more clusters for better recall
-    # Default nprobe=1 is too low; use ~10% of nlist (nlist=4096 default, so nprobe=400)
-    if hasattr(index, 'nprobe'):
-        index.nprobe = min(400, int(index.nlist * 0.1)) if hasattr(index, 'nlist') else 400
     
-    # normalize for cosine/inner-product
+    # Set efSearch for query-time quality/speed tradeoff
+    if hasattr(index, 'hnsw'):
+        index.hnsw.efSearch = HNSW_EF_SEARCH
+        logger.debug(f"[FAISS] Set efSearch={HNSW_EF_SEARCH} for queries")
+    
+    # Load mapping with corruption fallback
+    try:
+        with open(MAPPING_FILE) as f:
+            mapping = json.load(f)
+    except json.JSONDecodeError as e:
+        # Mapping file appears corrupted (partial write or concurrent write)
+        logger.warning(f"[FAISS] Mapping file {MAPPING_FILE} is corrupted ({e}); attempting automatic rebuild...")
+        # Attempt a full rebuild from DB embeddings as a safe recovery
+        if not _rebuild_index_from_db():
+            logger.error("[FAISS] Failed to rebuild FAISS index after mapping corruption; cannot proceed")
+            raise
+        # Retry loading freshly rebuilt files
+        with open(MAPPING_FILE) as f:
+            mapping = json.load(f)
+    mapping = {int(k): int(v) for k, v in mapping.items()}
+    _INDEX_CACHE = index
+    _MAP_CACHE = mapping
+    return _INDEX_CACHE, _MAP_CACHE
+
+
+def search_index(index: faiss.IndexHNSWFlat, query_vec: np.ndarray, top_k: int = 100, ef_search: Optional[int] = None) -> Tuple[List[int], List[float]]:
+    """
+    Search FAISS HNSW index and return top_k trakt_ids and scores.
+    
+    Args:
+        index: FAISS HNSW index
+        query_vec: Query embedding vector
+        top_k: Number of results to return
+        ef_search: Override efSearch for this query (None = use default HNSW_EF_SEARCH)
+                   Higher = better quality but slower (200-350 recommended range)
+    
+    Returns:
+        (trakt_ids, scores) tuples
+    """
+    # Set efSearch dynamically if provided
+    if ef_search is not None and hasattr(index, 'hnsw'):
+        index.hnsw.efSearch = ef_search
+    elif hasattr(index, 'hnsw'):
+        index.hnsw.efSearch = HNSW_EF_SEARCH
+    
+    # Normalize for cosine similarity via L2 distance
     if query_vec.dtype != np.float32:
         query_vec = query_vec.astype(np.float32)
     query_vec = query_vec / (np.linalg.norm(query_vec) + 1e-8)
-    query_vec = query_vec.astype(np.float16)
     query_vec = np.expand_dims(query_vec, axis=0)
-    scores, ids = index.search(query_vec, top_k)
+    
+    # Search
+    distances, ids = index.search(query_vec, top_k)
     ids = ids[0]
-    scores = scores[0]
-    return list(ids), list(scores)
+    
+    # Convert L2 distances to similarity scores (smaller distance = higher similarity)
+    # For normalized vectors: L2_dist = 2 * (1 - cosine_sim)
+    # So: cosine_sim = 1 - (L2_dist / 2)
+    similarities = 1.0 - (distances[0] / 2.0)
+    
+    return list(ids), list(similarities)
 
 
-def add_to_index(embeddings: np.ndarray, tmdb_ids: List[int], dim: int) -> bool:
+def add_to_index(embeddings: np.ndarray, trakt_ids: List[int], dim: int) -> bool:
     """
-    Incrementally add new embeddings to existing FAISS index.
+    Incrementally add new embeddings to existing FAISS HNSW index.
     
     Args:
-        embeddings: New embeddings to add (N x dim)
-        tmdb_ids: TMDB IDs for new embeddings
+        embeddings: New embeddings to add (N x dim) as float32
+        trakt_ids: Trakt IDs for new embeddings
         dim: Embedding dimension (should match existing index)
     
     Returns:
@@ -200,18 +282,23 @@ def add_to_index(embeddings: np.ndarray, tmdb_ids: List[int], dim: int) -> bool:
         # Get current index size (for new mapping keys)
         current_size = len(mapping)
         
-        # Add to index
-        logger.info(f"[FAISS] Adding {len(embeddings)} new vectors to index (current size: {current_size})")
+        # Add to index (HNSW supports incremental adds)
+        logger.info(f"[FAISS] Adding {len(embeddings)} new vectors to HNSW index (current size: {current_size})")
         index.add(embeddings_normalized)
         
         # Update mapping
-        for i, tmdb_id in enumerate(tmdb_ids):
-            mapping[current_size + i] = int(tmdb_id)
+        for i, trakt_id in enumerate(trakt_ids):
+            mapping[current_size + i] = int(trakt_id)
         
         # Save updated index and mapping
         faiss.write_index(index, str(INDEX_FILE))
         with open(MAPPING_FILE, "w") as f:
             json.dump(mapping, f)
+        
+        # Clear cache to force reload with new data
+        global _INDEX_CACHE, _MAP_CACHE
+        _INDEX_CACHE = None
+        _MAP_CACHE = None
         
         logger.info(f"[FAISS] Successfully added {len(embeddings)} vectors (new total: {len(mapping)})")
         return True
@@ -219,3 +306,39 @@ def add_to_index(embeddings: np.ndarray, tmdb_ids: List[int], dim: int) -> bool:
     except Exception as e:
         logger.error(f"[FAISS] Failed to add embeddings incrementally: {e}")
         return False
+
+
+def get_embedding_from_index(tmdb_id: int, media_type: str) -> Optional[np.ndarray]:
+    """
+    Retrieve embedding for a specific tmdb_id from persistent_candidates.
+    
+    Args:
+        tmdb_id: TMDB ID of the item
+        media_type: 'movie' or 'show'
+        
+    Returns:
+        Numpy array embedding (float16) or None if not found
+    """
+    try:
+        from app.core.database import SessionLocal
+        from app.models import PersistentCandidate
+        
+        db = SessionLocal()
+        try:
+            candidate = db.query(PersistentCandidate).filter(
+                PersistentCandidate.tmdb_id == tmdb_id,
+                PersistentCandidate.media_type == media_type
+            ).first()
+            
+            if candidate and candidate.embedding:
+                return deserialize_embedding(candidate.embedding)
+            
+            return None
+            
+        finally:
+            db.close()
+            
+    except Exception as e:
+        logger.error(f"Failed to get embedding for tmdb_id={tmdb_id}: {e}")
+        return None
+

@@ -237,6 +237,7 @@ class UserList(Base):
     sync_status = Column(String, default="pending")  # pending, syncing, complete, error
     sync_watched_status = Column(Boolean, default=True)  # whether to sync watched status
     exclude_watched = Column(Boolean, default=False)  # whether to exclude watched items
+    poster_path = Column(String(500), nullable=True)  # Generated poster blend image path
     created_at = Column(DateTime, default=utc_now)
     last_updated = Column(DateTime, nullable=True)
     last_error = Column(Text, nullable=True)
@@ -248,3 +249,301 @@ class UserList(Base):
 
 # Add relationship after class definition
 UserList.items = relationship("ListItem", order_by=ListItem.id, back_populates="user_list")
+
+
+class IndividualList(Base):
+    """
+    Individual Lists - fully user-controlled lists with manual item selection.
+    
+    Features:
+    - User manually adds/removes items via semantic + literal search
+    - FAISS-powered suggestions based on current list items
+    - On-the-fly fit scoring shows how well items match user profile
+    - Manual Trakt sync only (no automatic syncing)
+    - Drag & drop reordering support
+    """
+    __tablename__ = "individual_lists"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now, index=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    trakt_list_id = Column(String, nullable=True, index=True)  # Trakt list ID if synced
+    trakt_synced_at = Column(DateTime, nullable=True)  # Last successful sync timestamp
+    is_public = Column(Boolean, default=False)  # For future sharing features
+    poster_path = Column(String(500), nullable=True)  # Generated poster blend image path
+    
+    # Relationship to items
+    items = relationship("IndividualListItem", back_populates="list", cascade="all, delete-orphan", order_by="IndividualListItem.order_index")
+    
+    __table_args__ = (
+        Index('ix_individual_lists_user_created', 'user_id', 'created_at'),
+        {'comment': 'User-controlled lists with manual item selection and FAISS suggestions'}
+    )
+
+
+class IndividualListItem(Base):
+    """
+    Items in an Individual List with fit scoring and ordering.
+    
+    Each item stores:
+    - Media identifiers (tmdb_id, trakt_id)
+    - Display metadata (title, poster, etc.)
+    - User profile fit score (0-1, computed on-the-fly)
+    - Order for drag & drop reordering
+    - Additional metadata as JSON for extensibility
+    """
+    __tablename__ = "individual_list_items"
+    
+    id = Column(Integer, primary_key=True)
+    list_id = Column(Integer, ForeignKey("individual_lists.id", ondelete="CASCADE"), nullable=False, index=True)
+    tmdb_id = Column(Integer, nullable=False, index=True)
+    trakt_id = Column(Integer, nullable=True, index=True)  # May be null if not yet mapped
+    media_type = Column(String, nullable=False, index=True)  # 'movie' or 'show'
+    title = Column(String, nullable=False)
+    original_title = Column(String, nullable=True)
+    year = Column(Integer, nullable=True)
+    overview = Column(Text, nullable=True)
+    poster_path = Column(String, nullable=True)
+    backdrop_path = Column(String, nullable=True)
+    genres = Column(Text, nullable=True)  # JSON array
+    order_index = Column(Float, nullable=False, index=True)  # Float for easier reordering (insert between items)
+    fit_score = Column(Float, nullable=True)  # 0-1 score from user profile matching
+    added_at = Column(DateTime, default=utc_now, index=True)
+    metadata_json = Column(Text, nullable=True)  # Additional metadata (mood, theme, fusion, etc.) as JSON
+    
+    # Relationship back to list
+    list = relationship("IndividualList", back_populates="items")
+    
+    __table_args__ = (
+        Index('ix_individual_list_items_list_order', 'list_id', 'order_index'),
+        # Prevent duplicate items in same list
+        UniqueConstraint('list_id', 'tmdb_id', 'media_type', name='uq_individual_list_item'),
+        {'comment': 'Items in Individual Lists with fit scores and ordering'}
+    )
+
+
+class TraktWatchHistory(Base):
+    """
+    Persistent storage of user's Trakt watch history for phase detection.
+    Stores individual watch events with timestamps for temporal pattern analysis.
+    """
+    __tablename__ = "trakt_watch_history"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    trakt_id = Column(Integer, nullable=False, index=True)
+    tmdb_id = Column(Integer, nullable=True, index=True)
+    media_type = Column(String, nullable=False, index=True)  # 'movie' or 'show'
+    title = Column(String, nullable=False)
+    year = Column(Integer, nullable=True)
+    watched_at = Column(DateTime, nullable=False, index=True)  # When user watched this item
+    user_trakt_rating = Column(Integer, nullable=True)  # User's 1-10 rating from Trakt (null if unrated)
+    # Store enriched metadata snapshot for phase analysis without external lookups
+    genres = Column(Text, nullable=True)  # JSON array
+    keywords = Column(Text, nullable=True)  # JSON array
+    overview = Column(Text, nullable=True)
+    poster_path = Column(String, nullable=True)
+    collection_id = Column(Integer, nullable=True, index=True)  # TMDB collection ID for franchise detection
+    collection_name = Column(String, nullable=True)
+    runtime = Column(Integer, nullable=True)
+    language = Column(String, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    
+    __table_args__ = (
+        # One watch event per user per item per timestamp (allow rewatches at different times)
+        UniqueConstraint('user_id', 'trakt_id', 'watched_at', name='uq_watch_event'),
+        Index('ix_watch_history_user_time', 'user_id', 'watched_at'),
+        {'comment': 'User watch history from Trakt for phase detection and analysis'}
+    )
+
+
+class UserPhase(Base):
+    """
+    Detected thematic phases in user's viewing history.
+    Each phase represents a cluster of content watched during a time period,
+    characterized by common themes, genres, franchises, or moods.
+    Phases are auto-detected every 24 hours from watch history.
+    """
+    __tablename__ = "user_phases"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    label = Column(String, nullable=False)  # e.g., "Space Sci-Fi Phase", "Star Wars Phase"
+    icon = Column(String, nullable=True)  # Emoji or SVG key (e.g., "🚀", "thriller-icon")
+    start_at = Column(DateTime, nullable=False, index=True)
+    end_at = Column(DateTime, nullable=True, index=True)  # NULL = currently active
+    
+    # Phase composition data
+    tmdb_ids = Column(Text, nullable=False)  # JSON array of member tmdb_ids
+    trakt_ids = Column(Text, nullable=True)  # JSON array of member trakt_ids
+    media_types = Column(Text, nullable=True)  # JSON array matching tmdb_ids (movie/show)
+    
+    # Phase characterization
+    dominant_genres = Column(Text, nullable=True)  # JSON array of top genres
+    dominant_keywords = Column(Text, nullable=True)  # JSON array of top keywords
+    franchise_id = Column(Integer, nullable=True, index=True)  # TMDB collection ID if franchise-dominated
+    franchise_name = Column(String, nullable=True)
+    
+    # Computed metrics
+    cohesion = Column(Float, nullable=False)  # Average cosine similarity among cluster members (0-1)
+    watch_density = Column(Float, nullable=False)  # Fraction of watch window occupied by this cluster
+    franchise_dominance = Column(Float, default=0.0)  # Fraction of items from same franchise
+    thematic_consistency = Column(Float, default=0.0)  # Genre/mood agreement
+    phase_score = Column(Float, nullable=False, index=True)  # Overall phase quality score
+    
+    # Metadata
+    item_count = Column(Integer, nullable=False)  # Number of items in phase
+    movie_count = Column(Integer, default=0)
+    show_count = Column(Integer, default=0)
+    avg_runtime = Column(Integer, nullable=True)
+    top_language = Column(String, nullable=True)
+    
+    # Phase type classification
+    phase_type = Column(String, nullable=False, index=True)  # 'active', 'minor', 'historical', 'future'
+    
+    # AI-generated explanation
+    explanation = Column(Text, nullable=True)  # "Why this phase?" - template or LLM-generated
+    
+    # Representative posters for UI (JSON array of 3-6 poster paths)
+    representative_posters = Column(Text, nullable=True)
+    
+    created_at = Column(DateTime, default=utc_now, index=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    
+    __table_args__ = (
+        Index('ix_user_phases_user_time', 'user_id', 'start_at', 'end_at'),
+        Index('ix_user_phases_active', 'user_id', 'phase_type', 'end_at'),
+        {'comment': 'Detected viewing phases from watch history clustering'}
+    )
+
+
+class UserPhaseEvent(Base):
+    """
+    Audit log of phase lifecycle events (created, closed, converted to list, shared).
+    Useful for analytics and debugging phase detection.
+    """
+    __tablename__ = "user_phase_events"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    phase_id = Column(Integer, ForeignKey("user_phases.id", ondelete="CASCADE"), nullable=False, index=True)
+    action = Column(String, nullable=False, index=True)  # 'created', 'closed', 'converted', 'shared', 'updated'
+    meta = Column(Text, nullable=True)  # JSON metadata about the event
+    timestamp = Column(DateTime, default=utc_now, index=True)
+    
+    __table_args__ = (
+        Index('ix_phase_events_user_time', 'user_id', 'timestamp'),
+        {'comment': 'Audit log for phase lifecycle events'}
+    )
+
+
+class UserShowProgress(Base):
+    """
+    Tracks user progress through TV shows for 'Upcoming Continuations' feature.
+    Pre-computed nightly from TraktWatchHistory + TMDB season/episode data.
+    """
+    __tablename__ = "user_show_progress"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    trakt_id = Column(Integer, nullable=False, index=True)
+    tmdb_id = Column(Integer, nullable=True, index=True)
+    title = Column(String, nullable=False)
+    poster_path = Column(String, nullable=True)
+    
+    # Progress tracking
+    last_watched_season = Column(Integer, nullable=False)
+    last_watched_episode = Column(Integer, nullable=False)
+    last_watched_at = Column(DateTime, nullable=False)
+    
+    # Next episode info (computed from TMDB)
+    next_episode_season = Column(Integer, nullable=True)  # NULL if show completed
+    next_episode_number = Column(Integer, nullable=True)
+    next_episode_title = Column(String, nullable=True)
+    next_episode_air_date = Column(String, nullable=True)  # YYYY-MM-DD
+    
+    # Show totals (from TMDB/persistent_candidates)
+    total_seasons = Column(Integer, nullable=True)
+    total_episodes = Column(Integer, nullable=True)
+    show_status = Column(String, nullable=True)  # 'Returning Series', 'Ended', 'In Production'
+    
+    # Metadata
+    is_completed = Column(Boolean, default=False, index=True)  # User finished the show
+    is_behind = Column(Boolean, default=False, index=True)  # Next episode already aired
+    episodes_behind = Column(Integer, default=0)  # How many episodes behind
+    
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    created_at = Column(DateTime, default=utc_now)
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', 'trakt_id', name='uq_user_show_progress'),
+        Index('ix_user_show_progress_behind', 'user_id', 'is_behind', 'is_completed'),
+        {'comment': 'User TV show progress for continuation recommendations'}
+    )
+
+
+class OverviewCache(Base):
+    """
+    Pre-computed cache for Overview page modules (Investment Tracker, New Shows, Trending, Upcoming).
+    Refreshed nightly by Celery task. Stores JSON blobs per user per module.
+    """
+    __tablename__ = "overview_cache"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    module_type = Column(String, nullable=False, index=True)  # 'investment', 'new_shows', 'trending', 'upcoming'
+    
+    # Cached data (JSON string)
+    data_json = Column(Text, nullable=False)  # Module-specific structure
+    
+    # Module priority for dynamic reordering (computed by meta-ranking logic)
+    priority_score = Column(Float, nullable=False, default=0.0, index=True)
+    
+    # Metadata
+    item_count = Column(Integer, default=0)
+    computed_at = Column(DateTime, nullable=False, default=utc_now, index=True)
+    expires_at = Column(DateTime, nullable=False, index=True)  # TTL: 24 hours
+    
+    __table_args__ = (
+        UniqueConstraint('user_id', 'module_type', name='uq_overview_cache_user_module'),
+        Index('ix_overview_cache_expiry', 'user_id', 'expires_at'),
+        {'comment': 'Pre-computed cache for Overview page discovery modules'}
+    )
+
+
+class TrendingIngestionQueue(Base):
+    """
+    Queue of TMDB IDs from trending/upcoming lists pending ingestion into persistent_candidates.
+    Separate from bulk ingestion - targets specific high-value items.
+    """
+    __tablename__ = "trending_ingestion_queue"
+    
+    id = Column(Integer, primary_key=True)
+    tmdb_id = Column(Integer, nullable=False, index=True)
+    media_type = Column(String, nullable=False, index=True)  # 'movie' or 'show'
+    source_list = Column(String, nullable=False, index=True)  # 'trending_week', 'trending_day', 'upcoming', 'popular'
+    
+    # Ingestion status
+    status = Column(String, nullable=False, default='pending', index=True)  # 'pending', 'ingesting', 'completed', 'failed'
+    trakt_id = Column(Integer, nullable=True, index=True)  # Filled after successful ingestion
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, default=0)
+    
+    # Priority (higher = ingest first)
+    priority = Column(Integer, default=0, index=True)
+    
+    # Timestamps
+    discovered_at = Column(DateTime, default=utc_now, index=True)
+    ingested_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=utc_now)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    
+    __table_args__ = (
+        UniqueConstraint('tmdb_id', 'media_type', 'source_list', name='uq_trending_queue_item'),
+        Index('ix_trending_queue_status_priority', 'status', 'priority'),
+        {'comment': 'Queue for targeted ingestion of trending/upcoming TMDB items'}
+    )
+

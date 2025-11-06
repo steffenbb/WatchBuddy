@@ -1,8 +1,11 @@
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.gzip import GZipMiddleware
+import os
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db
 
-from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists
+from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists, individual_lists, maintenance, phases, overview
 from app.api.chat_prompt import router as chat_prompt_router
 from app.api.available_genres_languages import router as genres_languages_router
 from app.api.recommendations import router as recommendations_router
@@ -12,6 +15,9 @@ from app.api.metadata_options import router as metadata_options_router
 
 app = FastAPI(title="WatchBuddy API", version="1.0.0")
 app.include_router(chat_prompt_router, prefix="/api", tags=["Chat Prompt"])
+
+# Add GZip compression middleware for better transfer performance
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 app.add_middleware(
     CORSMiddleware,
@@ -36,10 +42,23 @@ app.include_router(ratings.router, prefix="/api/ratings", tags=["Ratings"])
 app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
 app.include_router(chatlists.router, prefix="/api/chatlists", tags=["Chat Lists"])
 app.include_router(ai_lists.router, prefix="/api/ai", tags=["AI Lists"])
+app.include_router(individual_lists.router, prefix="/api", tags=["Individual Lists"])
 
 # Optional: Recommendations and Notifications if present
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
+app.include_router(maintenance.router, prefix="/api/maintenance", tags=["Maintenance"])
+app.include_router(phases.router, tags=["Phases"])
+app.include_router(overview.router, prefix="/api", tags=["Overview"])
+
+# Serve generated list posters as static files (ensure directory exists)
+POSTERS_DIR = "/app/data/posters"
+try:
+    os.makedirs(POSTERS_DIR, exist_ok=True)
+except Exception:
+    pass
+if os.path.isdir(POSTERS_DIR):
+    app.mount("/posters", StaticFiles(directory=POSTERS_DIR), name="posters")
 
 
 @app.on_event("startup")
@@ -72,6 +91,33 @@ async def startup_event():
     finally:
         if db:
             db.close()
+
+    # Background warm-up to reduce first-request latency for search and embeddings
+    try:
+        import threading
+
+        def _warm_background():
+            try:
+                # Warm ElasticSearch connection and query caches
+                from app.services.elasticsearch_client import get_elasticsearch_client
+                es = get_elasticsearch_client()
+                if es and es.is_connected():
+                    try:
+                        es.search("warm", limit=1)
+                    except Exception:
+                        pass
+                # Warm embedding model (load into memory)
+                try:
+                    from app.services.ai_engine.embeddings import EmbeddingService
+                    EmbeddingService().encode_text("warmup")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        threading.Thread(target=_warm_background, daemon=True).start()
+    except Exception:
+        pass
 
 @app.get("/")
 def root():

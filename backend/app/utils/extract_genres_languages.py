@@ -20,15 +20,44 @@ def get_genres_and_languages(min_count=0):
     """
     db = SessionLocal()
     try:
-        # Query distinct genres from persistent_candidates using JSON extraction
-        genre_query = text("""
-            SELECT DISTINCT jsonb_array_elements_text(genres::jsonb) as genre 
-            FROM persistent_candidates 
-            WHERE genres IS NOT NULL AND genres != '[]'
-            ORDER BY genre
-        """)
-        genre_result = db.execute(genre_query)
-        raw_genres = [row[0] for row in genre_result.fetchall()]
+        # Fetch raw genre strings and normalize in Python to tolerate non-JSON formats
+        # Some rows contain JSON arrays (e.g., '["Drama","Action"]'), others contain
+        # comma-separated text (e.g., 'Drama, Action') or single tokens (e.g., 'Drama').
+        genre_rows = db.execute(text("""
+            SELECT genres
+            FROM persistent_candidates
+            WHERE genres IS NOT NULL AND TRIM(genres) != ''
+        """)).fetchall()
+
+        raw_genre_items = []
+        for (gval,) in genre_rows:
+            if gval is None:
+                continue
+            if isinstance(gval, (list, tuple)):
+                # Already a sequence
+                for item in gval:
+                    if item:
+                        raw_genre_items.append(str(item))
+                continue
+            text_val = str(gval).strip()
+            if not text_val:
+                continue
+            # Try JSON array first
+            parsed = None
+            if text_val.startswith('[') and text_val.endswith(']'):
+                try:
+                    parsed = json.loads(text_val)
+                except Exception:
+                    parsed = None
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if item is not None:
+                        raw_genre_items.append(str(item))
+                continue
+            # Fallback: split by comma
+            parts = [p.strip() for p in text_val.split(',') if p.strip()]
+            if parts:
+                raw_genre_items.extend(parts)
         
         # Normalize genres (same mapping as metadata_options)
         genre_mapping = {
@@ -38,7 +67,7 @@ def get_genres_and_languages(min_count=0):
         }
         
         normalized_genres = set()
-        for genre in raw_genres:
+        for genre in raw_genre_items:
             normalized = genre_mapping.get(genre, genre)
             normalized_genres.add(normalized)
         

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import config from "../config.json";
 import { api } from "../hooks/useApi";
 
 interface FusionSettings {
@@ -173,6 +174,24 @@ export default function Settings() {
             ⚙️ Settings
           </h1>
           <p className="text-white/70 text-lg">Manage your WatchBuddy configuration</p>
+          <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 border border-white/20 text-white/70 text-xs">
+            <span className="opacity-80">Version</span>
+            <span className="font-mono text-white">v{config.version}</span>
+          </div>
+          {/* Project links */}
+          <div className="mt-4 flex items-center justify-center gap-3">
+            <a
+              href={config.github_url}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white/10 border border-white/20 text-white hover:bg-white/15 transition"
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M12 2C6.477 2 2 6.484 2 12.014c0 4.422 2.865 8.168 6.839 9.489.5.092.682-.218.682-.486 0-.241-.009-.879-.014-1.726-2.782.606-3.369-1.343-3.369-1.343-.454-1.156-1.11-1.464-1.11-1.464-.908-.62.069-.607.069-.607 1.004.071 1.532 1.032 1.532 1.032.892 1.53 2.341 1.088 2.91.833.091-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.269 2.75 1.026A9.564 9.564 0 0 1 12 6.844c.851.004 1.707.115 2.507.337 1.909-1.295 2.748-1.026 2.748-1.026.546 1.378.203 2.397.1 2.65.641.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.31.678.921.678 1.856 0 1.34-.012 2.419-.012 2.748 0 .27.18.582.687.483A10.02 10.02 0 0 0 22 12.014C22 6.484 17.523 2 12 2z" />
+              </svg>
+              <span>GitHub</span>
+            </a>
+          </div>
         </div>
 
         <div className="space-y-6">
@@ -336,6 +355,127 @@ export default function Settings() {
                 </div>
               </div>
             )}
+          </div>
+
+          {/* Maintenance Card */}
+          <div className="bg-white/10 backdrop-blur-lg rounded-3xl shadow-2xl border border-white/20 p-8">
+            <div className="flex items-center gap-4 mb-6">
+              <div className="w-14 h-14 bg-gradient-to-tr from-purple-500 via-indigo-500 to-blue-500 rounded-2xl flex items-center justify-center shadow-lg">
+                <svg className="w-7 h-7 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+              </div>
+              <div>
+                <h2 className="text-2xl font-bold text-white">Index Maintenance</h2>
+                <p className="text-white/60">Manage search indexes for optimal performance</p>
+              </div>
+            </div>
+
+            <div className="space-y-6">
+              {/* FAISS Index Section */}
+              <div className="bg-white/5 backdrop-blur-sm rounded-2xl p-6 border border-white/10">
+                <div className="flex items-start justify-between mb-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">🧠 FAISS HNSW Semantic Search</h3>
+                    <p className="text-sm text-white/60">Vector embeddings for AI recommendations (Optimized HNSW algorithm)</p>
+                  </div>
+                </div>
+                
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/10">
+                    <div className="text-sm text-white/80">
+                      <span className="font-medium">Status:</span> <span className="text-green-400">● Ready</span>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={async () => {
+                      setSaving("faiss");
+                      try {
+                        const response = await fetch("/api/maintenance/rebuild-faiss", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" }
+                        });
+                        if (response.ok) {
+                          alert("✅ FAISS HNSW index update queued. New embeddings will be added incrementally (typically 10-30 seconds).");
+                        } else {
+                          alert("❌ Failed to queue FAISS update.");
+                        }
+                      } catch (error) {
+                        console.error("Error rebuilding FAISS:", error);
+                        alert("❌ Error queuing FAISS update.");
+                      } finally {
+                        setSaving(null);
+                      }
+                    }}
+                    disabled={saving === "faiss"}
+                    className="w-full min-h-[44px] bg-gradient-to-r from-purple-500 via-indigo-500 to-blue-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {saving === "faiss" ? "⏳ Queueing..." : "🔄 Update FAISS Index"}
+                  </button>
+                  
+                  <p className="text-xs text-white/50">
+                    💡 Update this index to incorporate new embeddings. HNSW supports fast incremental adds without full rebuilds.
+                  </p>
+                </div>
+              </div>
+
+              {/* Elasticsearch Index Section */}
+              {/* Elasticsearch Index Section */}
+              <div className="bg-white/5 backdrop-blur-sm rounded-2xl p-6 border border-white/10">
+                <div className="flex items-start justify-between mb-4">
+                  <div>
+                    <h3 className="text-lg font-semibold text-white mb-2">🔍 ElasticSearch Full-Text Search</h3>
+                    <p className="text-sm text-white/60">Keyword and fuzzy text search (complements FAISS semantic search)</p>
+                  </div>
+                </div>
+                
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between p-4 bg-white/5 rounded-xl border border-white/10">
+                    <div className="text-sm text-white/80">
+                      <span className="font-medium">Status:</span> <span className="text-green-400">● Ready</span>
+                    </div>
+                  </div>
+                  
+                  <button
+                    onClick={async () => {
+                      setSaving("elasticsearch");
+                      try {
+                        const response = await fetch("/api/maintenance/rebuild-elasticsearch", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" }
+                        });
+                        if (response.ok) {
+                          alert("✅ ElasticSearch index update queued. Will add new items incrementally (typically 1-5 minutes).");
+                        } else {
+                          alert("❌ Failed to queue ElasticSearch update.");
+                        }
+                      } catch (error) {
+                        console.error("Error rebuilding Elasticsearch:", error);
+                        alert("❌ Error queuing ElasticSearch update.");
+                      } finally {
+                        setSaving(null);
+                      }
+                    }}
+                    disabled={saving === "elasticsearch"}
+                    className="w-full min-h-[44px] bg-gradient-to-r from-purple-500 via-indigo-500 to-blue-500 text-white px-6 py-3 rounded-xl font-semibold hover:shadow-xl transition-all duration-200 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {saving === "elasticsearch" ? "⏳ Queueing..." : "🔄 Update ElasticSearch Index"}
+                  </button>
+                  
+                  <p className="text-xs text-white/50">
+                    💡 Update to add new content to text search. Intelligently updates only new items if index exists.
+                  </p>
+                </div>
+              </div>
+              
+              <div className="bg-yellow-500/10 backdrop-blur-sm rounded-2xl p-4 border border-yellow-400/20">
+                <p className="text-sm text-yellow-200">
+                  ⚠️ <strong>Note:</strong> Index updates run in the background. You can continue using WatchBuddy while they process.
+                </p>
+              </div>
+            </div>
           </div>
 
           {/* Timezone Settings Card */}

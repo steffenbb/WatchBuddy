@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import Header from "./components/Header";
+import Layout from "./components/Layout/Layout";
 import Dashboard from "./components/Dashboard";
 import SetupScreen from "./components/SetupScreen";
 import HelpPage from "./components/HelpPage";
@@ -87,7 +88,7 @@ export default function App() {
   if (showHelp) {
     return (
       <ToastProvider>
-        <div className="min-h-screen bg-gradient-to-br from-fuchsia-100 via-indigo-50 to-blue-100">
+        <div className="min-h-screen bg-gradient-to-br from-indigo-950 via-purple-950 to-fuchsia-950">
           <Header onLogoClick={() => { window.location.hash = ""; setShowHelp(false); }} />
           <main className="container mx-auto px-4 py-4 max-w-7xl">
             <HelpPage />
@@ -99,12 +100,9 @@ export default function App() {
 
   return (
     <ToastProvider>
-      <div className="min-h-screen bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900">
-        <Header onLogoClick={onNavigateHome || undefined} />
-        <main className="container mx-auto px-4 py-4 max-w-7xl">
-          <Dashboard onRegisterNavigateHome={setOnNavigateHome} />
-        </main>
-      </div>
+      <Layout onLogoClick={onNavigateHome || undefined}>
+        <Dashboard onRegisterNavigateHome={setOnNavigateHome} />
+      </Layout>
     </ToastProvider>
   );
 }

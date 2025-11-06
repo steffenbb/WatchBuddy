@@ -321,14 +321,22 @@ class ScoringEngine:
                 item_limit,
                 semantic_anchor=semantic_anchor,
                 list_type=list_type,
-                filters=filters or {}
+                filters=filters
             )
+        elif list_type == 'discovery_overview':
+            # Use discovery-focused scoring that doesn't penalize lack of watch history
+            return self._score_discovery_overview(user, top_k, explore_factor, item_limit)
         else:
-            # Fallback to traditional for custom/suggested
+            # Use traditional scoring for regular/custom/suggested lists
             return self._score_traditional(user, top_k, explore_factor, item_limit)
 
     def _score_traditional(self, user, candidates: list, explore_factor: float, item_limit: int) -> list:
         """Traditional scoring for regular lists - simple, fast, reliable."""
+        logger.info(f"[ScoringEngine._score_traditional] Received {len(candidates)} candidates")
+        if candidates:
+            logger.info(f"[ScoringEngine._score_traditional] Sample candidate keys: {list(candidates[0].keys())}")
+            logger.info(f"[ScoringEngine._score_traditional] Sample candidate title: {candidates[0].get('title', 'NO_TITLE')}")
+        
         # Get user ratings once for all candidates
         user_id = user.get("id") if isinstance(user, dict) else None
         user_ratings = self._get_user_ratings(user_id) if user_id else {}
@@ -368,11 +376,13 @@ class ScoringEngine:
         # Apply diversity-aware selection (MMR algorithm) for traditional lists too
         result = self._select_diverse_items(candidates, item_limit, diversity_lambda=0.7)
         
+        # Preserve all original candidate fields and add scoring metadata
         return [
             {
-                'trakt_id': c.get('ids', {}).get('trakt'),
-                'tmdb_id': c.get('ids', {}).get('tmdb'),
-                'media_type': c.get('type'),
+                **c,  # Spread original candidate dict to preserve all fields
+                'trakt_id': c.get('ids', {}).get('trakt') or c.get('trakt_id'),
+                'tmdb_id': c.get('ids', {}).get('tmdb') or c.get('tmdb_id'),
+                'media_type': c.get('type') or c.get('media_type'),
                 'final_score': c['final_score'],
                 'explanation_text': c['explanation_text'],
                 'explanation_meta': c['explanation_meta'],
@@ -384,6 +394,91 @@ class ScoringEngine:
                     'novelty': c.get('novelty', 0.0),
                     'popularity_norm': c.get('popularity_norm', 0.0),
                     'fast_score': c.get('fast_score', 0.0),
+                }
+            }
+            for c in result
+        ]
+
+    def _score_discovery_overview(self, user, candidates: list, explore_factor: float, item_limit: int) -> list:
+        """
+        Discovery-focused scoring for overview modules (NewShows, Trending, Upcoming).
+        Uses TMDB quality signals and pre-computed scores instead of requiring watch history.
+        Optimized for users with minimal/no history or for general discovery.
+        """
+        logger.info(f"[ScoringEngine._score_discovery_overview] Scoring {len(candidates)} candidates")
+        
+        # Get user ratings for influence (optional enhancement)
+        user_id = user.get("id") if isinstance(user, dict) else None
+        user_ratings = self._get_user_ratings(user_id) if user_id else {}
+        
+        for c in candidates:
+            # Use persistent candidate pre-computed scores if available
+            from_persistent = c.get('_from_persistent_store', False)
+            
+            if from_persistent:
+                # Use pre-computed scores from persistent pool
+                base_obscurity = c.get('obscurity_score', 0.5)
+                base_mainstream = c.get('mainstream_score', 0.5)
+                base_freshness = c.get('freshness_score', 0.5)
+                
+                # Discovery formula optimized for quality + novelty
+                c['final_score'] = (
+                    0.30 * c.get('rating_norm', 0.5) +        # TMDB rating (quality signal)
+                    0.25 * c.get('popularity_norm', 0.3) +    # Popularity (credibility)
+                    0.20 * base_obscurity +                    # Obscurity (discovery value)
+                    0.15 * c.get('genre_overlap', 0.0) +      # Genre match (if available)
+                    0.10 * c.get('user_pref_align', 0.0)      # User prefs (if available)
+                )
+            else:
+                # Fallback to simple quality-based scoring
+                c['novelty'] = 1.0 - c.get('popularity_norm', 0.5)
+                c['final_score'] = (
+                    0.40 * c.get('rating_norm', 0.5) +
+                    0.30 * c.get('popularity_norm', 0.3) +
+                    0.20 * min(c['novelty'], 0.6) +
+                    0.10 * c.get('genre_overlap', 0.0)
+                )
+            
+            # Apply user rating influence (strong signal if available)
+            trakt_id = c.get('ids', {}).get('trakt') if isinstance(c.get('ids'), dict) else c.get('trakt_id')
+            if trakt_id and trakt_id in user_ratings:
+                user_rating = user_ratings[trakt_id]
+                if user_rating == 1:  # Thumbs up
+                    c['final_score'] *= 1.4
+                elif user_rating == -1:  # Thumbs down
+                    c['final_score'] *= 0.2
+            
+            # Explanation
+            c['explanation_meta'] = {
+                'similarity_score': c.get('rating_norm', 0),
+                'genre_overlap': [],
+                'novelty_score': c.get('obscurity_score', 0),
+                'top_history_matches': [],
+                'scoring_type': 'discovery_overview'
+            }
+            c['explanation_text'] = f"Discovery scoring based on quality and popularity"
+
+        # Apply diversity-aware selection
+        result = self._select_diverse_items(candidates, item_limit, diversity_lambda=0.6)
+        
+        # Return formatted results
+        return [
+            {
+                **c,  # Preserve all fields
+                'trakt_id': c.get('ids', {}).get('trakt') or c.get('trakt_id'),
+                'tmdb_id': c.get('ids', {}).get('tmdb') or c.get('tmdb_id'),
+                'media_type': c.get('type') or c.get('media_type'),
+                'final_score': c['final_score'],
+                'explanation_text': c['explanation_text'],
+                'explanation_meta': c['explanation_meta'],
+                'components': {
+                    'genre_overlap': c.get('genre_overlap', 0.0),
+                    'semantic_sim': 0.0,
+                    'mood_score': 0.0,
+                    'rating_norm': c.get('rating_norm', 0.0),
+                    'novelty': c.get('obscurity_score', 0.0),
+                    'popularity_norm': c.get('popularity_norm', 0.0),
+                    'fast_score': c.get('final_score', 0.0),  # Use final as fast for discovery
                 }
             }
             for c in result
@@ -483,11 +578,14 @@ class ScoringEngine:
         result = self._select_diverse_items(candidates, item_limit, diversity_lambda=0.6)
         # Memory cleanup (explicit)
         del vectorizer; del tfidf_matrix; import gc; gc.collect()
+        
+        # Preserve all original candidate fields and add scoring metadata
         return [
             {
-                'trakt_id': c.get('ids', {}).get('trakt'),
-                'tmdb_id': c.get('ids', {}).get('tmdb'),
-                'media_type': c.get('type'),
+                **c,  # Spread original candidate dict to preserve all fields
+                'trakt_id': c.get('ids', {}).get('trakt') or c.get('trakt_id'),
+                'tmdb_id': c.get('ids', {}).get('tmdb') or c.get('tmdb_id'),
+                'media_type': c.get('type') or c.get('media_type'),
                 'final_score': c['final_score'],
                 'explanation_text': c['explanation_text'],
                 'explanation_meta': c['explanation_meta'],

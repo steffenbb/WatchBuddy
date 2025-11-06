@@ -104,6 +104,7 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                     continue
                 title = item.get('title') or item.get('name')
                 if not title:
+                    logger.debug(f"Skipping TMDB {tmdb_id}: missing title")
                     continue
                 
                 # Build or update existing record
@@ -120,7 +121,7 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                         existing.last_refreshed = dt.datetime.utcnow()
                         existing.compute_scores()
                 else:
-                    # Fetch comprehensive metadata for new items
+                    # Fetch comprehensive metadata for new items (includes cast, keywords, etc.)
                     tmdb_metadata = None
                     enriched_fields = {}
                     try:
@@ -128,8 +129,11 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
                         tmdb_metadata = await fetch_tmdb_metadata(tmdb_id, 'movie' if media_type=='movies' else 'tv')
                         if tmdb_metadata:
                             enriched_fields = extract_enriched_fields(tmdb_metadata, 'movie' if media_type=='movies' else 'show')
+                            logger.debug(f"Enriched TMDB {tmdb_id} with cast/keywords/production details")
+                        else:
+                            logger.warning(f"TMDB {tmdb_id} returned null metadata - persisting with basic fields only")
                     except Exception as e:
-                        logger.debug(f"Failed to fetch enriched metadata for {tmdb_id}: {e}")
+                        logger.warning(f"Failed to fetch enriched metadata for {tmdb_id}: {e}")
                     
                     pc = PersistentCandidate(
                         tmdb_id=tmdb_id,
@@ -177,6 +181,31 @@ async def ingest_new_content(media_type: str = 'movies', pages: int = 5, per_pag
         
         # Update worker status to completed
         _update_worker_status(media_type, "completed", items_processed=inserted)
+        
+        # If we added new items, trigger follow-up metadata enrichment and embedding generation
+        if inserted > 0:
+            try:
+                # Queue Trakt ID population for new candidates (asynchronous)
+                from app.services.metadata_builder import MetadataBuilder
+                builder = MetadataBuilder()
+                # Only process new candidates without trakt_id
+                asyncio.create_task(builder.build_trakt_ids(SessionLocal(), user_id=1, force=False))
+                logger.info(f"Queued Trakt ID population for {inserted} new {media_type}")
+                
+                # Queue embedding generation for new candidates after Trakt IDs populate
+                # This generates embeddings ONLY for new items without embeddings and adds to FAISS
+                async def generate_embeddings_for_new_candidates():
+                    await asyncio.sleep(300)  # Wait 5 minutes for Trakt IDs to populate
+                    try:
+                        from app.tasks_ai import generate_embeddings_for_new_items
+                        generate_embeddings_for_new_items.delay()
+                        logger.info("Queued embedding generation for new candidates")
+                    except Exception as e:
+                        logger.warning(f"Failed to queue embedding generation: {e}")
+                
+                asyncio.create_task(generate_embeddings_for_new_candidates())
+            except Exception as e:
+                logger.warning(f"Failed to queue metadata enrichment: {e}")
         
         # Send completion notification
         from app.api.notifications import send_notification
@@ -299,7 +328,7 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
         prev_page = cur["page"]
         prev_letter = cur["letter_index"]
         cur["page"] += 1
-        if cur["page"] > 500:  # increased from 50 for better coverage
+        if cur["page"] > 1000:  # increased from 50 for better coverage
             cur["page"] = 1
             cur["letter_index"] = (cur["letter_index"] + 1) % len(letters)
             logger.debug(f"Cursor advanced to next letter: {letters[cur['letter_index']]} (from {letters[prev_letter]}), page reset to 1")
@@ -366,6 +395,10 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
                     trakt_id = None
 
                 title = item.get('title') or item.get('name') or ""
+                if not title:
+                    logger.debug(f"Skipping TMDB {tmdb_id}: missing title")
+                    continue
+                
                 year = None
                 rd = item.get('release_date') or item.get('first_air_date')
                 if rd:
@@ -373,6 +406,20 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
                         year = int(rd[:4])
                     except Exception:
                         year = None
+                
+                # Fetch comprehensive metadata for new items (includes cast, keywords, production)
+                tmdb_metadata = None
+                enriched_fields = {}
+                try:
+                    from app.services.tmdb_client import fetch_tmdb_metadata, extract_enriched_fields
+                    tmdb_metadata = await fetch_tmdb_metadata(tmdb_id, 'movie' if tmdb_type == 'movie' else 'tv')
+                    if tmdb_metadata:
+                        enriched_fields = extract_enriched_fields(tmdb_metadata, 'movie' if tmdb_type == 'movie' else 'show')
+                        logger.debug(f"Enriched search result TMDB {tmdb_id} with cast/keywords")
+                    else:
+                        logger.debug(f"TMDB {tmdb_id} returned null metadata via search")
+                except Exception as e:
+                    logger.debug(f"Failed to fetch enriched metadata for search item {tmdb_id}: {e}")
 
                 pc = PersistentCandidate(
                     tmdb_id=tmdb_id,
@@ -389,7 +436,9 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
                     overview=item.get('overview'),
                     poster_path=item.get('poster_path'),
                     backdrop_path=item.get('backdrop_path'),
-                    manual=False
+                    manual=False,
+                    # Add enriched fields if available
+                    **enriched_fields
                 )
                 pc.compute_scores()
                 new_objs.append(pc)
@@ -426,5 +475,183 @@ async def ingest_via_search_multi(media_type: str = 'movies', duration_minutes: 
         db.rollback()
         _update_worker_status(media_type, "error", error=str(e), items_processed=inserted)
         return inserted
+    finally:
+        db.close()
+
+
+async def ingest_specific_tmdb_ids(
+    tmdb_ids: List[int],
+    media_type: str = 'movies',
+    source_label: str = 'trending',
+    skip_recent_days: int = 7,
+) -> dict:
+    """
+    Ingest specific TMDB IDs (for trending/upcoming lists).
+    
+    Used by Overview feature to ingest targeted content from TMDB trending/upcoming.
+    Also attempts Trakt ID mapping for each item.
+    
+    Args:
+        tmdb_ids: List of TMDB IDs to ingest
+        media_type: 'movies' or 'shows'
+        source_label: Label for tracking (e.g., 'trending', 'upcoming')
+        
+    Returns:
+        {
+            'total': int,
+            'inserted': int,
+            'updated': int,
+            'trakt_mapped': int,
+            'failed': int
+        }
+    """
+    assert media_type in ('movies', 'shows')
+    
+    db: Session = SessionLocal()
+    stats = {
+        'total': len(tmdb_ids),
+        'inserted': 0,
+        'updated': 0,
+        'trakt_mapped': 0,
+        'failed': 0
+    }
+    
+    logger.info(f"[TargetedIngestion] Starting ingestion of {len(tmdb_ids)} {media_type} TMDB IDs ({source_label})")
+    
+    try:
+        trakt_client = TraktClient(user_id=1)  # Use default user
+        
+        for tmdb_id in tmdb_ids:
+            try:
+                # Fetch metadata from TMDB (normalize media_type to 'movie' or 'tv')
+                tmdb_media_type = 'movie' if media_type == 'movies' else 'tv'
+                metadata = await fetch_tmdb_metadata(tmdb_id, tmdb_media_type)
+                
+                if not metadata:
+                    logger.debug(f"[TargetedIngestion] No metadata found for {media_type} TMDB ID {tmdb_id}")
+                    stats['failed'] += 1
+                    continue
+                
+                # Extract fields
+                title = metadata.get('title') or metadata.get('name', f'Unknown {media_type}')
+                year = None
+                release_date = metadata.get('release_date') or metadata.get('first_air_date')
+                if release_date and len(release_date) >= 4:
+                    year = int(release_date[:4])
+                
+                # Attempt Trakt mapping
+                trakt_id = None
+                try:
+                    search_results = await trakt_client.search_by_tmdb_id(tmdb_id, media_type='movie' if media_type == 'movies' else 'show')
+                    if search_results and len(search_results) > 0:
+                        first_result = search_results[0]
+                        item_data = first_result.get('movie') or first_result.get('show')
+                        if item_data:
+                            trakt_id = item_data.get('ids', {}).get('trakt')
+                            if trakt_id:
+                                stats['trakt_mapped'] += 1
+                                logger.debug(f"[TargetedIngestion] Mapped TMDB {tmdb_id} → Trakt {trakt_id}")
+                except Exception as e:
+                    logger.debug(f"[TargetedIngestion] Trakt mapping failed for {tmdb_id}: {e}")
+                
+                # Extract enriched fields (cast, keywords, etc.)
+                from app.services.tmdb_client import extract_enriched_fields
+                enriched_fields = extract_enriched_fields(metadata, tmdb_media_type)
+                
+                # Check if exists
+                existing = db.query(PersistentCandidate).filter_by(
+                    tmdb_id=tmdb_id,
+                    media_type='movie' if media_type == 'movies' else 'show'
+                ).first()
+                
+                if existing:
+                    # Determine if fresh (<= 7 days since last_refreshed)
+                    try:
+                        now = dt.datetime.utcnow()
+                        last_refresh = existing.last_refreshed
+                        is_fresh = bool(last_refresh) and (now - last_refresh).days <= max(0, int(skip_recent_days))
+                    except Exception:
+                        is_fresh = False
+
+                    # Always backfill missing trakt_id if available
+                    if trakt_id and not existing.trakt_id:
+                        existing.trakt_id = trakt_id
+
+                    if is_fresh:
+                        logger.debug(f"[TargetedIngestion] Skipping update for tmdb {tmdb_id} ({existing.media_type}) - refreshed within 7 days")
+                    else:
+                        # Update existing entry with all fields
+                        existing.vote_average = metadata.get('vote_average', existing.vote_average)
+                        existing.vote_count = metadata.get('vote_count', existing.vote_count)
+                        existing.popularity = metadata.get('popularity', existing.popularity)
+                        existing.overview = metadata.get('overview', existing.overview)
+                        existing.poster_path = metadata.get('poster_path', existing.poster_path)
+                        existing.backdrop_path = metadata.get('backdrop_path', existing.backdrop_path)
+
+                        # Update enriched fields
+                        for field_name, field_value in enriched_fields.items():
+                            if hasattr(existing, field_name) and field_value is not None:
+                                setattr(existing, field_name, field_value)
+
+                        existing.compute_scores()
+                        stats['updated'] += 1
+                else:
+                    # Insert new entry with all enriched fields
+                    genres = '|'.join([g.get('name', '') for g in metadata.get('genres', [])])
+                    runtime = metadata.get('runtime')
+                    if not runtime and media_type == 'shows':
+                        episode_runtimes = metadata.get('episode_run_time', [])
+                        runtime = episode_runtimes[0] if episode_runtimes else None
+                    # Avoid duplicate kwargs: enriched_fields may include 'runtime' and 'genres'
+                    if 'runtime' in enriched_fields:
+                        enriched_fields.pop('runtime', None)
+                    if 'genres' in enriched_fields:
+                        enriched_fields.pop('genres', None)
+                    
+                    pc = PersistentCandidate(
+                        tmdb_id=tmdb_id,
+                        trakt_id=trakt_id,
+                        media_type='movie' if media_type == 'movies' else 'show',
+                        title=title,
+                        year=year,
+                        release_date=release_date,
+                        language=(metadata.get('original_language') or '').lower(),
+                        popularity=metadata.get('popularity', 0.0),
+                        vote_average=metadata.get('vote_average', 0.0),
+                        vote_count=metadata.get('vote_count', 0),
+                        overview=metadata.get('overview'),
+                        poster_path=metadata.get('poster_path'),
+                        backdrop_path=metadata.get('backdrop_path'),
+                        genres=genres,
+                        runtime=runtime,
+                        manual=False,
+                        **enriched_fields  # Add all enriched fields (cast, keywords, etc.)
+                    )
+                    pc.compute_scores()
+                    db.add(pc)
+                    stats['inserted'] += 1
+                
+                # Commit every 50 items
+                if (stats['inserted'] + stats['updated']) % 50 == 0:
+                    db.commit()
+                    logger.debug(f"[TargetedIngestion] Progress: {stats}")
+                
+                # Rate limiting: 40 req/10s for TMDB
+                await asyncio.sleep(0.25)  # ~4 req/s = safe margin
+                
+            except Exception as e:
+                logger.warning(f"[TargetedIngestion] Failed to ingest TMDB ID {tmdb_id}: {e}")
+                stats['failed'] += 1
+        
+        # Final commit
+        db.commit()
+        
+        logger.info(f"[TargetedIngestion] ✅ Completed {source_label} ingestion: {stats}")
+        return stats
+        
+    except Exception as e:
+        logger.error(f"[TargetedIngestion] Batch ingestion failed: {e}", exc_info=True)
+        db.rollback()
+        raise
     finally:
         db.close()

@@ -69,111 +69,133 @@ Natural language prompts powered by smart parsing - just describe what you want!
 **Chat Features:**
 - Natural language understanding (no complex syntax needed)
 - Automatic mainstream bias for quality results
-- Smart defaults for missing parameters
-- Supports all filters: genre, mood, year, language, obscurity, media type
-- Semantic similarity to reference titles
 
-### Other SmartList Features
-- **Dynamic Titles**: Netflix-style personalized titles like "Fans of Inception Also Enjoyed"
-- **Watched Status Sync**: Automatically marks watched items from your Trakt history
-- **Trakt Integration**: Two-way sync with your Trakt lists
-- **Cooldown Management**: Smart sync timing prevents API rate limits
+# WatchBuddy
 
-### 🌍 Content Discovery
-- **~1.47 Million Pre-Loaded Titles**: Instant recommendations from TMDB CSV datasets (~1.3M movies + 165K shows)
-- **Multi-Language Support**: Discover content in 20+ languages with smart fallback
-- **Ultra Discovery Mode**: Find hidden gems and obscure titles
-- **Genre Blending**: Mix multiple genres for unique recommendations
-
-### ⚡ Zero-Config Setup
-- **Docker-First Architecture**: One command to start everything
-- **Auto-Init Database**: Pre-populates ~1.47M candidates on first startup
-- **Persistent Storage**: All data survives container restarts
-- **Background Tasks**: Celery workers handle syncs and updates automatically
+## Project Overview
+WatchBuddy is a technical movie and TV recommendation system built for developers and power users. It features a persistent database of 20,000+ movies and shows, advanced filtering, and multiple list types for different workflows. The backend uses FastAPI, PostgreSQL, Redis, and Celery; the frontend is React + Vite + Tailwind CSS.
 
 ---
 
-## 🚀 Installation
+## List Types
 
-### Prerequisites
-- [Docker](https://www.docker.com/get-started) (with Docker Compose)
-- [Trakt](https://trakt.tv) account (free)
-- [TMDB API Key](https://www.themoviedb.org/settings/api) (free)
+### Manual & Suggested Lists
+**Manual Lists:**
+- Directly add or remove items to build custom lists for yourself or groups.
+- Great for personal curation, watch parties, or collaborative planning.
 
-### Quick Start
+**Suggested Lists:**
+- Automatically generated based on your preferences, watch history, or predefined rules.
+- Useful for onboarding, quick recommendations, or exploring new content.
 
-```bash
-# Clone the repository
-git clone https://github.com/steffenbb/WatchBuddy.git
-cd watchbuddy
+**Screenshot Placeholder:**
+<!-- Insert screenshot of Manual/Suggested Lists UI here -->
 
-# Start all services
-docker compose up -d
+---
 
-# Wait ~2 minutes for database initialization (first run only)
-# Then open your browser to http://localhost:5173
-```
+### AI Lists (Theme, Mood, Fusion, Chat)
+**Theme Lists:**
+- AI-generated lists based on genres, themes, or keywords (e.g., "Nordic Noir", "Feel-Good Comedy").
 
-That's it! WatchBuddy will automatically:
-- ✅ Create the database
-- ✅ Load ~1.47 million titles (~1.3M movies + 165K shows)
-- ✅ Start the API, frontend, Redis, and background workers
-- ✅ Initialize all required services
+**Mood Lists:**
+- Recommendations tailored to your mood (e.g., "Relaxing", "Intense", "Uplifting").
 
-### Alternative Installation (no git clone)
+**Fusion Lists:**
+- Combine multiple filters: genre, mood, year, language, networks, countries, creators, directors.
+- Highly customizable for technical users.
 
-Want to run WatchBuddy without cloning the repo? You can use Docker Compose directly:
+**Chat Lists:**
+- Build lists interactively via chat prompts and natural language queries.
+- Uses semantic search and TF-IDF for deep matching.
 
-Steps (Windows PowerShell):
+**Screenshot Placeholder:**
+<!-- Insert screenshot of AI Lists UI here -->
 
-```powershell
-# 1) Create a folder (optional) and enter it
-New-Item -ItemType Directory -Force .\watchbuddy | Out-Null; Set-Location .\watchbuddy
+---
 
-# 2) Download the compose file into this folder
-Invoke-WebRequest -UseBasicParsing \
-    -Uri https://raw.githubusercontent.com/steffenbb/WatchBuddy/main/docker-compose.yml \
-    -OutFile docker-compose.yml
+### Individual Lists
+**Individual Lists:**
+- Track single items or create lists for individual users.
+- Supports custom scoring, granular control, and export to Trakt.
 
-# 3) Pull the required images
-docker compose pull
+**Screenshot Placeholder:**
+<!-- Insert screenshot of Individual Lists UI here -->
 
-# 4) Start the stack in the background
-docker compose up -d
+---
 
-# 5) Open the app (after ~2 minutes on first run)
-# http://localhost:5173
-```
+## Technical Architecture
 
-Handy commands:
+### Persistent Candidate Pool
+- Database table pre-populated with **20,000+ movies and shows** from TMDB CSVs.
+- Enables fast list generation and filtering without external API calls.
+- Advanced SQL filtering: genres, languages, media types, years, networks, countries, creators, directors.
 
-```powershell
-# Update to latest images and restart
-docker compose pull; docker compose up -d
+### Filtering & Scoring Engine
+- Multi-factor scoring: blends persistent scores (obscurity, mainstream, freshness) with mood vectors and semantic matching.
+- Uses scikit-learn (TF-IDF, cosine similarity) for semantic search.
+- Managed memory contexts for efficient batch scoring and garbage collection.
+- All filters are optional and can be combined for precise recommendations.
 
-# Check status and recent logs
-docker compose ps
-docker logs --tail 100 watchbuddy-backend-1
-docker logs --tail 100 watchbuddy-frontend-1
+### AI Functions
+- Theme/mood/fusion/chat lists use semantic search, mood vectors, and technical filters.
+- SQL WHERE clauses support all major fields, including networks, countries, creators, directors.
+- Managed memory context ensures efficient resource usage for large batch operations.
 
-# Stop the stack (keep data)
-docker compose down
+### Trakt Export Integration
+- Sync any list to Trakt using TraktClient and TraktIdResolver.
+- Resolves missing Trakt IDs from TMDB IDs automatically.
+- Supports batch export for AI, manual, and individual lists.
+- Handles Trakt API rate limits and token refresh transparently.
 
-# Reset everything (DESTRUCTIVE)
-docker compose down -v
-```
+---
 
-Notes:
-- First startup seeds the database and may take a few minutes depending on your machine.
-- Data is persisted in Docker volumes (PostgreSQL, Redis). Removing volumes resets the app.
-- Configure Trakt OAuth and TMDB API key from the in-app Settings once the UI is up.
+## Usage Guide
 
-### First-Time Setup
+### Creating and Managing Lists
+- Use the frontend UI or API endpoints to create, sync, and manage lists.
+- Manual lists: Add/remove items directly.
+- Suggested lists: Trigger sync for auto-population.
+- AI lists: Use chat prompts or select filters for generation.
+- Individual lists: Track single items or export to Trakt.
 
-1. **Open WatchBuddy**: Navigate to http://localhost:5173
-2. **Connect Trakt**: 
-    - Go to Settings → Trakt Authentication
-    - Click "Authorize with Trakt" and complete OAuth flow
+### API Endpoints
+- `/api/smartlists/create` – Create a new list
+- `/api/smartlists/sync/{id}` – Sync a list (supports `force_full`)
+- `/api/notifications/stream` – Real-time notifications via SSE
+- `/api/trakt/export` – Export list to Trakt
+
+---
+
+## Screenshots
+- **Manual/Suggested Lists:** <!-- Insert screenshot here -->
+- **AI Lists:** <!-- Insert screenshot here -->
+- **Individual Lists:** <!-- Insert screenshot here -->
+
+---
+
+## Development & Deployment
+- Zero-config Docker setup: `docker compose build backend; docker compose up -d backend`
+- Persistent PostgreSQL and Redis volumes
+- Celery for background tasks and periodic updates
+- CSV bootstrap for initial candidate pool
+- All secrets stored in Redis (no .env files)
+- See `.github/copilot-instructions.md` for advanced workflows and debugging
+
+---
+
+## Contributing
+- Fork the repo and submit pull requests for new features or bug fixes.
+- Please ensure all new code is covered by unit and integration tests.
+
+---
+
+## License
+MIT License
+
+---
+
+## Version
+November 2025
 3. **Add TMDB API Key**:
     - Get free API key from [TMDB](https://www.themoviedb.org/settings/api)
     - Go to Settings → TMDB API Key and save it

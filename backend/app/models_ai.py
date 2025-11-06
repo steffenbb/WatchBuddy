@@ -22,6 +22,7 @@ class AiList(Base):
     generated_theme = Column(String, nullable=True)
     item_limit = Column(Integer, default=50)
     trakt_list_id = Column(String, nullable=True)
+    poster_path = Column(String(500), nullable=True)
     status = Column(String, default="queued")
     last_synced_at = Column(DateTime(timezone=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

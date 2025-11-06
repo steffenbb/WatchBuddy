@@ -22,7 +22,14 @@ def main():
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     db = SessionLocal()
     try:
-        total = db.query(PersistentCandidate).filter(PersistentCandidate.trakt_id != None, PersistentCandidate.active == True).count()
+        # Use a direct SQL count to avoid ORM model imports
+        total = db.execute(text(
+            """
+            SELECT COUNT(*)
+            FROM persistent_candidates
+            WHERE active=true AND trakt_id IS NOT NULL AND embedding IS NULL
+            """
+        )).scalar() or 0
         logger.info(f"Total persistent_candidates with trakt_id: {total}")
         offset = 0
         while offset < total:

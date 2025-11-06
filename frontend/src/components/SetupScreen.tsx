@@ -24,7 +24,13 @@ const SetupScreen: React.FC<SetupScreenProps> = ({ onTraktConnect }) => {
     clientSecret: '',
     tmdbApiKey: ''
   });
-  const [traktRedirectUri, setTraktRedirectUri] = useState('localhost');
+  const [traktRedirectUri, setTraktRedirectUri] = useState(() => {
+    // Auto-detect current host for redirect URI (never use 'localhost' as it breaks mobile)
+    if (typeof window !== 'undefined') {
+      return window.location.hostname;
+    }
+    return 'localhost';
+  });
   const [hasCredentials, setHasCredentials] = useState(false);
   const [hasTmdbKey, setHasTmdbKey] = useState(false);
   const { addToast } = useToast();

@@ -92,20 +92,26 @@ async def create_list(payload: ListCreate):
         l = crud.create_list(payload)
         logger.info(f"Successfully created list with ID: {l.id}")
         
+        # DEBUG: Log list type explicitly
+        logger.info(f"[TRAKT_DEBUG] List ID {l.id} - list_type='{l.list_type}'")
+        
         # Create corresponding Trakt list for custom/manual lists (SmartLists handle this in their own flow)
         logger.info(f"List type for list {l.id}: '{l.list_type}'")
         if l.list_type in ("custom", "manual"):
             # Attempt to create Trakt list; TraktClient handles token presence and refresh
-            logger.info(f"Attempting to create Trakt list for custom list {l.id}...")
+            logger.info(f"[TRAKT_DEBUG] Attempting to create Trakt list for custom list {l.id}...")
             try:
                 from ..services.trakt_client import TraktClient
                 trakt = TraktClient(user_id=user_id)
+                logger.info(f"[TRAKT_DEBUG] TraktClient initialized, calling create_list...")
                 trakt_result = await trakt.create_list(
                     name=l.title,
                     description=f"Custom list managed by WatchBuddy (ID: {l.id})",
                     privacy="private"
                 )
+                logger.info(f"[TRAKT_DEBUG] Trakt API response: {trakt_result}")
                 trakt_list_id = str(trakt_result.get("ids", {}).get("trakt"))
+                logger.info(f"[TRAKT_DEBUG] Extracted trakt_list_id: {trakt_list_id}")
                 if trakt_list_id and trakt_list_id != "None":
                     logger.info(f"Created Trakt list {trakt_list_id} for custom list {l.id}")
                     # Update the list with the Trakt ID
@@ -157,28 +163,27 @@ async def create_list(payload: ListCreate):
 @router.get("/")
 async def get_lists(user_id: int = 1):
     try:
-        logger.info("Fetching all lists")
         user_timezone = await get_user_timezone(user_id)
         rows = crud.list_all()
-        logger.info(f"Found {len(rows)} lists")
-        out = []
+        
+        # Pre-calculate current time once
         from datetime import datetime, timedelta
         now = datetime.utcnow()
         
+        out = []
         for r in rows:
-            # Calculate cooldown information
+            # Calculate cooldown information efficiently
             cooldown_active = False
             cooldown_remaining_minutes = 0
             next_sync_available = None
             
             if r.last_sync_at:
-                sync_interval_hours = r.sync_interval if r.sync_interval is not None else 0.5  # Default 30 minutes
+                sync_interval_hours = r.sync_interval if r.sync_interval is not None else 0.5
                 hours_since_sync = (now - r.last_sync_at).total_seconds() / 3600
                 
                 if hours_since_sync < sync_interval_hours:
                     cooldown_active = True
-                    cooldown_remaining_seconds = (sync_interval_hours * 3600) - (hours_since_sync * 3600)
-                    cooldown_remaining_minutes = int(cooldown_remaining_seconds / 60)
+                    cooldown_remaining_minutes = int((sync_interval_hours - hours_since_sync) * 60)
                     next_sync_available = format_datetime_in_timezone(
                         r.last_sync_at + timedelta(hours=sync_interval_hours),
                         user_timezone
@@ -187,7 +192,6 @@ async def get_lists(user_id: int = 1):
             out.append({
                 "id": r.id,
                 "title": r.title,
-                # Use timezone-aware timestamp formatting
                 "last_updated": format_datetime_in_timezone(r.last_updated, user_timezone),
                 "list_type": r.list_type,
                 "item_limit": r.item_limit,
@@ -195,15 +199,45 @@ async def get_lists(user_id: int = 1):
                 "sync_interval": r.sync_interval,
                 "last_error": r.last_error,
                 "filters": r.filters,
-                # Cooldown information
+                "poster_path": getattr(r, "poster_path", None),
                 "cooldown_active": cooldown_active,
                 "cooldown_remaining_minutes": cooldown_remaining_minutes,
                 "next_sync_available": next_sync_available
             })
+        
         return out
     except Exception as e:
         logger.error(f"Failed to fetch lists: {e}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch lists: {str(e)}")
+
+@router.get("/{list_id}")
+async def get_list(list_id: int):
+    """Get details of a specific list."""
+    db = SessionLocal()
+    try:
+        from ..models import UserList
+        l = db.query(UserList).filter(UserList.id == list_id).first()
+        if not l:
+            raise HTTPException(status_code=404, detail="List not found")
+        
+        return {
+            "id": l.id,
+            "title": l.title,
+            "list_type": l.list_type,
+            "item_limit": l.item_limit,
+            "exclude_watched": l.exclude_watched,
+            "sync_interval": l.sync_interval,
+            "filters": l.filters,
+            "last_sync_at": l.last_sync_at.isoformat() if l.last_sync_at else None,
+            "created_at": l.created_at.isoformat() if l.created_at else None
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get list: {e}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Failed to get list: {str(e)}")
+    finally:
+        db.close()
 
 @router.patch("/{list_id}")
 async def update_list(list_id: int,
@@ -552,17 +586,25 @@ async def get_list_items(
                 poster_url = meta.poster_path
                 if isinstance(poster_url, str) and not poster_url.startswith('http'):
                     poster_url = f"https://image.tmdb.org/t/p/w342{poster_url}"
+            # Include year if available from metadata for client-side sorting
+            year = None
+            try:
+                year = meta.year if meta else None
+            except Exception:
+                year = None
             response_items.append({
                 "id": item.id,
                 "trakt_id": item.trakt_id,
                 "media_type": item.media_type,
                 "score": item.score,
                 "is_watched": item.is_watched,
+                "watched": item.is_watched,  # alias for frontend compatibility
                 "watched_at": item.watched_at.isoformat() if item.watched_at else None,
                 "added_at": item.added_at.isoformat(),
                 "explanation": item.explanation,
                 "title": title,
-                "poster_url": poster_url
+                "poster_url": poster_url,
+                "year": year,
             })
         
         return {

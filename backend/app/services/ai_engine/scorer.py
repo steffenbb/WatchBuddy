@@ -167,8 +167,26 @@ def _passes_filters(c: Dict[str, Any], filters: Dict[str, Any]) -> bool:
     # Numeric comparators as strict thresholds
     if not _compare_numeric(c.get("vote_average"), filters.get("rating_cmp")):
         return False
-    if not _compare_numeric(c.get("vote_count"), filters.get("votes_cmp")):
-        return False
+    # Votes: if explicit comparator provided, enforce it; otherwise apply sensible defaults
+    if filters.get("votes_cmp") is not None:
+        if not _compare_numeric(c.get("vote_count"), filters.get("votes_cmp")):
+            return False
+    else:
+        # Default vote_count floor based on discovery/obscurity intent
+        discovery = (filters.get("discovery") or filters.get("obscurity") or "balanced")
+        try:
+            vc = float(c.get("vote_count") or 0)
+        except Exception:
+            vc = 0.0
+        # Map to thresholds
+        if str(discovery) in ("obscure", "obscure_high", "very_obscure"):
+            min_votes = 100.0
+        elif str(discovery) in ("popular", "mainstream"):
+            min_votes = 800.0
+        else:
+            min_votes = 400.0
+        if vc < min_votes:
+            return False
     if not _compare_numeric(c.get("revenue"), filters.get("revenue_cmp")):
         return False
     if not _compare_numeric(c.get("budget"), filters.get("budget_cmp")):
@@ -276,6 +294,14 @@ def score_candidates(
     filtered: List[Tuple[int, Dict[str, Any]]] = [
         (i, c) for i, c in enumerate(candidates) if _passes_filters(c, filters)
     ]
+    try:
+        logger.info(
+            f"[AI_SCORE][filter] list_type={list_type} passed={len(filtered)}/{len(candidates)} "
+            f"discovery={filters.get('discovery') or filters.get('obscurity') or 'balanced'} "
+            f"votes_cmp={filters.get('votes_cmp')}"
+        )
+    except Exception:
+        pass
     if not filtered:
         return []
 
@@ -290,15 +316,31 @@ def score_candidates(
     novelty = 1.0 - pop_norm
 
     # 2) Top-K reduction with quick composite
-    # quick_score = 0.6*genre_overlap (omitted here) + 0.3*pop + 0.1*rating
-    quick_score = 0.3 * pop_norm + 0.1 * rating_norm
-    order = np.argsort(-quick_score)
+    # Include FAISS semantic similarity and watch-history penalty to avoid dropping
+    # highly relevant but less popular items, and down-rank already watched items.
+    faiss_sim_full = np.array([float((c.get("_faiss_score") or 0.0)) for c in cand_subset], dtype=np.float32)
+    # Quick watch penalty: -0.5 for watched items to push them out early
+    watch_penalty_full = np.zeros(len(cand_subset), dtype=np.float32)
+    if watch_history:
+        for i, c in enumerate(cand_subset):
+            try:
+                tid = int(c.get("trakt_id") or 0)
+            except Exception:
+                tid = 0
+            if tid and tid in watch_history:
+                watch_penalty_full[i] = -0.5
+
+    # quick_score balances semantic fit and basic quality
+    quick_score_full = 0.5 * faiss_sim_full + 0.3 * pop_norm + 0.2 * rating_norm + watch_penalty_full
+    order = np.argsort(-quick_score_full)
     keep = order[: min(topk_reduce, len(order))]
     cand_subset = [cand_subset[i] for i in keep]
     texts_subset = [texts_subset[i] for i in keep]
     pop_norm = pop_norm[keep]
     rating_norm = rating_norm[keep]
     novelty = novelty[keep]
+    faiss_sim = faiss_sim_full[keep]
+    watch_penalty = watch_penalty_full[keep]
 
     # 3) TF-IDF similarity
     vectorizer = TfidfVectorizer(max_features=5000)
@@ -307,13 +349,76 @@ def score_candidates(
     del vectorizer
     gc.collect()
 
-    # 4) Embedding cosine similarity
-    semantic_sim = np.zeros_like(tfidf_sim)
+    # 4) Semantic similarity
+    # If FAISS similarity was provided, reuse it to avoid recomputation.
+    use_faiss_semantic = np.any(faiss_sim > 0)
+    if use_faiss_semantic:
+        semantic_sim = faiss_sim.copy()
+        try:
+            logger.info("[AI_SCORE][semantic] Using FAISS pre-computed similarity for scoring")
+        except Exception:
+            pass
+    else:
+        semantic_sim = np.zeros_like(tfidf_sim)
+        if candidate_embeddings is not None and query_embedding is not None:
+            embs = candidate_embeddings[idxs][keep]
+            q = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)
+            embs_norm = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8)
+            semantic_sim = embs_norm.dot(q)
+
+    # 4.1) Topic coherence floor: drop items far from the prompt context
+    # Combine semantic and tf-idf for a stable similarity measure
     if candidate_embeddings is not None and query_embedding is not None:
-        embs = candidate_embeddings[idxs][keep]
-        q = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)
-        embs_norm = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8)
-        semantic_sim = embs_norm.dot(q)
+        topic_sim = 0.6 * semantic_sim + 0.4 * tfidf_sim
+    else:
+        topic_sim = tfidf_sim.copy()
+    # Set conservative floors by list type; relaxed for FAISS-sourced pools
+    if all(bool(c.get("_from_faiss")) for c in cand_subset):
+        # Trust FAISS filtering more; be lenient on lexical TF-IDF mismatch
+        if list_type == "chat":
+            topic_floor = 0.20
+        elif list_type in ("mood", "theme"):
+            topic_floor = 0.18
+        elif list_type == "fusion":
+            topic_floor = 0.20
+        else:
+            topic_floor = 0.16
+    else:
+        if list_type == "chat":
+            topic_floor = 0.26  # tighten to drop off-topic items
+        elif list_type in ("mood", "theme"):
+            topic_floor = 0.22
+        elif list_type == "fusion":
+            topic_floor = 0.24
+        else:
+            topic_floor = 0.18
+    mask = topic_sim >= topic_floor
+    try:
+        logger.info(
+            f"[AI_SCORE][topic] list_type={list_type} before={len(topic_sim)} floor={topic_floor:.2f} kept={int(mask.sum())}"
+        )
+    except Exception:
+        pass
+    # If too few remain, relax floor slightly to avoid empty results
+    if mask.sum() < max(20, int(0.25 * len(topic_sim))):
+        topic_floor *= 0.90
+        mask = topic_sim >= topic_floor
+        try:
+            logger.info(
+                f"[AI_SCORE][topic-relaxed] list_type={list_type} floor={topic_floor:.2f} kept={int(mask.sum())}"
+            )
+        except Exception:
+            pass
+    # Apply mask consistently across arrays
+    if mask.sum() > 0 and mask.sum() < len(topic_sim):
+        # Reduce candidate set to only coherent items
+        cand_subset = [c for i, c in enumerate(cand_subset) if mask[i]]
+        texts_subset = [t for i, t in enumerate(texts_subset) if mask[i]]
+        pop_norm = pop_norm[mask]
+        rating_norm = rating_norm[mask]
+        novelty = novelty[mask]
+        tfidf_sim = tfidf_sim[mask]
+        semantic_sim = semantic_sim[mask]
 
     # 4.5) Genre overlap (Jaccard)
     def parse_genres(s: Any) -> List[str]:
@@ -410,8 +515,8 @@ def score_candidates(
     # This personalizes recommendations based on viewing history
     watch_history_bonus = np.zeros(len(cand_subset), dtype=np.float32)
     if watch_history:
-        import logging
-        logger = logging.getLogger(__name__)
+        # Use module-level logger; avoid redefining `logger` locally which
+        # would shadow the module variable and cause UnboundLocalError elsewhere.
         logger.info(f"Applying watch history personalization with {len(watch_history)} watched items")
         
         for i, c in enumerate(cand_subset):
@@ -451,14 +556,15 @@ def score_candidates(
                     watch_history_bonus[i] = 0.1
 
     # 5) Weighting by list type
-    # For dynamic lists (mood/theme/fusion), use NEGATIVE novelty weight to prefer mainstream content
-    # novelty = 1.0 - popularity, so negative weight means we BOOST popular items
-    # watch_history weight: boost items similar to user's viewing preferences
+    # Adjusted to reduce literal keyword bias (e.g., titles containing "dark") and improve semantic/genre alignment
+    # For dynamic lists (mood/theme/fusion), keep negative novelty to prefer mainstream content a bit
     weights = {
-        "chat": {"sim": 0.25, "semantic": 0.25, "genre": 0.08, "rating": 0.10, "novelty": 0.05, "phrase": 0.05, "actor_studio": 0.08, "recency": 0.05, "watch_history": 0.09, "tone": 0.00},
-        "mood": {"sim": 0.15, "semantic": 0.20, "genre": 0.10, "rating": 0.10, "novelty": -0.15, "phrase": 0.08, "actor_studio": 0.08, "recency": 0.15, "watch_history": 0.09, "tone": 0.01},
-        "theme": {"sim": 0.15, "semantic": 0.20, "genre": 0.10, "rating": 0.10, "novelty": -0.15, "phrase": 0.08, "actor_studio": 0.08, "recency": 0.15, "watch_history": 0.09, "tone": 0.01},
-        "fusion": {"sim": 0.10, "semantic": 0.25, "genre": 0.10, "rating": 0.10, "novelty": -0.15, "phrase": 0.05, "actor_studio": 0.08, "recency": 0.15, "watch_history": 0.12, "tone": 0.01},
+        # Chat: emphasize semantic similarity more; reduce literal phrase weight
+        "chat": {"sim": 0.22, "semantic": 0.35, "genre": 0.12, "rating": 0.10, "novelty": 0.03, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.04, "watch_history": 0.05, "tone": 0.00},
+        # Mood/Theme/Fusion: reduce phrase reliance; increase semantic and genre alignment
+        "mood": {"sim": 0.12, "semantic": 0.28, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.01},
+        "theme": {"sim": 0.12, "semantic": 0.28, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.01},
+        "fusion": {"sim": 0.10, "semantic": 0.30, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.09, "tone": 0.01},
     }.get(list_type, {"sim": 0.25, "semantic": 0.25, "genre": 0.0, "rating": 0.10, "novelty": 0.10, "phrase": 0.10, "actor_studio": 0.08, "recency": 0.05, "watch_history": 0.09, "tone": 0.00})
 
     # Include local user ratings influence
@@ -516,6 +622,40 @@ def score_candidates(
         except Exception as e:
             logger.warning(f"Failed to apply contextual mood adjustments: {e}")
 
+    # 5.1) Mitigate mood keyword bias: penalize items that only match mood words in title but don't align by genres
+    mood_keywords = [str(k).lower() for k in (filters.get("mood") or [])]
+    mood_penalty = np.zeros(len(cand_subset), dtype=np.float32)
+    if list_type in ["mood", "theme", "fusion"] and mood_keywords:
+        # Map moods to target genres to validate alignment
+        mood_genre_map = {
+            "dark": ["thriller", "crime", "horror", "mystery", "drama"],
+            "cozy": ["comedy", "family", "animation", "romance"],
+            "uplifting": ["comedy", "family", "romance"],
+            "serious": ["drama", "history", "biography"],
+            "gritty": ["crime", "drama", "thriller"],
+        }
+        # Build a fast parser for candidate genres
+        def _cand_genres(c):
+            try:
+                import json
+                if isinstance(c.get("genres"), str):
+                    return set(g.strip().lower() for g in (json.loads(c["genres"]) if c["genres"].startswith("[") else c["genres"].split(",")))
+                if isinstance(c.get("genres"), list):
+                    return set(str(g).lower() for g in c["genres"])
+            except Exception:
+                pass
+            return set()
+        for i, c in enumerate(cand_subset):
+            title = (c.get("title") or c.get("original_title") or c.get("name") or "").lower()
+            cg = _cand_genres(c)
+            # If title contains mood word but candidate genres don't align, apply small penalty
+            for mk in mood_keywords:
+                if mk in title:
+                    targets = set(mood_genre_map.get(mk, []))
+                    if targets and not (cg & set(t.lower() for t in targets)):
+                        mood_penalty[i] -= 0.05  # small penalty per offending mood word
+                        break
+
     final = (
         weights["sim"] * tfidf_sim
         + weights["semantic"] * semantic_sim
@@ -528,7 +668,23 @@ def score_candidates(
         + weights["watch_history"] * watch_history_bonus
         + weights.get("tone", 0.0) * tone_bonus
         + mood_time_bonus  # Add time-of-day contextual mood adjustment
+        + mood_penalty     # Apply mood keyword bias mitigation
     )
+    
+    # 5.2) Add slight jitter for dynamic lists to ensure small variation between syncs
+    if list_type in ["mood", "theme", "fusion", "chat"]:
+        rng = np.random.default_rng()
+        final = final + rng.uniform(0.0, 0.01, size=final.shape)
+
+    # 5.3) Normalize final scores to [0.05, 0.98] range for nicer UI scaling while preserving order
+    try:
+        fmin, fmax = float(final.min()), float(final.max())
+        if fmax - fmin > 1e-8:
+            final = 0.05 + 0.93 * ((final - fmin) / (fmax - fmin))
+        else:
+            final = np.full_like(final, 0.5)
+    except Exception:
+        pass
     # Apply per-item multiplicative adjustment for explicit user ratings
     if user_ratings:
         final = final * (1.0 + ratings_boost)

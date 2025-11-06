@@ -49,47 +49,92 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setToasts([]);
   }, []);
 
-  // Connect to SSE for real-time notifications
+  // Connect to SSE for real-time notifications with auto-reconnect
   useEffect(() => {
     const userId = 1; // TODO: Get from auth context
-    const eventSource = new EventSource(`/api/notifications/stream?user_id=${userId}`);
+    let eventSource: EventSource | null = null;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempts = 0;
+    const MAX_RECONNECT_ATTEMPTS = 5;
+    const BASE_RECONNECT_DELAY = 2000; // 2 seconds
     
-    eventSource.onmessage = (event) => {
+    const connect = () => {
+      // Clean up existing connection
+      if (eventSource) {
+        eventSource.close();
+      }
+      
       try {
-        const notification = JSON.parse(event.data);
+        eventSource = new EventSource(`/api/notifications/stream?user_id=${userId}`);
         
-        if (notification.type === 'heartbeat' || notification.type === 'connected') {
-          return; // Ignore heartbeat messages
-        }
+        eventSource.onopen = () => {
+          console.log('[SSE] Connected to notification stream');
+          reconnectAttempts = 0; // Reset on successful connection
+        };
         
-        // Add notification as toast
-        addToast({
-          message: notification.message,
-          type: notification.type || 'info',
-          link: notification.link,
-          duration: 8000 // Longer duration for real-time notifications
-        });
+        eventSource.onmessage = (event) => {
+          try {
+            const notification = JSON.parse(event.data);
+            
+            if (notification.type === 'heartbeat' || notification.type === 'connected') {
+              return; // Ignore heartbeat messages
+            }
+            
+            // Add notification as toast
+            addToast({
+              message: notification.message,
+              type: notification.type || 'info',
+              link: notification.link,
+              duration: 8000 // Longer duration for real-time notifications
+            });
+            
+            // Mark as read if it has an ID
+            if (notification.id) {
+              fetch(`/api/notifications/${notification.id}/read`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ user_id: userId })
+              }).catch(err => console.warn('[SSE] Failed to mark notification as read:', err));
+            }
+          } catch (error) {
+            console.error('[SSE] Failed to parse notification:', error);
+          }
+        };
         
-        // Mark as read if it has an ID
-        if (notification.id) {
-          fetch(`/api/notifications/${notification.id}/read`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ user_id: userId })
-          });
-        }
+        eventSource.onerror = (error) => {
+          console.warn('[SSE] Connection error, will retry if attempts remaining');
+          
+          // Close the failed connection
+          if (eventSource) {
+            eventSource.close();
+            eventSource = null;
+          }
+          
+          // Attempt reconnection with exponential backoff
+          if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            const delay = BASE_RECONNECT_DELAY * Math.pow(2, reconnectAttempts);
+            reconnectAttempts++;
+            console.log(`[SSE] Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+            reconnectTimeout = setTimeout(connect, delay);
+          } else {
+            console.warn('[SSE] Max reconnection attempts reached, giving up');
+          }
+        };
       } catch (error) {
-        console.error('Failed to parse notification:', error);
+        console.error('[SSE] Failed to create EventSource:', error);
       }
     };
     
-    eventSource.onerror = (error) => {
-      console.error('SSE connection error:', error);
-    };
-    
+    // Initial connection
+    connect();
 
     return () => {
-      eventSource.close();
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+      }
+      if (eventSource) {
+        eventSource.close();
+      }
     };
   }, [addToast]);
 

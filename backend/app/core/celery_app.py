@@ -1,5 +1,7 @@
 from celery import Celery
 from app.core.config import settings
+import os
+from app.core.redis_client import get_redis_sync
 
 celery_app = Celery(
     "watchbuddy",
@@ -7,6 +9,34 @@ celery_app = Celery(
     backend=settings.redis_url,
     include=["app.services.tasks", "app.tasks_ai"]
 )
+
+def _get_celery_timezone() -> str:
+    """Resolve timezone for Celery from settings storage with safe fallbacks.
+
+    Order of precedence:
+    1) Redis key settings:global:user_timezone (set from Settings UI)
+    2) Environment variables WATCHBUDDY_TIMEZONE or TZ
+    3) Default 'UTC'
+    """
+    # Default
+    tz = "UTC"
+    try:
+        # Try Redis-backed settings first
+        r = get_redis_sync()
+        val = r.get("settings:global:user_timezone")
+        if val and isinstance(val, str) and len(val) > 0:
+            tz = val
+        else:
+            # Environment fallback
+            env_tz = os.getenv("WATCHBUDDY_TIMEZONE") or os.getenv("TZ")
+            if env_tz:
+                tz = env_tz
+    except Exception:
+        # Redis not ready or other issue; fall back to env/UTC
+        env_tz = os.getenv("WATCHBUDDY_TIMEZONE") or os.getenv("TZ")
+        if env_tz:
+            tz = env_tz
+    return tz
 
 celery_app.conf.update(
     # Memory optimization settings
@@ -41,14 +71,18 @@ celery_app.conf.update(
         # Worker 2: List Creation + Scoring (AI list generation)
         'generate_chat_list': {'queue': 'creation'},
         'generate_dynamic_lists': {'queue': 'creation'},
+    'refresh_dynamic_lists': {'queue': 'creation'},
         'app.services.tasks.populate_new_list_async': {'queue': 'creation'},
 
         # Worker 3: List Updates + Sync (refreshes, watched status updates)
         'refresh_ai_list': {'queue': 'sync'},
         'app.services.tasks.sync_user_lists': {'queue': 'sync'},
         'app.services.tasks.sync_single_list_async': {'queue': 'sync'},
-        'app.services.tasks.refresh_smartlists': {'queue': 'sync'},
         'app.services.tasks.send_user_notification': {'queue': 'sync'},  # Low priority utility
+        
+        # Phase detection and watch history (maintenance queue - low priority)
+        'app.services.tasks.compute_user_phases_task': {'queue': 'maintenance'},
+        'app.services.tasks.sync_user_watch_history_task': {'queue': 'maintenance'},
     },
 
     # Memory management
@@ -57,10 +91,6 @@ celery_app.conf.update(
     
     # Scheduled tasks
     beat_schedule={
-        "refresh-smartlists": {
-            "task": "app.services.tasks.refresh_smartlists",
-            "schedule": 60 * 60,  # every hour
-        },
         "cleanup-metadata": {
             "task": "app.services.tasks.cleanup_orphaned_items", 
             "schedule": 60 * 60 * 6,  # every 6 hours
@@ -81,18 +111,43 @@ celery_app.conf.update(
             "task": "app.services.tasks.refresh_recent_votes_shows",
             "schedule": 60 * 60 * 24,  # daily
         },
-        "retry-metadata-mapping": {
-            "task": "app.services.tasks.build_metadata",
-            "schedule": 60 * 60 * 12,  # every 12 hours (retry failed Trakt ID mappings)
-            "kwargs": {"user_id": 1, "force": False}
+            # DISABLED: Using on-demand Trakt ID resolution with TraktIdResolver instead
+            # "retry-metadata-mapping": {
+            #     "task": "app.services.tasks.build_metadata",
+            #     "schedule": 60 * 60 * 12,  # every 12 hours (retry failed Trakt ID mappings)
+            #     "kwargs": {"user_id": 1, "force": False}
+            # },
+        # Auto-refresh dynamic AI lists (mood/theme/fusion) every 2 hours
+        "refresh-dynamic-ai-lists": {
+            "task": "refresh_dynamic_lists",
+            "schedule": 60 * 60 * 2,  # every 2 hours
+            "kwargs": {"user_id": 1}
         },
         # Nightly maintenance window starter (runs every 30 min to check local midnight window)
         "nightly-maintenance-dispatch": {
             "task": "app.services.tasks.run_nightly_maintenance",
             "schedule": 60 * 30,
         },
+        # Periodic smart-list sync honoring per-list sync_interval (covers custom lists)
+        "sync-user-lists": {
+            "task": "app.services.tasks.sync_user_lists",
+            "schedule": 60 * 30,  # every 30 minutes checks all lists and skips those not due
+            "kwargs": {"user_id": 1, "force_full": False}
+        },
+        # Daily phase detection for all users
+        "compute-phases-daily": {
+            "task": "app.services.tasks.compute_user_phases_task",
+            "schedule": 60 * 60 * 24,  # daily at midnight (timezone-aware)
+            "kwargs": {"user_id": 1}
+        },
+        # Incremental watch history sync (daily)
+        "sync-watch-history-daily": {
+            "task": "app.services.tasks.sync_user_watch_history_task",
+            "schedule": 60 * 60 * 24,  # daily
+            "kwargs": {"user_id": 1, "full_sync": True}
+        },
     },
-    timezone='UTC',
+    timezone=_get_celery_timezone(),
 )
 
 @celery_app.task(bind=True)

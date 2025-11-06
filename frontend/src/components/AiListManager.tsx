@@ -1,7 +1,10 @@
 // src/components/AiListManager.tsx
 // Modern AI-powered lists manager with glassmorphic theme
 import React, { useEffect, useState } from 'react';
+import { motion } from 'framer-motion';
+import { RefreshCw, Eye, Trash2 } from 'lucide-react';
 import { createAiList, listAiLists, refreshAiList, deleteAiList, generateSeven, getCooldown } from '../api/aiLists';
+import { toast } from '../utils/toast';
 import AiListDetails from './AiListDetails';
 
 export default function AiListManager() {
@@ -19,7 +22,14 @@ export default function AiListManager() {
       const data = await listAiLists();
       setLists(data);
     } catch (e: any) {
-      setError(e.message);
+      const errorMsg = e.message || 'Failed to fetch AI lists';
+      setError(errorMsg);
+      
+      if (e.isRateLimit) {
+        toast.error('Trakt rate limit exceeded. Please wait before loading lists.', 6000);
+      } else if (!e.isTimeout) {
+        toast.error(errorMsg);
+      }
     } finally {
       setLoading(false);
     }
@@ -57,6 +67,7 @@ export default function AiListManager() {
       
       // Create list (returns immediately, generates in background)
       await createAiList(userPrompt);
+      toast.success('AI list creation started!');
       
       // Refresh list immediately to show new list in "queued" state
       await fetchLists();
@@ -64,7 +75,17 @@ export default function AiListManager() {
       // Keep loading spinner off so user can create more lists
       setLoading(false);
     } catch (e: any) {
-      setError(e.message);
+      const errorMsg = e.message || 'Failed to create AI list';
+      setError(errorMsg);
+      
+      if (e.isRateLimit) {
+        toast.error('Trakt rate limit exceeded. Please wait before creating more lists.', 6000);
+      } else if (e.isTimeout) {
+        toast.warning('Creation request is taking longer than expected. It will continue in the background.', 5000);
+      } else {
+        toast.error(errorMsg);
+      }
+      
       setLoading(false);
     }
   };
@@ -74,9 +95,19 @@ export default function AiListManager() {
     setError(null);
     try {
       await refreshAiList(id);
+      toast.success('List refresh started!');
       fetchLists();
     } catch (e: any) {
-      setError(e.message);
+      const errorMsg = e.message || 'Failed to refresh list';
+      setError(errorMsg);
+      
+      if (e.isRateLimit) {
+        toast.error('Trakt rate limit exceeded. Please wait before refreshing.', 6000);
+      } else if (e.isTimeout) {
+        toast.warning('Refresh is taking longer than expected. It will continue in the background.', 5000);
+      } else {
+        toast.error(errorMsg);
+      }
     } finally {
       setLoading(false);
     }
@@ -88,9 +119,12 @@ export default function AiListManager() {
     setError(null);
     try {
       await deleteAiList(id);
+      toast.success('AI list deleted successfully!');
       fetchLists();
     } catch (e: any) {
-      setError(e.message);
+      const errorMsg = e.message || 'Failed to delete list';
+      setError(errorMsg);
+      toast.error(errorMsg);
     } finally {
       setLoading(false);
     }
@@ -101,9 +135,17 @@ export default function AiListManager() {
     setError(null);
     try {
       await generateSeven();
+      toast.success('Generating 7 dynamic lists!');
       setTimeout(fetchLists, 2000); // Give tasks time to queue
     } catch (e: any) {
-      setError(e.message);
+      const errorMsg = e.message || 'Failed to generate lists';
+      setError(errorMsg);
+      
+      if (e.isRateLimit) {
+        toast.error('Trakt rate limit exceeded. Please wait before generating lists.', 6000);
+      } else {
+        toast.error(errorMsg);
+      }
     } finally {
       setLoading(false);
     }
@@ -167,89 +209,103 @@ export default function AiListManager() {
         </div>
       )}
 
-      {/* Lists grid */}
-      <div className="space-y-4">
-        {lists.map(list => {
+      {/* Lists poster grid with animations */}
+      <motion.div 
+        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
+        initial="hidden"
+        animate="visible"
+        variants={{
+          hidden: { opacity: 0 },
+          visible: { opacity: 1, transition: { staggerChildren: 0.05 } }
+        }}
+      >
+        {lists.map((list, idx) => {
           const cooldown = cooldowns[list.id] ?? 0;
-          const statusColors = {
-            pending: 'bg-yellow-500/30 text-yellow-200',
-            queued: 'bg-blue-500/30 text-blue-200',
-            running: 'bg-purple-500/30 text-purple-200',
-            ready: 'bg-emerald-500/30 text-emerald-200',
-            error: 'bg-red-500/30 text-red-200',
+          const statusStyles: Record<string, string> = {
+            pending: 'bg-yellow-500/80 text-black',
+            queued: 'bg-blue-500/80 text-white',
+            running: 'bg-purple-500/80 text-white',
+            ready: 'bg-emerald-500/80 text-white',
+            error: 'bg-red-600/80 text-white',
           };
-          const statusColor = statusColors[list.status as keyof typeof statusColors] || statusColors.pending;
-
-          const handleOpen = () => {
-            if (list.status === 'ready') {
-              setOpenId(list.id);
-              setOpenTitle(list.generated_title || list.prompt || 'AI List');
-            }
-          };
+          const badgeClass = statusStyles[list.status] || statusStyles.pending;
+          const posterPath: string | undefined = list.poster_path ? `/posters/${list.poster_path}` : undefined;
 
           return (
-            <div
+            <motion.div 
               key={list.id}
-              className={`bg-white/10 backdrop-blur-lg border border-white/20 rounded-2xl shadow-lg transition-all duration-200 p-4 md:p-6 ${
-                list.status === 'ready' ? 'hover:bg-white/15 cursor-pointer' : 'cursor-default'
-              }`}
-              onClick={handleOpen}
+              whileHover={{ scale: 1.05, y: -4 }}
+              whileTap={{ scale: 0.98 }}
+              transition={{ type: "spring", stiffness: 300, damping: 20 }}
+              variants={{
+                hidden: { opacity: 0, y: 20 },
+                visible: { opacity: 1, y: 0 }
+              }}
+              className="relative group rounded-2xl overflow-hidden bg-white/5 border border-white/10 shadow-lg hover:shadow-2xl hover:shadow-purple-500/20"
             >
-              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  <div className="flex items-center gap-3 mb-2 overflow-hidden">
-                    <h3 className="font-bold text-xl text-white truncate overflow-hidden text-ellipsis whitespace-nowrap flex-shrink min-w-0">
-                      {list.generated_title || list.prompt}
-                    </h3>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium flex-shrink-0 ${statusColor}`}>
-                      {list.status}
-                    </span>
+              {/* Poster */}
+              <div className="aspect-[2/3] w-full bg-gradient-to-br from-slate-900 to-slate-800">
+                {posterPath ? (
+                  <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" />
+                ) : (
+                  <div className="w-full h-full flex items-center justify-center text-white/40 text-sm px-2 text-center">
+                    {list.status === 'pending' || list.status === 'queued' || list.status === 'running' ? 'Generating...' : 'No poster yet'}
                   </div>
-                  {list.prompt && list.generated_title && (
-                    <p className="text-white/60 text-sm mb-2 line-clamp-2 overflow-hidden">{list.prompt}</p>
-                  )}
-                  <div className="flex items-center gap-3 text-xs text-white/50 overflow-hidden">
-                    <span className="px-2 py-1 bg-indigo-500/20 rounded-full flex-shrink-0">{list.type}</span>
-                    {list.last_synced_at && (
-                      <span className="truncate">Last synced: {new Date(list.last_synced_at).toLocaleString()}</span>
-                    )}
-                  </div>
+                )}
+              </div>
+
+              {/* Gradient overlay */}
+              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
+
+              {/* Status badge */}
+              <div className={`absolute top-2 left-2 px-2 py-1 rounded-md text-xs font-medium ${badgeClass}`}>{list.status}</div>
+
+              {/* Delete button - top right - Always visible on mobile, hover on desktop */}
+              <button
+                aria-label="Delete"
+                onClick={(e) => { e.stopPropagation(); handleDelete(list.id); }}
+                disabled={loading}
+                className="absolute top-2 right-2 p-2 rounded-lg bg-black/60 hover:bg-red-600/80 text-white backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[28px] md:min-h-[28px] md:p-1.5 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-95"
+              >
+                <Trash2 size={16} className="md:w-3.5 md:h-3.5" />
+              </button>
+
+              {/* Bottom bar with title and actions */}
+              <div className="absolute bottom-0 left-0 right-0 p-3 flex items-center justify-between">
+                <div className="flex-1 min-w-0">
+                  <div className="text-white font-semibold truncate">{list.generated_title || list.prompt}</div>
+                  <div className="text-white/70 text-xs mt-0.5 truncate">{list.type}</div>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                {/* Bottom buttons - Always visible on mobile, hover on desktop */}
+                <div className="flex items-center gap-1.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity ml-2">
                   <button
-                    className={`px-3 sm:px-4 py-3 rounded-xl font-semibold transition-all min-h-[44px] text-sm ${
-                      list.status === 'ready' ? 'bg-white/10 border border-white/20 text-white hover:bg-white/15' : 'bg-white/5 text-white/40 cursor-not-allowed'
-                    }`}
-                    onClick={(e) => { e.stopPropagation(); if (list.status === 'ready') { setOpenId(list.id); setOpenTitle(list.generated_title || list.prompt || 'AI List'); } }}
-                    disabled={list.status !== 'ready' || loading}
+                    aria-label="View"
+                    disabled={list.status !== 'ready'}
+                    onClick={() => { if (list.status === 'ready') { setOpenId(list.id); setOpenTitle(list.generated_title || list.prompt || 'AI List'); } }}
+                    className={`p-2 rounded-lg backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[32px] md:min-h-[32px] active:scale-95 transition-all ${list.status==='ready' ? 'bg-black/60 hover:bg-black/70 text-white' : 'bg-black/40 text-white/40 cursor-not-allowed'}`}
                   >
-                    View
+                    <Eye size={16} className="md:w-3.5 md:h-3.5" />
                   </button>
                   <button
-                    className={`px-3 sm:px-4 py-3 rounded-xl font-semibold transition-all min-h-[44px] text-sm ${
-                      cooldown > 0
-                        ? 'bg-white/5 text-white/40 cursor-not-allowed'
-                        : 'bg-indigo-500/80 hover:bg-indigo-600 text-white shadow-lg'
-                    }`}
+                    aria-label="Refresh"
                     onClick={(e) => { e.stopPropagation(); handleRefresh(list.id); }}
                     disabled={cooldown > 0 || loading}
+                    className={`p-2 rounded-lg backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[32px] md:min-h-[32px] active:scale-95 transition-all ${cooldown>0 || loading ? 'bg-black/40 text-white/40 cursor-not-allowed' : 'bg-black/60 hover:bg-black/70 text-white'}`}
                   >
-                    {cooldown > 0 ? `⏱ ${cooldown}s` : '🔄 Refresh'}
-                  </button>
-                  <button
-                    className="px-3 sm:px-4 py-3 bg-red-500/80 hover:bg-red-600 text-white rounded-xl font-semibold transition-all min-h-[44px] text-sm"
-                    onClick={(e) => { e.stopPropagation(); handleDelete(list.id); }}
-                    disabled={loading}
-                  >
-                    🗑️
+                    {cooldown > 0 ? (
+                      <span className="text-xs">{cooldown}s</span>
+                    ) : (
+                      <RefreshCw size={16} className={`${loading ? "animate-spin" : ""} md:w-3.5 md:h-3.5`} />
+                    )}
                   </button>
                 </div>
               </div>
-            </div>
+            </motion.div>
           );
         })}
-      </div>
+      </motion.div>
 
+      {/* Empty state */}
       {/* Empty state */}
       {!loading && lists.length === 0 && (
         <div className="text-center py-12">

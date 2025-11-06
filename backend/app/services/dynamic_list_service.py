@@ -73,15 +73,37 @@ class DynamicListService:
             primary_mood_list = min(mood_lists, key=lambda ul: ul.id)
             try:
                 filters = json.loads(primary_mood_list.filters) if primary_mood_list.filters else {}
-                history = await self.trakt_client.get_my_history(media_type="movies", limit=1)
-                if history and isinstance(history, list):
-                    recent = history[0]
-                    recent_title = recent.get("movie", {}).get("title") or recent.get("title")
-                    if recent_title:
-                        filters["similar_to_title"] = recent_title
-                        primary_mood_list.filters = json.dumps(filters)
-                        db.commit()
-                        logger.info(f"[DynamicList] Set similar_to_title for mood list {primary_mood_list.id}: {recent_title}")
+                
+                # Try DB first, fallback to API
+                recent_title = None
+                try:
+                    from app.services.watch_history_helper import WatchHistoryHelper
+                    helper = WatchHistoryHelper(db=db, user_id=self.user_id)
+                    movie_status = helper.get_watched_status_dict("movie")
+                    
+                    # Get most recent movie (limit 1)
+                    if movie_status:
+                        recent_items = sorted(movie_status.values(), 
+                                            key=lambda x: x.get("watched_at", ""), 
+                                            reverse=True)
+                        if recent_items:
+                            recent_title = recent_items[0].get("title")
+                            logger.debug(f"[DYNAMIC] Using WatchHistoryHelper for recent movie")
+                except Exception as e:
+                    logger.warning(f"Failed to get recent movie from DB, falling back to API: {e}")
+                
+                # Fallback to API if DB failed
+                if not recent_title:
+                    history = await self.trakt_client.get_my_history(media_type="movies", limit=1)
+                    if history and isinstance(history, list):
+                        recent = history[0]
+                        recent_title = recent.get("movie", {}).get("title") or recent.get("title")
+                
+                if recent_title:
+                    filters["similar_to_title"] = recent_title
+                    primary_mood_list.filters = json.dumps(filters)
+                    db.commit()
+                    logger.info(f"[DynamicList] Set similar_to_title for mood list {primary_mood_list.id}: {recent_title}")
             except Exception as e:
                 logger.warning(f"[DynamicList] Failed to set similar_to_title for mood list {primary_mood_list.id}: {e}")
 

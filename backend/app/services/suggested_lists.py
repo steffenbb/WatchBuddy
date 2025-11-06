@@ -62,12 +62,40 @@ class SuggestedListsService:
         }
         
         try:
-            # Get user's watch history
-            movie_history = await self.trakt_client.get_my_history("movies", limit=500)
-            show_history = await self.trakt_client.get_my_history("shows", limit=500)
-            
-            all_history = movie_history + show_history
-            profile["total_watched"] = len(all_history)
+            # Get user's watch history using DB helper
+            try:
+                from app.services.watch_history_helper import WatchHistoryHelper
+                from app.core.database import SessionLocal
+                
+                db = SessionLocal()
+                try:
+                    helper = WatchHistoryHelper(db=db, user_id=self.user_id)
+                    # Get watch stats
+                    stats = helper.get_watch_stats()
+                    profile["total_watched"] = stats.get("total_watches", 0)
+                    profile["content_types"]["movies"] = stats.get("movies_watched", 0)
+                    profile["content_types"]["shows"] = stats.get("shows_watched", 0)
+                    
+                    # Get all history from DB (convert to API format)
+                    movie_status = helper.get_watched_status_dict("movie")
+                    show_status = helper.get_watched_status_dict("show")
+                    
+                    all_history = []
+                    for trakt_id, data in movie_status.items():
+                        all_history.append({"movie": data, "watched_at": data.get("watched_at")})
+                    for trakt_id, data in show_status.items():
+                        all_history.append({"show": data, "watched_at": data.get("watched_at")})
+                    
+                    logger.debug(f"[SUGGESTED] Using WatchHistoryHelper for user profile")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Failed to get watch history from DB, falling back to API: {e}")
+                # Fallback to Trakt API
+                movie_history = await self.trakt_client.get_my_history("movies", limit=500)
+                show_history = await self.trakt_client.get_my_history("shows", limit=500)
+                all_history = movie_history + show_history
+                profile["total_watched"] = len(all_history)
             
             if not all_history:
                 return profile

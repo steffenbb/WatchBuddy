@@ -503,78 +503,92 @@ class BulkCandidateProvider:
                         return all(r in have for r in required_genres)
                     return any(r in have for r in required_genres)
 
-                # First pass: fetch all matching candidates from persistent DB (no artificial cap)
+                # First pass: fetch matching candidates from persistent DB in batches to reduce memory
                 import time
+                from app.core.memory_manager import batch_query_iterator, managed_memory
+                
                 logger.warning(f"[BULK_PROVIDER] Executing DB query for media_type={media_type}, limit={limit}, filters: languages={languages}, min_year={min_year}, max_year={max_year}, min_rating={min_rating}, genres={genres}")
                 t0 = time.time()
-                rows = q.all()
-                logger.warning(f"[BULK_PROVIDER] DB query returned {len(rows)} rows in {time.time()-t0:.2f}s")
+                
                 stored_candidates = []
-                for row in rows:
-                    row_start = time.time()
-                    try:
-                        # Robustly parse genres JSON (can be malformed or non-list)
-                        logger.warning(f"[BULK_PROVIDER] Filtering candidate tmdb_id={getattr(row, 'tmdb_id', None)}, title={getattr(row, 'title', None)}")
-                        if row.genres:
+                total_rows_processed = 0
+                
+                with managed_memory("bulk_candidate_fetch"):
+                    # Process in batches of 1000 to avoid loading all rows into memory at once
+                    for batch in batch_query_iterator(self.db, q, batch_size=1000, expunge=True):
+                        total_rows_processed += len(batch)
+                        
+                        for row in batch:
                             try:
-                                parsed_genres = json.loads(row.genres)
-                                if not isinstance(parsed_genres, list):
+                                # Robustly parse genres JSON (can be malformed or non-list)
+                                if row.genres:
+                                    try:
+                                        parsed_genres = json.loads(row.genres)
+                                        if not isinstance(parsed_genres, list):
+                                            parsed_genres = []
+                                    except Exception:
+                                        parsed_genres = []
+                                else:
                                     parsed_genres = []
-                            except Exception:
-                                parsed_genres = []
-                        else:
-                            parsed_genres = []
-                        # In-memory genre filter
-                        if not _genres_match(parsed_genres):
-                            continue
-                        # STRICT: skip if title is missing/null/empty
-                        if not row.title or not isinstance(row.title, str) or not row.title.strip():
-                            continue
-                        # QUALITY FILTER: Skip items with very low mainstream_score or few votes (poor quality/unreliable data)
-                        # Minimum thresholds: 50 votes and mainstream_score > 50 to ensure decent quality
-                        if row.mainstream_score is None or row.mainstream_score < 50:
-                            continue
-                        if row.vote_count is None or row.vote_count < 50:
-                            continue
-                        # Exclude items in exclude_ids
-                        cid = row.trakt_id or row.tmdb_id or row.id
-                        if exclude_ids and cid in exclude_ids:
-                            continue
-                        # Only include candidates with a valid trakt_id
-                        if row.trakt_id is not None:
-                            item = {
-                                'title': row.title,
-                                'year': row.year,
-                                'ids': {'tmdb': row.tmdb_id, 'trakt': row.trakt_id},
-                                'media_type': row.media_type,
-                                'language': row.language,
-                                'obscurity_score': row.obscurity_score,
-                                'mainstream_score': row.mainstream_score,
-                                'freshness_score': row.freshness_score,
-                                'tmdb_data': {
-                                    'popularity': row.popularity,
-                                    'vote_average': row.vote_average,
-                                    'vote_count': row.vote_count,
-                                    'genres': parsed_genres,
-                                    'poster_path': row.poster_path,
-                                    'backdrop_path': row.backdrop_path,
-                                    'overview': row.overview
-                                },
-                                'scoring_features': {
-                                    'tmdb_popularity': row.popularity,
-                                    'tmdb_rating': row.vote_average,
-                                    'tmdb_votes': row.vote_count,
-                                    'has_overview': bool(row.overview),
-                                    'has_poster': bool(row.poster_path),
-                                    'genre_count': len(parsed_genres)
-                                },
-                                '_from_persistent_store': True
-                            }
-                            stored_candidates.append(item)
-                            logger.warning(f"[BULK_PROVIDER] Candidate accepted tmdb_id={getattr(row, 'tmdb_id', None)}, title={getattr(row, 'title', None)}, filter_time={time.time()-row_start:.3f}s")
-                    except Exception as row_err:
-                        # Skip bad rows rather than failing the entire request
-                        logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
+                                
+                                # In-memory genre filter
+                                if not _genres_match(parsed_genres):
+                                    continue
+                                # STRICT: skip if title is missing/null/empty
+                                if not row.title or not isinstance(row.title, str) or not row.title.strip():
+                                    continue
+                                # QUALITY FILTER: Skip items with very low mainstream_score or few votes (poor quality/unreliable data)
+                                # Minimum thresholds: 50 votes and mainstream_score > 50 to ensure decent quality
+                                if row.mainstream_score is None or row.mainstream_score < 50:
+                                    continue
+                                if row.vote_count is None or row.vote_count < 50:
+                                    continue
+                                # Exclude items in exclude_ids
+                                cid = row.trakt_id or row.tmdb_id or row.id
+                                if exclude_ids and cid in exclude_ids:
+                                    continue
+                                # Only include candidates with a valid trakt_id
+                                if row.trakt_id is not None:
+                                    item = {
+                                        'title': row.title,
+                                        'year': row.year,
+                                        'ids': {'tmdb': row.tmdb_id, 'trakt': row.trakt_id},
+                                        'media_type': row.media_type,
+                                        'language': row.language,
+                                        'obscurity_score': row.obscurity_score,
+                                        'mainstream_score': row.mainstream_score,
+                                        'freshness_score': row.freshness_score,
+                                        'tmdb_data': {
+                                            'popularity': row.popularity,
+                                            'vote_average': row.vote_average,
+                                            'vote_count': row.vote_count,
+                                            'genres': parsed_genres,
+                                            'poster_path': row.poster_path,
+                                            'backdrop_path': row.backdrop_path,
+                                            'overview': row.overview
+                                        },
+                                        'scoring_features': {
+                                            'tmdb_popularity': row.popularity,
+                                            'tmdb_rating': row.vote_average,
+                                            'tmdb_votes': row.vote_count,
+                                            'has_overview': bool(row.overview),
+                                            'has_poster': bool(row.poster_path),
+                                            'genre_count': len(parsed_genres)
+                                        },
+                                        '_from_persistent_store': True
+                                    }
+                                    stored_candidates.append(item)
+                            except Exception as row_err:
+                                # Skip bad rows rather than failing the entire request
+                                logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
+                        
+                        # Stop if we have enough candidates
+                        if len(stored_candidates) >= limit * 3:
+                            logger.info(f"Early exit: collected {len(stored_candidates)} candidates (target: {limit})")
+                            break
+                
+                logger.warning(f"[BULK_PROVIDER] DB query processed {total_rows_processed} rows, collected {len(stored_candidates)} candidates in {time.time()-t0:.2f}s")
+                
                 # Second pass removed: always return all matching candidates from first pass
                 if stored_candidates:
                     logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
@@ -1428,13 +1442,30 @@ class BulkCandidateProvider:
         """Search based on user's taste profile and genre preferences."""
         candidates = []
         
-        # Get user's watch history for taste analysis
+        # Get user's watch history for taste analysis using DB helper
         try:
-            watched_history = await self.trakt_client.get_my_history(media_type=media_type, limit=50)
-            taste_keywords = self._extract_taste_keywords(watched_history)
+            from app.services.watch_history_helper import WatchHistoryHelper
+            from app.core.database import SessionLocal
+            
+            db = SessionLocal()
+            try:
+                helper = WatchHistoryHelper(db=db, user_id=self.user_id)
+                # Convert DB format to API format expected by _extract_taste_keywords
+                watched_status = helper.get_watched_status_dict(media_type)
+                # Limit to 50 most recent
+                watched_history = list(watched_status.values())[:50]
+                taste_keywords = self._extract_taste_keywords(watched_history)
+                logger.debug(f"[TASTE] Using WatchHistoryHelper for taste profile analysis")
+            finally:
+                db.close()
         except Exception as e:
-            logger.warning(f"Failed to get watch history for taste profile: {e}")
-            taste_keywords = []
+            logger.warning(f"Failed to get watch history for taste profile from DB, falling back to API: {e}")
+            try:
+                watched_history = await self.trakt_client.get_my_history(media_type=media_type, limit=50)
+                taste_keywords = self._extract_taste_keywords(watched_history)
+            except Exception as e2:
+                logger.warning(f"Failed to get watch history for taste profile from API: {e2}")
+                taste_keywords = []
         
         # Combine base keywords with taste-derived keywords
         enhanced_keywords = list(set(base_keywords + taste_keywords))[:10]
@@ -1659,26 +1690,38 @@ class BulkCandidateProvider:
         return variations
     
     async def _get_excluded_ids(self, media_type: str, include_watched: bool) -> Set[int]:
-        """Get Trakt IDs to exclude based on user preferences."""
+        """Get Trakt IDs to exclude based on user preferences (uses database for speed)."""
         excluded = set()
         
         if not include_watched:
             try:
-                # Get watched history from Trakt
-                watched = await self.trakt_client.get_my_history(
-                    media_type=media_type, 
-                    limit=2000  # Increased for better filtering
-                )
+                # Use database watch history (much faster than API)
+                from app.services.watch_history_helper import WatchHistoryHelper
                 
-                for item in watched:
-                    content = item.get(media_type[:-1]) if media_type.endswith('s') else item.get(media_type)
-                    if content and content.get('ids', {}).get('trakt'):
-                        excluded.add(content['ids']['trakt'])
+                helper = WatchHistoryHelper(self.user_id, self.db)
+                # Get watched IDs from database
+                watched_ids = helper.get_watched_trakt_ids(media_type=media_type[:-1] if media_type.endswith('s') else media_type)
+                excluded.update(watched_ids)
                 
-                logger.info(f"Excluding {len(excluded)} watched {media_type}")
+                logger.info(f"Excluding {len(watched_ids)} watched {media_type} from database")
                 
             except Exception as e:
-                logger.warning(f"Failed to fetch watched history: {e}")
+                logger.warning(f"Failed to fetch watched history from DB, falling back to API: {e}")
+                # Fallback to API if database fails
+                try:
+                    watched = await self.trakt_client.get_my_history(
+                        media_type=media_type, 
+                        limit=2000
+                    )
+                    
+                    for item in watched:
+                        content = item.get(media_type[:-1]) if media_type.endswith('s') else item.get(media_type)
+                        if content and content.get('ids', {}).get('trakt'):
+                            excluded.add(content['ids']['trakt'])
+                    
+                    logger.info(f"Excluding {len(excluded)} watched {media_type} from API")
+                except Exception as api_err:
+                    logger.warning(f"API fallback also failed: {api_err}")
         
         # Add items from existing lists if user doesn't want duplicates
         try:

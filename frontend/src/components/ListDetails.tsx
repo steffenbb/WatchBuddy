@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../hooks/useApi";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 import { formatLocalDate } from "../utils/date";
+import HoverInfoCard from "./HoverInfoCard";
 
 type Item = {
   id: number;
@@ -297,37 +298,46 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
             const comps = parseExplanation(it.explanation)?.components || parseExplanation(it.explanation) || {};
             const entries = Object.entries(comps).filter(([,v])=> typeof v === 'number' && v > 0).sort((a:any,b:any)=> b[1]-a[1]).slice(0,3);
             return (
-              <div key={it.id} className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl transition-all duration-300 overflow-hidden">
-                {/* Poster */}
-                <div className="relative aspect-[2/3] bg-gradient-to-br from-indigo-900/50 to-purple-900/50 overflow-hidden">
-                  {it.poster_url ? (
-                    <img 
-                      src={it.poster_url} 
-                      alt={it.title || ''} 
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
-                      loading="lazy" 
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-4xl text-white/30">
-                      {it.media_type === 'movie' ? '🎬' : '📺'}
+              <HoverInfoCard
+                key={it.id}
+                traktId={it.trakt_id}
+                mediaType={it.media_type}
+                fallbackInfo={{
+                  title: it.title,
+                  media_type: it.media_type
+                }}
+              >
+                <div className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl transition-all duration-300 overflow-hidden">
+                  {/* Poster */}
+                  <div className="relative aspect-[2/3] bg-gradient-to-br from-indigo-900/50 to-purple-900/50 overflow-hidden">
+                    {it.poster_url ? (
+                      <img 
+                        src={it.poster_url} 
+                        alt={it.title || ''} 
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" 
+                        loading="lazy" 
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-4xl text-white/30">
+                        {it.media_type === 'movie' ? '🎬' : '📺'}
+                      </div>
+                    )}
+                    {/* Overlay with score */}
+                    <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg">
+                      <span className="text-xs font-bold text-white">{it.score?.toFixed(2)}</span>
                     </div>
-                  )}
-                  {/* Overlay with score */}
-                  <div className="absolute top-2 right-2 bg-black/70 backdrop-blur-sm px-2 py-1 rounded-lg">
-                    <span className="text-xs font-bold text-white">{it.score?.toFixed(2)}</span>
+                    {/* Watched badge */}
+                    {it.is_watched && (
+                      <div className="absolute top-2 left-2 bg-emerald-500/80 backdrop-blur-sm px-2 py-1 rounded-lg">
+                        <span className="text-xs font-bold text-white">✓</span>
+                      </div>
+                    )}
                   </div>
-                  {/* Watched badge */}
-                  {it.is_watched && (
-                    <div className="absolute top-2 left-2 bg-emerald-500/80 backdrop-blur-sm px-2 py-1 rounded-lg">
-                      <span className="text-xs font-bold text-white">✓</span>
-                    </div>
-                  )}
-                </div>
-                
-                {/* Content */}
-                <div className="p-3">
-                  <h4 className="font-semibold text-white text-sm line-clamp-2 mb-2">
-                    {it.title || `#${it.trakt_id}`}
+                  
+                  {/* Content */}
+                  <div className="p-3">
+                    <h4 className="font-semibold text-white text-sm line-clamp-2 mb-2">
+                      {it.title || `#${it.trakt_id}`}
                   </h4>
                   
                   {/* Rating buttons */}
@@ -389,6 +399,7 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                   )}
                 </div>
               </div>
+              </HoverInfoCard>
             );
           })}
         </div>

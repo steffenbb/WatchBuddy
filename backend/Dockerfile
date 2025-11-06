@@ -29,11 +29,11 @@ COPY backend/app /app/app
 
 # Create data directories for CSV datasets, AI engine files, and model cache
 RUN mkdir -p /app/data /app/data/ai /app/app/models_cache/all-MiniLM-L6-v2
-# Copy TMDB datasets from project root
-COPY TMDB_movie_dataset_v11.csv /app/data/
-COPY TMDB_tv_dataset_v3.csv /app/data/
-# Copy trakt_id mappings export file for auto-import
-COPY backend/data/trakt_mappings_export.csv /app/data/
+# Bootstrap bundle will be mounted via docker-compose volume
+# Legacy CSV files removed - using bootstrap bundle for faster initialization
+# COPY TMDB_movie_dataset_v11.csv /app/data/
+# COPY TMDB_tv_dataset_v3.csv /app/data/
+# COPY backend/data/trakt_mappings_export.csv /app/data/
 # Copy local sentence-transformers model files
 COPY backend/app/models_cache/all-MiniLM-L6-v2 /app/app/models_cache/all-MiniLM-L6-v2
 
@@ -44,6 +44,6 @@ LABEL org.opencontainers.image.title="WatchBuddy Backend" \
           org.opencontainers.image.source="https://github.com/steffenbb/WatchBuddy"
 
 ENV APP_VERSION=$APP_VERSION \
-        GIT_SHA=$GIT_SHA
+    GIT_SHA=$GIT_SHA
 
-CMD export POSTGRES_PASSWORD=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $POSTGRES_PASSWORD) && export APP_KEY=$(cat ${APP_KEY_FILE:-/dev/null} 2>/dev/null || echo $APP_KEY) && exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+CMD export POSTGRES_PASSWORD=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $POSTGRES_PASSWORD) && export APP_KEY=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $APP_KEY) && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 75 --timeout-graceful-shutdown 30 --workers 2

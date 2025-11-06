@@ -287,7 +287,7 @@ def _extract_creators_directors(text: str, entities: Dict[str, List[str]]) -> Tu
     return creators, directors
 
 
-def parse_prompt(prompt: str) -> Dict[str, Any]:
+def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, Any]:
     # Extract entities from ORIGINAL prompt before lowercasing (spaCy needs capitalization)
     entities = _extract_entities(prompt)
     
@@ -320,12 +320,15 @@ def parse_prompt(prompt: str) -> Dict[str, Any]:
     seeds = _extract_seed_titles(normalized)
     negative_cues = _extract_negative_cues(normalized)
     media_type = _detect_media_type(normalized)
-    # Obscurity
+    # Obscurity - use from prompt if specified, otherwise use default
     obscurity = None
     for key, val in OBSCURITY_MAP.items():
         if key in normalized:
             obscurity = val
             break
+    # If not explicitly mentioned in prompt, use default setting
+    if obscurity is None and default_obscurity:
+        obscurity = default_obscurity
     adult = _extract_bool(normalized, 'adult')
     # Original language pattern: "original language: xx"
     orig_lang = None

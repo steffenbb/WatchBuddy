@@ -1,12 +1,23 @@
 import React, { useEffect, useState } from "react";
 import { getLists, api } from "../hooks/useApi";
 import { formatRelativeTime, formatLocalDate } from "../utils/date";
+import { motion, AnimatePresence } from "framer-motion";
 import CreateListForm from "./CreateListForm";
+import ListCard from "./ListCard";
 import ListDetails from "./ListDetails";
 import SuggestedLists from "./SuggestedLists";
 import AiListManager from "./AiListManager";
 import Settings from "./Settings";
+import HomePage from "./HomePage";
 import { theme } from "../theme";
+import IndividualListManager from "./individual/IndividualListManager";
+import IndividualListDetail from "./individual/IndividualListDetail";
+import ListModal from "./ListModal";
+import EditListModal from "./EditListModal";
+import { toast } from "../utils/toast";
+import PageTransition from "./PageTransition";
+import PhaseTimeline from "./phases/PhaseTimeline";
+import Overview from "./Overview";
 
 import { StatusWidgets } from "./StatusWidgets";
 import { useTraktAccount } from "../hooks/useTraktAccount";
@@ -14,21 +25,25 @@ import { useTraktAccount } from "../hooks/useTraktAccount";
 // URL routing utilities
 const getViewFromUrl = (): { view: string; listId?: number } => {
   const hash = window.location.hash.slice(1); // Remove #
-  if (!hash) return { view: 'lists' };
+  if (!hash) return { view: 'home' };
+  if (hash === 'lists') return { view: 'lists' };
+  if (hash === 'timeline') return { view: 'timeline' };
   
   const [view, id] = hash.split('/');
   if (view === 'list' && id) {
     return { view: 'listDetails', listId: parseInt(id) };
   }
   
-  return { view: hash || 'lists' };
+  return { view: hash || 'home' };
 };
 
 const updateUrl = (view: string, listId?: number) => {
   if (view === 'listDetails' && listId) {
     window.location.hash = `list/${listId}`;
-  } else if (view === 'lists') {
+  } else if (view === 'home') {
     window.location.hash = '';
+  } else if (view === 'lists') {
+    window.location.hash = 'lists';
   } else {
     window.location.hash = view;
   }
@@ -37,13 +52,45 @@ const updateUrl = (view: string, listId?: number) => {
 export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNavigateHome?: (callback: () => void) => void }){
   const { account, loading: accountLoading } = useTraktAccount();
   const [lists, setLists] = useState<any[]>([]);
-  const [view, setView] = useState<"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic">("lists");
+  const [view, setView] = useState<"home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview">("home");
   const [selectedList, setSelectedList] = useState<{id:number; title:string}|null>(null);
+  const [selectedIndividualListId, setSelectedIndividualListId] = useState<number|null>(null);
   const [editingId, setEditingId] = useState<number|null>(null);
   const [savingId, setSavingId] = useState<number|null>(null);
   const [editValues, setEditValues] = useState<Record<number, any>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showSuggestedModal, setShowSuggestedModal] = useState(false);
+  const [modalListId, setModalListId] = useState<number|null>(null);
+  const [modalListTitle, setModalListTitle] = useState<string>("");
+  const [editListId, setEditListId] = useState<number|null>(null);
+  const [editListTitle, setEditListTitle] = useState<string>("");
+
+  // Dynamic background based on current view
+  const getBackgroundGradient = (currentView: string): string => {
+    switch (currentView) {
+      case 'home':
+        return 'bg-gradient-to-br from-indigo-900 via-purple-900 to-fuchsia-900';
+      case 'dynamic':
+        return 'bg-gradient-to-br from-purple-900 via-fuchsia-900 to-pink-900';
+      case 'myLists':
+      case 'myListDetails':
+        return 'bg-gradient-to-br from-blue-900 via-indigo-900 to-purple-900';
+      case 'status':
+      case 'settings':
+        return 'bg-gradient-to-br from-slate-900 via-gray-900 to-zinc-900';
+      case 'timeline':
+        return 'bg-gradient-to-br from-violet-900 via-indigo-900 to-blue-900';
+      case 'overview':
+        return 'bg-gradient-to-br from-purple-900 via-fuchsia-900 to-pink-900';
+      case 'create':
+        return 'bg-gradient-to-br from-emerald-900 via-teal-900 to-cyan-900';
+      case 'suggested':
+        return 'bg-gradient-to-br from-rose-900 via-pink-900 to-fuchsia-900';
+      default:
+        // lists, listDetails
+        return 'bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900';
+    }
+  };
 
   // Initialize from URL on load
   useEffect(() => {
@@ -80,13 +127,16 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   }, [lists]);
 
   // Helper function to change view and update URL
-  const changeView = (newView: "lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic", listId?: number, listTitle?: string) => {
+  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview", listId?: number, listTitle?: string) => {
     setView(newView);
     if (newView === 'listDetails' && listId && listTitle) {
       setSelectedList({ id: listId, title: listTitle });
       updateUrl(newView, listId);
+    } else if (newView === 'myListDetails' && listId) {
+      setSelectedIndividualListId(listId);
     } else {
       setSelectedList(null);
+      setSelectedIndividualListId(null);
       updateUrl(newView);
     }
   };
@@ -94,16 +144,35 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   // Register navigation callback with parent
   useEffect(() => {
     if (onRegisterNavigateHome) {
-      onRegisterNavigateHome(() => changeView("lists"));
+      onRegisterNavigateHome(() => changeView("home"));
     }
   }, [onRegisterNavigateHome]);
 
   async function load(){
     try {
+      console.log('[Dashboard] Starting to load lists...');
       const data = await getLists();
-      setLists(data);
-    } catch(e){
-      console.error(e);
+      console.log('[Dashboard] Fetched lists:', data?.length || 0, 'items', data);
+      setLists(data || []);
+    } catch(e: any){
+      console.error('[Dashboard] Failed to load lists:', e);
+      console.error('[Dashboard] Error details:', {
+        message: e?.message,
+        response: e?.response,
+        request: e?.request
+      });
+      
+      // Show user-friendly error toast
+      if (e.isRateLimit) {
+        toast.error('Trakt rate limit exceeded. Lists will load when available.', 6000);
+      } else if (e.isTimeout) {
+        toast.warning('Loading lists is taking longer than expected. Please refresh the page.', 5000);
+      } else if (e.message && !e.message.includes('Network Error')) {
+        // Only show toast for non-network errors (network errors might be temporary)
+        toast.error('Failed to load lists. Please refresh the page.');
+      }
+      
+      setLists([]);
     }
   }
 
@@ -118,47 +187,20 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   }, []);
 
   return (
-    <div className="w-full max-w-[1800px] mx-auto grid grid-cols-1 lg:grid-cols-3 gap-8 px-2 md:px-8">
-      <div className="lg:col-span-2 bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 flex flex-col py-8 rounded-3xl shadow-2xl">
-        {/* Modern glassmorphic navigation */}
-        <div className="flex flex-wrap gap-2 mb-6 px-4 md:gap-3">
-          <button 
-            className={`flex-1 min-w-[80px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] ${
-              view === "lists" 
-                ? "bg-white text-indigo-900 shadow-xl scale-105" 
-                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
-            }`} 
-            onClick={()=>changeView("lists")}
-          >
-            Lists
-          </button>
-          <button 
-            className={`flex-1 min-w-[90px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] flex items-center justify-center gap-1 ${
-              view === "dynamic" 
-                ? "bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-xl scale-105" 
-                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
-            }`} 
-            onClick={()=>changeView("dynamic")}
-          >
-            <span className="text-lg hidden sm:inline">✨</span>
-            <span className="hidden sm:inline">AI Lists</span>
-            <span className="sm:hidden">AI</span>
-          </button>
-          <button 
-            className={`flex-1 min-w-[80px] px-3 md:px-4 py-3 rounded-xl shadow-lg text-xs md:text-sm font-semibold transition-all duration-200 min-h-[44px] ${
-              view === "settings" 
-                ? "bg-white text-indigo-900 shadow-xl scale-105" 
-                : "bg-white/10 backdrop-blur-lg border border-white/20 text-white hover:bg-white/15"
-            }`} 
-            onClick={()=>changeView("settings")}
-          >
-            <span className="hidden sm:inline">Settings</span>
-            <span className="sm:hidden">⚙️</span>
-          </button>
-        </div>
+    <div className="w-full max-w-[1800px] mx-auto px-2 md:px-8">
+      <div className={`${getBackgroundGradient(view)} flex flex-col py-4 rounded-3xl shadow-2xl transition-colors duration-700`}>
+        <AnimatePresence mode="wait">
+          {view === "home" && (
+            <PageTransition key="home">
+              <div className="px-4">
+                <HomePage />
+              </div>
+            </PageTransition>
+          )}
 
-        {view === "lists" && (
-          <div className="space-y-4 px-4">
+          {view === "lists" && (
+            <PageTransition key="lists">
+              <div className="space-y-6 px-4">
             {/* Action buttons at top of lists */}
             <div className="flex gap-3 mb-4">
               <button
@@ -174,182 +216,169 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                 💡 Suggested Lists
               </button>
             </div>
-
-            {lists.map(l => (
-            <div key={l.id} className="bg-white/10 backdrop-blur-lg border border-white/20 p-4 md:p-6 rounded-2xl shadow-lg hover:bg-white/15 transition-all duration-200">
-              {/* Modern list item layout */}
-              <div className="flex flex-col sm:flex-row sm:justify-between gap-4">
-                <div className="flex-1 min-w-0 overflow-hidden">
-                  <div className="font-bold text-xl text-white truncate overflow-hidden text-ellipsis whitespace-nowrap">
-                    <button onClick={()=>changeView('listDetails', l.id, l.title)} className="hover:text-pink-300 transition-colors truncate overflow-hidden text-ellipsis max-w-full inline-block align-bottom">{l.title}</button>
-                  </div>
-                  <div className="text-sm text-white/80 mt-2 flex items-center gap-3">
-                    <span className="px-3 py-1 bg-purple-500/30 rounded-full">{l.list_type}</span>
-                    <span className="px-3 py-1 bg-indigo-500/30 rounded-full">{l.item_limit} items</span>
-                  </div>
-                  <div className="text-xs text-white/60 mt-2 flex items-center gap-2">
-                    <span>
-                      Last updated: {l.last_updated ? formatRelativeTime(l.last_updated) : 'Never'}
-                    </span>
-                    <button onClick={load} className="text-xs px-2 py-1 rounded-lg border border-white/30 bg-white/10 hover:bg-white/20 transition-colors">↻</button>
-                  </div>
-                  {l.last_error && (
-                    <div className="text-red-300 text-xs mt-2 p-3 bg-red-500/20 rounded-lg border border-red-400/30">
-                      Error: {l.last_error}
-                    </div>
-                  )}
-                  {/* Edit Panel */}
-                  {editingId === l.id && (
-                    <EditPanel
-                      list={l}
-                      account={account}
-                      values={editValues[l.id]}
-                      onChange={(vals)=> setEditValues(prev=>({...prev, [l.id]: vals}))}
-                      onCancel={()=>{ setEditingId(null); setEditValues(prev=>{ const { [l.id]:_, ...rest } = prev; return rest; }); }}
-                      onSave={async (vals)=>{
-                        setSavingId(l.id);
-                        try{
-                          const payload: any = {};
-                          if (vals.title !== undefined) payload.title = vals.title;
-                          if (vals.exclude_watched !== undefined) payload.exclude_watched = vals.exclude_watched;
-                          if (vals.item_limit !== undefined) payload.item_limit = vals.item_limit;
-                          if (vals.sync_interval !== undefined) payload.sync_interval = vals.sync_interval;
-                          if (vals.full_sync_days !== undefined) payload.full_sync_days = vals.full_sync_days;
-                          
-                          // Custom/Suggested list filters
-                          if (vals.genres !== undefined) payload.genres = vals.genres;
-                          if (vals.genre_mode !== undefined) payload.genre_mode = vals.genre_mode;
-                          if (vals.languages !== undefined) payload.languages = vals.languages;
-                          if (vals.year_from !== undefined) payload.year_from = vals.year_from;
-                          if (vals.year_to !== undefined) payload.year_to = vals.year_to;
-                          if (vals.min_rating !== undefined) payload.min_rating = vals.min_rating;
-                          
-                          await api.patch(`/lists/${l.id}`, payload);
-                          // Immediately run a full sync to apply filter changes
-                          await api.post(`/lists/${l.id}/sync?user_id=1&force_full=true`);
-                          await load();
-                          window.dispatchEvent(new Event('lists-updated'));
-                          setEditingId(null);
-                        } catch(e){
-                          console.error('Failed to save list edits', e);
-                        } finally {
-                          setSavingId(null);
+            {/* Poster grid */}
+            {lists.length === 0 ? (
+              <div className="text-center py-12 text-white/60">
+                <p className="text-lg mb-2">No lists yet</p>
+                <p className="text-sm">Create a list to get started!</p>
+              </div>
+            ) : (
+              <motion.div 
+                initial="hidden"
+                animate="visible"
+                variants={{
+                  hidden: { opacity: 0 },
+                  visible: {
+                    opacity: 1,
+                    transition: {
+                      staggerChildren: 0.05
+                    }
+                  }
+                }}
+                className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
+              >
+                {lists.map((l, idx) => (
+                  <motion.div
+                    key={l.id}
+                    variants={{
+                      hidden: { opacity: 0, y: 20 },
+                      visible: { opacity: 1, y: 0 }
+                    }}
+                  >
+                    <ListCard
+                      id={l.id}
+                      title={l.title}
+                      listType={l.list_type}
+                      posterPath={l.poster_path}
+                      itemLimit={l.item_limit}
+                      onOpen={(id, title)=>{ setModalListId(id); setModalListTitle(title); }}
+                      onSynced={()=>load()}
+                      onEdit={(id)=>{ 
+                        const list = lists.find(lst => lst.id === id);
+                        if (list) {
+                          setEditListId(id);
+                          setEditListTitle(list.title);
                         }
                       }}
-                      saving={savingId === l.id}
+                      onDelete={()=>load()}
                     />
-                  )}
-                </div>
-                {/* Touch-optimized action buttons */}
-                <div className="flex sm:flex-col gap-2">
-                  {editingId === l.id ? (
-                    <button 
-                      onClick={()=>{ /* handled inside panel */ }}
-                      disabled
-                      className="flex-1 sm:flex-none px-4 py-3 bg-white/20 text-white/50 rounded-xl text-sm font-semibold min-h-[44px]"
-                    >Editing…</button>
-                  ) : (
-                    <button 
-                      onClick={()=>{
-                        // Initialize edit values from current list
-                        let filters: any = {};
-                        try { filters = l.filters ? JSON.parse(l.filters) : {}; } catch { filters = {}; }
-                        const initVals = {
-                          title: l.title,
-                          exclude_watched: !!l.exclude_watched,
-                          item_limit: l.item_limit || 20,
-                          sync_interval: l.sync_interval || undefined,
-                          full_sync_days: (filters.full_sync_days || 1),
-                          // Custom/Suggested list filters
-                          genres: Array.isArray(filters.genres) ? filters.genres : [],
-                          genre_mode: filters.genre_mode || 'any',
-                          languages: Array.isArray(filters.languages) ? filters.languages : [],
-                          year_from: filters.year_from || 2000,
-                          year_to: filters.year_to || new Date().getFullYear(),
-                          min_rating: filters.min_rating || 0
-                        };
-                        setEditValues(prev=>({...prev, [l.id]: initVals}));
-                        setEditingId(l.id);
-                      }} 
-                      className="flex-1 sm:flex-none px-4 py-3 bg-white/10 hover:bg-white/20 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] border border-white/20"
-                    >
-                      Edit
-                    </button>
-                  )}
-                  <button 
-                    onClick={()=>api.post(`/lists/${l.id}/sync?user_id=1`)} 
-                    className="flex-1 sm:flex-none px-4 py-3 bg-gradient-to-r from-indigo-500 to-purple-500 hover:from-indigo-600 hover:to-purple-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px] shadow-lg"
-                  >
-                    Sync
-                  </button>
-                  <button 
-                    onClick={async()=>{ 
-                      if (window.confirm('Delete this list?')) {
-                        await api.delete(`/lists/${l.id}?user_id=1`); 
-                        load();
-                      }
-                    }} 
-                    className="flex-1 sm:flex-none px-4 py-3 bg-red-500/80 hover:bg-red-600 text-white rounded-xl text-sm font-semibold transition-all min-h-[44px]"
-                  >
-                    Delete
-                  </button>
-                </div>
-              </div>
-            </div>
-          ))}
+                  </motion.div>
+                ))}
+              </motion.div>
+            )}
         </div>
+            </PageTransition>
         )}
 
         {view === "listDetails" && selectedList && (
-          <ListDetails listId={selectedList.id} title={selectedList.title} onBack={()=>changeView('lists')} />
+          <PageTransition key="listDetails">
+            <ListDetails listId={selectedList.id} title={selectedList.title} onBack={()=>changeView('lists')} />
+          </PageTransition>
+        )}
+        {view === "myLists" && (
+          <PageTransition key="myLists">
+            <div className="px-4">
+              <IndividualListManager onOpenList={(id:number)=>{ setSelectedIndividualListId(id); setView('myListDetails'); }} />
+            </div>
+          </PageTransition>
+        )}
+        {view === "myListDetails" && selectedIndividualListId != null && (
+          <PageTransition key={`myListDetails-${selectedIndividualListId}`}>
+            <div className="px-4">
+              <IndividualListDetail listId={selectedIndividualListId} onBack={()=> setView('myLists')} />
+            </div>
+          </PageTransition>
         )}
 
         {view === "create" && (
-          <CreateListForm onCreated={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
+          <PageTransition key="create">
+            <CreateListForm onCreated={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
+          </PageTransition>
         )}
 
         {view === "dynamic" && (
-          <AiListManager />
+          <PageTransition key="dynamic">
+            <AiListManager />
+          </PageTransition>
         )}
 
-        {view === "suggested" && <SuggestedLists onCreate={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />}
-        {view === "settings" && <Settings />}
+        {view === "status" && (
+          <PageTransition key="status">
+            <div className="px-4 space-y-4">
+              <div className="mb-1 text-white/90 text-xl font-semibold">System Status</div>
+              <StatusWidgets />
+              {/* Quota widget moved from sidebar into System Status */}
+              <div className="bg-white/10 backdrop-blur-lg border border-white/20 p-4 md:p-5 rounded-2xl shadow-lg">
+                <h4 className="font-semibold text-white text-lg mb-3">Quota</h4>
+                {accountLoading ? (
+                  <p className="text-sm text-white/60">Checking account...</p>
+                ) : account ? (
+                  <>
+                    <p className={`text-sm ${account.vip ? 'text-emerald-300' : 'text-white/80'}`}>{account.message}</p>
+                    {!account.vip && (
+                      <p className="text-xs text-white/50 mt-2">Upgrade your Trakt account to VIP for unlimited lists and higher item limits.</p>
+                    )}
+                  </>
+                ) : (
+                  <p className="text-sm text-gray-600 mt-1">Unable to determine quota</p>
+                )}
+              </div>
+            </div>
+          </PageTransition>
+        )}
+
+        {view === "suggested" && (
+          <PageTransition key="suggested">
+            <SuggestedLists onCreate={()=>{ load(); window.dispatchEvent(new Event('lists-updated')); }} />
+          </PageTransition>
+        )}
+        {view === "settings" && (
+          <PageTransition key="settings">
+            <Settings />
+          </PageTransition>
+        )}
+        
+        {view === "timeline" && (
+          <PageTransition key="timeline">
+            <div className="px-4 space-y-4">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-2xl md:text-3xl font-bold text-white">Phase Timeline</h2>
+                <button
+                  onClick={() => changeView("home")}
+                  className="px-4 py-2 bg-white/10 hover:bg-white/20 rounded-lg text-white text-sm transition-colors"
+                >
+                  ← Back to Home
+                </button>
+              </div>
+              <PhaseTimeline />
+            </div>
+          </PageTransition>
+        )}
+
+        {view === "overview" && (
+          <PageTransition key="overview">
+            <Overview />
+          </PageTransition>
+        )}
+        </AnimatePresence>
       </div>
 
-      {/* Mobile-optimized sidebar - stacks on mobile, sidebar on desktop */}
-      <aside className="lg:col-span-1 space-y-4">
-        <StatusWidgets />
-        <div className="bg-white/10 backdrop-blur-lg border border-white/20 p-4 md:p-5 rounded-2xl shadow-lg">
-          <h4 className="font-semibold text-white text-lg mb-3">Quota</h4>
-          {accountLoading ? (
-            <p className="text-sm text-white/60">Checking account...</p>
-          ) : account ? (
-            <>
-              <p className={`text-sm ${account.vip ? 'text-emerald-300' : 'text-white/80'}`}>{account.message}</p>
-              {!account.vip && (
-                <p className="text-xs text-white/50 mt-2">Upgrade your Trakt account to VIP for unlimited lists and higher item limits.</p>
-              )}
-            </>
-          ) : (
-            <p className="text-sm text-gray-600 mt-1">Unable to determine quota</p>
-          )}
-        </div>
-      </aside>
+      {/* Sidebar removed: main content now uses full width beside the app sidebar */}
 
       {/* Create List Modal */}
       {showCreateModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowCreateModal(false)}>
-          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-4 flex justify-between items-center rounded-t-3xl z-10">
-              <h2 className="text-2xl font-bold text-white">Create New List</h2>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-0 md:p-4" onClick={() => setShowCreateModal(false)}>
+          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 md:rounded-3xl shadow-2xl max-w-4xl w-full h-full md:h-auto md:max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-3 md:p-4 flex justify-between items-center md:rounded-t-3xl z-10">
+              <h2 className="text-xl md:text-2xl font-bold text-white">Create New List</h2>
               <button
                 onClick={() => setShowCreateModal(false)}
-                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all"
+                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all min-w-[44px] min-h-[44px] flex items-center justify-center"
               >
                 ×
               </button>
             </div>
-            <div className="p-6">
+            <div className="p-4 md:p-6">
               <CreateListForm onCreated={() => {
                 load();
                 window.dispatchEvent(new Event('lists-updated'));
@@ -362,18 +391,18 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
 
       {/* Suggested Lists Modal */}
       {showSuggestedModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setShowSuggestedModal(false)}>
-          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 rounded-3xl shadow-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
-            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-4 flex justify-between items-center rounded-t-3xl z-10">
-              <h2 className="text-2xl font-bold text-white">Suggested Lists</h2>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-0 md:p-4" onClick={() => setShowSuggestedModal(false)}>
+          <div className="bg-gradient-to-br from-indigo-900 via-purple-900 to-pink-900 md:rounded-3xl shadow-2xl max-w-4xl w-full h-full md:h-auto md:max-h-[90vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 bg-gradient-to-r from-indigo-900/95 to-purple-900/95 backdrop-blur-sm border-b border-white/20 p-3 md:p-4 flex justify-between items-center md:rounded-t-3xl z-10">
+              <h2 className="text-xl md:text-2xl font-bold text-white">Suggested Lists</h2>
               <button
                 onClick={() => setShowSuggestedModal(false)}
-                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all"
+                className="text-white/80 hover:text-white text-2xl leading-none px-3 py-1 hover:bg-white/10 rounded-lg transition-all min-w-[44px] min-h-[44px] flex items-center justify-center"
               >
                 ×
               </button>
             </div>
-            <div className="p-6">
+            <div className="p-4 md:p-6">
               <SuggestedLists onCreate={() => {
                 load();
                 window.dispatchEvent(new Event('lists-updated'));
@@ -382,6 +411,21 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
             </div>
           </div>
         </div>
+      )}
+
+      {/* List Details Modal */}
+      {modalListId != null && (
+        <ListModal listId={modalListId} title={modalListTitle} onClose={()=> setModalListId(null)} />
+      )}
+
+      {/* Edit List Modal */}
+      {editListId !== null && (
+        <EditListModal
+          listId={editListId}
+          currentTitle={editListTitle}
+          onClose={() => { setEditListId(null); setEditListTitle(""); }}
+          onSaved={() => load()}
+        />
       )}
     </div>
   );

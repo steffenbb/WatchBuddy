@@ -363,13 +363,36 @@ async def ensure_user_mood(user_id: int, ttl_sec: int = 86400, fallback_strategy
         if cached:
             return cached  # already cached
         
-        # Fetch recent user history (last 90 days worth)
+        # Fetch recent user history (last 90 days worth) using DB helper
         trakt = TraktClient(user_id=user_id)
         try:
             # Enhanced history fetching: Get up to 500 items from last 90 days for better mood analysis
             # This provides much richer data for understanding user preferences and recency weighting
-            movies_hist = await trakt.get_my_history(media_type="movies", limit=250)
-            shows_hist = await trakt.get_my_history(media_type="shows", limit=250)
+            
+            # Try DB first, fallback to API
+            try:
+                from app.services.watch_history_helper import WatchHistoryHelper
+                from app.core.database import SessionLocal
+                
+                db = SessionLocal()
+                try:
+                    helper = WatchHistoryHelper(db=db, user_id=user_id)
+                    movie_status = helper.get_watched_status_dict("movie")
+                    show_status = helper.get_watched_status_dict("show")
+                    
+                    # Convert to API format
+                    movies_hist = [{"movie": data, "watched_at": data.get("watched_at")} 
+                                  for data in list(movie_status.values())[:250]]
+                    shows_hist = [{"show": data, "watched_at": data.get("watched_at")} 
+                                 for data in list(show_status.values())[:250]]
+                    
+                    logger.debug(f"[MOOD] Using WatchHistoryHelper for mood analysis")
+                finally:
+                    db.close()
+            except Exception as e:
+                logger.warning(f"Failed to get watch history from DB, falling back to API: {e}")
+                movies_hist = await trakt.get_my_history(media_type="movies", limit=250)
+                shows_hist = await trakt.get_my_history(media_type="shows", limit=250)
             
             history = []
             ninety_days_ago = utc_now() - datetime.timedelta(days=90)

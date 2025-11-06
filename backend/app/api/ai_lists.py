@@ -53,6 +53,7 @@ def list_ai_lists(user_id: int = 1):
             "status": l.status,
             "type": l.type,
             "generated_title": getattr(l, "generated_title", None),
+            "poster_path": getattr(l, "poster_path", None),
             "last_synced_at": getattr(l, "last_synced_at", None).isoformat() if getattr(l, "last_synced_at", None) else None,
         } for l in lists]
     finally:
@@ -83,6 +84,18 @@ def delete_ai_list(ai_list_id: str, user_id: int = 1):
         ai_list = db.query(AiList).filter_by(id=ai_list_id, user_id=user_id).first()
         if not ai_list:
             raise HTTPException(status_code=404, detail="AI list not found")
+        
+        # Delete from Trakt if synced
+        if ai_list.trakt_list_id:
+            import asyncio
+            from app.services.trakt_list_sync import delete_trakt_list_for_ai_list
+            try:
+                asyncio.run(delete_trakt_list_for_ai_list(ai_list, user_id))
+            except Exception as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Failed to delete Trakt list for AI list {ai_list_id}: {e}")
+        
         db.query(AiListItem).filter_by(ai_list_id=ai_list_id).delete()
         db.delete(ai_list)
         db.commit()
@@ -168,15 +181,17 @@ def list_ai_list_items(ai_list_id: str, user_id: int = 1):
                         PersistentCandidate.media_type,
                         PersistentCandidate.title,
                         PersistentCandidate.poster_path,
+                        PersistentCandidate.year,
                     )
                     .all()
                 )
-                for tmdb_id, media_type, title_pc, poster_pc in pcs:
+                for tmdb_id, media_type, title_pc, poster_pc, year_pc in pcs:
                     pc_by_tmdb[tmdb_id] = {
                         "tmdb_id": tmdb_id,
                         "media_type": media_type,
                         "title": title_pc,
                         "poster_path": poster_pc,
+                        "year": year_pc,
                     }
             except Exception:
                 pc_by_tmdb = {}
@@ -189,6 +204,21 @@ def list_ai_list_items(ai_list_id: str, user_id: int = 1):
                 return p
             return f"https://image.tmdb.org/t/p/w342{p}" if p else None
 
+        # Fetch watched status (all-time) for both movies and shows using Trakt, but do not fail the endpoint if unavailable
+        watched_movies = {}
+        watched_shows = {}
+        try:
+            from app.services.trakt_client import TraktClient
+            import asyncio as _asyncio
+            tc = TraktClient(user_id=user_id)
+            # Sequentially fetch watched dicts; results are cached in Redis for 5 minutes
+            watched_movies = _asyncio.run(tc.get_watched_status("movies")) or {}
+            watched_shows = _asyncio.run(tc.get_watched_status("shows")) or {}
+        except Exception:
+            # If Trakt is not configured or rate-limited, proceed without watched flags
+            watched_movies = {}
+            watched_shows = {}
+
         enriched = []
         for r in rows:
             meta = meta_by_tmdb.get(r.tmdb_id)
@@ -196,15 +226,36 @@ def list_ai_list_items(ai_list_id: str, user_id: int = 1):
             title = None
             media_type = None
             poster_url = None
+            year = None
             if meta:
                 title = getattr(meta, "title", None)
                 media_type = getattr(meta, "media_type", None)
                 poster_url = _poster_to_url(getattr(meta, "poster_path", None))
+                try:
+                    year = getattr(meta, "year", None)
+                except Exception:
+                    year = year or None
             if (not title or not poster_url or not media_type) and pc:
                 # Fill missing fields from persistent_candidates
                 title = title or pc.get("title")
                 media_type = media_type or pc.get("media_type")
                 poster_url = poster_url or _poster_to_url(pc.get("poster_path"))
+                year = year or pc.get("year")
+
+            # Compute watched status using Trakt all-time watched dictionaries
+            watched = False
+            watched_at = None
+            if r.trakt_id and media_type:
+                if media_type == "movie":
+                    status = watched_movies.get(r.trakt_id)
+                    if status:
+                        watched = True
+                        watched_at = status.get("watched_at")
+                elif media_type == "show":
+                    status = watched_shows.get(r.trakt_id)
+                    if status:
+                        watched = True
+                        watched_at = status.get("watched_at")
 
             enriched.append(
                 {
@@ -215,8 +266,11 @@ def list_ai_list_items(ai_list_id: str, user_id: int = 1):
                     "title": title,
                     "media_type": media_type,
                     "poster_url": poster_url,
+                    "year": year,
                     "explanation_text": r.explanation_text,
                     "explanation_meta": r.explanation_meta,
+                    "watched": watched,
+                    "watched_at": watched_at,
                 }
             )
 

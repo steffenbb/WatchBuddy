@@ -72,9 +72,11 @@ class ListSyncService:
                 pass
 
             # --- Dynamic List Integration ---
-            from app.services.dynamic_list_service import DynamicListService
-            dyn_service = DynamicListService(self.user_id or 1)
-            await dyn_service.sync_dynamic_lists(db)
+            # DISABLED: Auto-creation of 7 dynamic lists (mood/fusion/theme)
+            # Uncomment below to re-enable automatic dynamic list generation
+            # from app.services.dynamic_list_service import DynamicListService
+            # dyn_service = DynamicListService(self.user_id or 1)
+            # await dyn_service.sync_dynamic_lists(db)
 
             user_lists = db.query(UserList).filter(
                 UserList.user_id == self.user_id if self.user_id else True
@@ -388,21 +390,48 @@ class ListSyncService:
             updated_count = await self._update_list_items(
                 user_list.id, limited_candidates, sync_type == "full"
             )
-
             # Calculate removed count for incremental sync
             removed_count = 0
             if sync_type != "full":
                 removed_count = max(0, existing_count - len(limited_candidates))
 
-            # If full sync, eagerly enrich TMDB posters/backdrops for all items
-            if sync_type == "full":
-                if self._tmdb_ready:
-                    try:
+            # Poster enrichment to ensure we have images for poster generation
+            # - On full sync: enrich all candidates
+            # - On incremental sync: enrich top N (e.g., 12) for poster generation
+            if self._tmdb_ready:
+                try:
+                    if sync_type == "full":
                         await self._enrich_posters_for_candidates(limited_candidates)
-                    except Exception as e:
-                        logger.warning(f"[SYNC] Poster enrichment skipped due to error: {e}")
+                    else:
+                        top_for_posters = limited_candidates[:12]
+                        await self._enrich_posters_for_candidates(top_for_posters)
+                except Exception as e:
+                    logger.warning(f"[SYNC] Poster enrichment skipped due to error: {e}")
+            else:
+                logger.info(f"[SYNC] Skipping poster enrichment: TMDB not configured")
+            
+            # --- Poster Generation Integration (after enrichment for best coverage) ---
+            logger.info(f"[POSTER] BEFORE poster generation import for list {user_list.id}")
+            try:
+                from app.services.poster_generator import generate_list_poster, delete_list_poster
+                logger.info(f"[POSTER] Import successful, generating poster for list {user_list.id} with {len(limited_candidates)} items")
+                old_poster_path = user_list.poster_path
+                poster_filename = generate_list_poster(
+                    user_list.id,
+                    limited_candidates,
+                    list_type=user_list.list_type,
+                    max_items=5
+                )
+                logger.info(f"[POSTER] Poster generation returned: {poster_filename} for list {user_list.id}")
+                if poster_filename:
+                    if old_poster_path and old_poster_path != poster_filename:
+                        delete_list_poster(old_poster_path)
+                    user_list.poster_path = poster_filename
+                    logger.info(f"[POSTER] Poster saved: {poster_filename} for list {user_list.id}")
                 else:
-                    logger.info(f"[SYNC] Skipping poster enrichment: TMDB not configured")
+                    logger.warning(f"[POSTER] Poster generation returned None for list {user_list.id}")
+            except Exception as e:
+                logger.error(f"[POSTER] Poster generation failed for list {user_list.id}: {e}", exc_info=True)
             
             # Update dynamic title if needed (for SmartLists only)
             new_title = None  # Initialize to None
@@ -446,9 +475,9 @@ class ListSyncService:
             
             db.commit()
             
-            # Sync to Trakt list if it exists
+            # Sync to Trakt (create if missing; recreate if deleted remotely)
             trakt_sync_success = False
-            if user_list.trakt_list_id and self._trakt_ready:
+            if self._trakt_ready:
                 try:
                     # Get current list items for Trakt sync
                     current_items = db.query(ListItem).filter(
@@ -466,25 +495,63 @@ class ListSyncService:
                     
                     if trakt_items:
                         trakt_client = TraktClient(user_id=user_list.user_id)
-                        
-                        # Update list title on Trakt if it changed
-                        if new_title and new_title != user_list.title:
+
+                        # Ensure we have a Trakt list ID; create if missing
+                        if not user_list.trakt_list_id:
+                            try:
+                                created = await trakt_client.create_list(
+                                    name=user_list.title,
+                                    description=f"WatchBuddy SmartList: {user_list.list_type}",
+                                    privacy="private"
+                                )
+                                tlid = (created or {}).get("ids", {}).get("trakt")
+                                if tlid:
+                                    user_list.trakt_list_id = str(tlid)
+                                    db.commit()
+                                    logger.info(f"[SYNC] Created Trakt list {tlid} for UserList {user_list.id}")
+                            except Exception as e:
+                                logger.warning(f"[SYNC] Failed to create Trakt list: {e}")
+
+                        # Attempt update + sync; on failure (e.g., list deleted remotely), recreate and retry once
+                        async def do_sync():
+                            # Update list title/description on Trakt
                             try:
                                 await trakt_client.update_list(
                                     user_list.trakt_list_id,
-                                    name=new_title,
+                                    name=user_list.title,
                                     description="Created and managed by WatchBuddy"
                                 )
                             except Exception as e:
-                                logger.warning(f"[SYNC] Failed to update Trakt list title: {e}")
-                        
-                        # Sync items to Trakt
-                        sync_stats = await trakt_client.sync_list_items(
-                            user_list.trakt_list_id,
-                            trakt_items
-                        )
-                        logger.info(f"[SYNC] Trakt sync: {sync_stats}")
-                        trakt_sync_success = True
+                                logger.debug(f"[SYNC] Trakt update_list skipped/failed: {e}")
+                            # Sync items to Trakt
+                            return await trakt_client.sync_list_items(
+                                user_list.trakt_list_id,
+                                trakt_items
+                            )
+
+                        try:
+                            if user_list.trakt_list_id:
+                                sync_stats = await do_sync()
+                                logger.info(f"[SYNC] Trakt sync: {sync_stats}")
+                                trakt_sync_success = True
+                        except Exception as e:
+                            logger.warning(f"[SYNC] Trakt sync failed, attempting recreate: {e}")
+                            try:
+                                created = await trakt_client.create_list(
+                                    name=user_list.title,
+                                    description=f"WatchBuddy SmartList: {user_list.list_type}",
+                                    privacy="private"
+                                )
+                                tlid = (created or {}).get("ids", {}).get("trakt")
+                                if tlid:
+                                    user_list.trakt_list_id = str(tlid)
+                                    db.commit()
+                                    logger.info(f"[SYNC] Recreated Trakt list {tlid} for UserList {user_list.id}")
+                                    sync_stats = await do_sync()
+                                    logger.info(f"[SYNC] Trakt sync after recreate: {sync_stats}")
+                                    trakt_sync_success = True
+                            except Exception as e2:
+                                logger.warning(f"[SYNC] Trakt recreate+sync failed: {e2}")
                         
                         # Send notification about Trakt sync
                         from app.api.notifications import send_notification
@@ -776,8 +843,8 @@ class ListSyncService:
         return filtered
 
     async def _enrich_with_watched_status(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Add watched status information to candidates."""
-        # Check if any candidates have Trakt IDs - no point fetching if none do
+        """Add watched status information to candidates from database (TraktWatchHistory)."""
+        # Check if any candidates have Trakt IDs - no point querying if none do
         has_trakt_ids = any(candidate.get("trakt_id") for candidate in candidates)
         
         if not has_trakt_ids:
@@ -788,28 +855,60 @@ class ListSyncService:
                 candidate["watched_at"] = None
             return candidates
         
-        # Get all watched status in bulk for efficiency
-        watched_movies = await self.trakt_client.get_watched_status("movies")
-        watched_shows = await self.trakt_client.get_watched_status("shows")
+        # Use database-backed watch history (much faster than API calls)
+        from app.services.watch_history_helper import WatchHistoryHelper
         
-        enriched = []
-        for candidate in candidates:
-            trakt_id = candidate.get("trakt_id")
-            media_type = candidate.get("media_type", "movie")
+        try:
+            helper = WatchHistoryHelper(self.user_id, self.db)
             
-            if trakt_id:
-                watched_dict = watched_movies if media_type == "movie" else watched_shows
-                watched_info = watched_dict.get(trakt_id)
+            # Get watched status in bulk for both types
+            watched_movies = helper.get_watched_status_dict("movie")
+            watched_shows = helper.get_watched_status_dict("show")
+            
+            enriched = []
+            for candidate in candidates:
+                trakt_id = candidate.get("trakt_id")
+                media_type = candidate.get("media_type", "movie")
                 
-                candidate["is_watched"] = bool(watched_info)
-                candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
-            else:
-                candidate["is_watched"] = False
-                candidate["watched_at"] = None
+                if trakt_id:
+                    watched_dict = watched_movies if media_type == "movie" else watched_shows
+                    watched_info = watched_dict.get(trakt_id)
+                    
+                    candidate["is_watched"] = bool(watched_info)
+                    candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
+                else:
+                    candidate["is_watched"] = False
+                    candidate["watched_at"] = None
+                
+                enriched.append(candidate)
             
-            enriched.append(candidate)
-        
-        return enriched
+            logger.debug(f"Enriched {len(enriched)} candidates with watched status from database")
+            return enriched
+            
+        except Exception as e:
+            logger.warning(f"Failed to enrich with DB watched status, falling back to API: {e}")
+            # Fallback to original API-based method if DB fails
+            watched_movies = await self.trakt_client.get_watched_status("movies")
+            watched_shows = await self.trakt_client.get_watched_status("shows")
+            
+            enriched = []
+            for candidate in candidates:
+                trakt_id = candidate.get("trakt_id")
+                media_type = candidate.get("media_type", "movie")
+                
+                if trakt_id:
+                    watched_dict = watched_movies if media_type == "movie" else watched_shows
+                    watched_info = watched_dict.get(trakt_id)
+                    
+                    candidate["is_watched"] = bool(watched_info)
+                    candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
+                else:
+                    candidate["is_watched"] = False
+                    candidate["watched_at"] = None
+                
+                enriched.append(candidate)
+            
+            return enriched
 
     async def _score_candidates(self, candidates: List[Dict[str, Any]], user_list: UserList) -> List[Dict[str, Any]]:
         logger.warning(f"[DEBUG][SCORING] Scoring {len(candidates)} candidates for list {user_list.id}")
@@ -1215,9 +1314,17 @@ class ListSyncService:
             if not list_items:
                 return {"updated": 0, "total": 0}
             
-            # Get watched status for all media types
-            watched_movies = await self.trakt_client.get_watched_status("movies")
-            watched_shows = await self.trakt_client.get_watched_status("shows")
+            # Get watched status for all media types using DB helper
+            try:
+                from app.services.watch_history_helper import WatchHistoryHelper
+                helper = WatchHistoryHelper(db=db, user_id=self.user_id)
+                watched_movies = helper.get_watched_status_dict("movie")
+                watched_shows = helper.get_watched_status_dict("show")
+                logger.debug(f"[SYNC] Using WatchHistoryHelper for watched status refresh")
+            except Exception as e:
+                logger.warning(f"[SYNC] Failed to get watched status from DB, falling back to API: {e}")
+                watched_movies = await self.trakt_client.get_watched_status("movies")
+                watched_shows = await self.trakt_client.get_watched_status("shows")
             
             updated_count = 0
             removed_count = 0

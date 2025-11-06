@@ -383,19 +383,11 @@ def extract_enriched_fields(tmdb_data: Dict, media_type: str) -> Dict:
         fields['budget'] = tmdb_data.get('budget', 0)
         fields['revenue'] = tmdb_data.get('revenue', 0)
         
-        # Extract director from crew
-        crew_list = credits.get('crew', [])
-        directors = [c.get('name', '') for c in crew_list if c.get('job') == 'Director']
-        fields['director'] = directors[0] if directors else ''
-        
-        # Extract writers from crew
-        writers = [c.get('name', '') for c in crew_list if c.get('department') == 'Writing'][:5]
-        fields['writers'] = json.dumps(writers) if writers else '[]'
+        # Note: director and writers fields removed - not in PersistentCandidate model
+        # Director info can be extracted from created_by (TV) or cast (movies) if needed
     else:
         fields['budget'] = None
         fields['revenue'] = None
-        fields['director'] = ''
-        fields['writers'] = '[]'
     
     # TV-specific fields
     if media_type in ('tv', 'show'):
@@ -428,3 +420,125 @@ def extract_enriched_fields(tmdb_data: Dict, media_type: str) -> Dict:
         fields['networks'] = '[]'
     
     return fields
+
+
+async def fetch_tmdb_trending(media_type: str = 'movie', time_window: str = 'week', page: int = 1) -> Optional[Dict]:
+    """
+    Fetch TMDB trending items.
+    
+    Args:
+        media_type: 'movie', 'tv', or 'all'
+        time_window: 'day' or 'week'
+        page: Page number (1-indexed)
+    
+    Returns:
+        {
+            'page': 1,
+            'results': [{'id': 123, 'title': '...', ...}],
+            'total_pages': 10,
+            'total_results': 200
+        }
+    """
+    api_key = await get_tmdb_api_key()
+    if not api_key:
+        logger.warning("TMDB API key not configured")
+        return None
+    
+    url = f"{TMDB_BASE}/trending/{media_type}/{time_window}"
+    params = {"api_key": api_key, "page": page}
+    
+    from app.services.rate_limit import with_backoff
+    
+    async def make_request():
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+    
+    try:
+        return await with_backoff(
+            make_request,
+            max_retries=4,
+            service="tmdb_api",
+            user_id="global"
+        )
+    except Exception as e:
+        logger.debug(f"TMDB trending API failed for {media_type}/{time_window}: {e}")
+        return None
+
+
+async def fetch_tmdb_popular(media_type: str = 'movie', page: int = 1) -> Optional[Dict]:
+    """
+    Fetch TMDB popular items.
+    
+    Args:
+        media_type: 'movie' or 'tv'
+        page: Page number (1-indexed)
+    
+    Returns same structure as fetch_tmdb_trending
+    """
+    api_key = await get_tmdb_api_key()
+    if not api_key:
+        logger.warning("TMDB API key not configured")
+        return None
+    
+    media_path = 'movie' if media_type == 'movie' else 'tv'
+    url = f"{TMDB_BASE}/{media_path}/popular"
+    params = {"api_key": api_key, "page": page}
+    
+    from app.services.rate_limit import with_backoff
+    
+    async def make_request():
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+    
+    try:
+        return await with_backoff(
+            make_request,
+            max_retries=4,
+            service="tmdb_api",
+            user_id="global"
+        )
+    except Exception as e:
+        logger.debug(f"TMDB popular API failed for {media_type}: {e}")
+        return None
+
+
+async def fetch_tmdb_upcoming(page: int = 1, region: str = 'US') -> Optional[Dict]:
+    """
+    Fetch TMDB upcoming movies (next few weeks).
+    
+    Args:
+        page: Page number (1-indexed)
+        region: ISO 3166-1 country code (default 'US')
+    
+    Returns same structure as fetch_tmdb_trending
+    """
+    api_key = await get_tmdb_api_key()
+    if not api_key:
+        logger.warning("TMDB API key not configured")
+        return None
+    
+    url = f"{TMDB_BASE}/movie/upcoming"
+    params = {"api_key": api_key, "page": page, "region": region}
+    
+    from app.services.rate_limit import with_backoff
+    
+    async def make_request():
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(url, params=params)
+            resp.raise_for_status()
+            return resp.json()
+    
+    try:
+        return await with_backoff(
+            make_request,
+            max_retries=4,
+            service="tmdb_api",
+            user_id="global"
+        )
+    except Exception as e:
+        logger.debug(f"TMDB upcoming API failed: {e}")
+        return None
