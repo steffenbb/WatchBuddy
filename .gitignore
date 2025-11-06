@@ -74,6 +74,8 @@ backend/data/watchbuddy_bootstrap.tar.gz
 models/
 cache/
 models/cache/
+models_cache/
+backend/app/models_cache/
 
 # Exclude local workspace/ide and GitHub configs
 .vscode/
