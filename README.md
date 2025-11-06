@@ -88,9 +88,6 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 - Automatically generated based on your preferences, watch history, or predefined rules.
 - Useful for onboarding, quick recommendations, or exploring new content.
 
-**Screenshot Placeholder:**
-<!-- Insert screenshot of Manual/Suggested Lists UI here -->
-
 ---
 
 ### AI Lists (Theme, Mood, Fusion, Chat)
@@ -108,8 +105,7 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 - Build lists interactively via chat prompts and natural language queries.
 - Uses semantic search and TF-IDF for deep matching.
 
-**Screenshot Placeholder:**
-<!-- Insert screenshot of AI Lists UI here -->
+
 
 ---
 
@@ -117,9 +113,6 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 **Individual Lists:**
 - Track single items or create lists for individual users.
 - Supports custom scoring, granular control, and export to Trakt.
-
-**Screenshot Placeholder:**
-<!-- Insert screenshot of Individual Lists UI here -->
 
 ---
 
@@ -167,9 +160,16 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 ---
 
 ## Screenshots
-- **Manual/Suggested Lists:** <!-- Insert screenshot here -->
-- **AI Lists:** <!-- Insert screenshot here -->
-- **Individual Lists:** <!-- Insert screenshot here -->
+<img width="1905" height="1639" alt="127 0 0 1_5173_(PC) (7)" src="https://github.com/user-attachments/assets/44c02c2a-1100-4532-bf72-bbd1a3e7c85d" />
+<img width="1905" height="1295" alt="127 0 0 1_5173_(PC) (4)" src="https://github.com/user-attachments/assets/d6bf5cde-f17c-4099-a89b-3bd014b9a9e0" />
+<img width="1905" height="2186" alt="127 0 0 1_5173_(PC)" src="https://github.com/user-attachments/assets/11f9e134-9cca-4d8f-bf44-2202d743ce27" />
+<img width="1905" height="1131" alt="127 0 0 1_5173_(PC) (2)" src="https://github.com/user-attachments/assets/bdb8cda4-99f7-49a9-8beb-ad91635b810c" />
+<img width="1905" height="1295" alt="127 0 0 1_5173_(PC) (6)" src="https://github.com/user-attachments/assets/af164a49-169f-4f02-be6c-af1a9fa8231b" />
+<img width="1905" height="1528" alt="127 0 0 1_5173_(PC) (9)" src="https://github.com/user-attachments/assets/a04cfa9a-7093-495d-8599-d69722027c14" />
+<img width="1905" height="1131" alt="127 0 0 1_5173_(PC) (1)" src="https://github.com/user-attachments/assets/69a1be22-ebc1-4d53-a7ea-413e790bc193" />
+<img width="1920" height="1080" alt="127 0 0 1_5173_(PC) (8)" src="https://github.com/user-attachments/assets/d6fc24f2-7bac-4f37-a897-759b3d32e5b1" />
+<img width="1905" height="1295" alt="127 0 0 1_5173_(PC) (5)" src="https://github.com/user-attachments/assets/734d2730-b2c1-4fc7-aef1-95cd5fb26549" />
+
 
 ---
 
@@ -177,9 +177,7 @@ WatchBuddy is a technical movie and TV recommendation system built for developer
 - Zero-config Docker setup: `docker compose build backend; docker compose up -d backend`
 - Persistent PostgreSQL and Redis volumes
 - Celery for background tasks and periodic updates
-- CSV bootstrap for initial candidate pool
 - All secrets stored in Redis (no .env files)
-- See `.github/copilot-instructions.md` for advanced workflows and debugging
 
 ---
 
@@ -451,97 +449,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-## 📞 Support
-
-Having issues? Check the [troubleshooting section](#-troubleshooting) or open an issue on GitHub.
-
-**Enjoy your personalized movie nights!** 🍿
-
-Edit `docker-compose.override.yml` if you want different local credentials. That file is added to `.gitignore` so it won't be committed.
-
-IMPORTANT: this repository also includes an intentionally committed set of default DB credentials
-to make the project work out-of-the-box for local development. These credentials are insecure
-and MUST NOT be used in production. Rotate/change them before deploying or use a secrets manager.
-
-## Persistent Candidate Pool Architecture
-
-WatchBuddy now uses a **persistent database candidate pool** for fast recommendations without excessive API calls.
-
-### Overview
-- **`PersistentCandidate` table**: Stores movies/shows with metadata (genres, language, popularity, votes, obscurity/mainstream/freshness scores).
-- **CSV Bootstrap**: On first startup, CSVs in `/app/data/*.csv` auto-import into the database (historical content up to 2023).
-- **Incremental Ingestion**: Background Celery tasks fetch new content (>=2024) from TMDB/Trakt and insert into the pool.
-- **Vote Refresh**: Recent items (<90 days) have their vote_count/vote_average periodically refreshed for accuracy.
-- **Fast Queries**: SmartList syncs query the database with filters (language, genre, year, obscurity) instead of hitting external APIs repeatedly.
-
-### CSV Dataset Placement
-Place your TMDB CSV datasets (movies and shows) in `backend/data/` before building:
-```bash
-# Example structure:
-# backend/data/TMDB_movies_dataset.csv
-# backend/data/TMDB_shows_dataset.csv
-```
-Expected CSV columns (flexible matching):
-- `tmdb_id` or `id` (required)
-- `title` or `name` (required)
-- `media_type` or `type` (optional, inferred from filename/context)
-- `original_language` or `language`
-- `popularity`, `vote_average`, `vote_count`
-- `release_date` or `first_air_date`
-- `genres` (JSON array or comma-separated)
-- `keywords`, `overview`, `poster_path`, `backdrop_path` (optional)
-
-On first run, `init_db()` detects an empty `persistent_candidates` table and imports these CSVs automatically.
-
-### Celery Task Scheduling
-The following background tasks maintain the candidate pool:
-
-**Ingestion Tasks** (fetch new content >=2024):
-- `ingest_new_movies` – Discovers new movies from TMDB
-- `ingest_new_shows` – Discovers new shows from TMDB
-
-**Vote Refresh Tasks** (update recent items):
-- `refresh_recent_votes_movies` – Refreshes vote stats for recent movies
-- `refresh_recent_votes_shows` – Refreshes vote stats for recent shows
-
-#### Example Celery Beat Schedule
-Add to your Celery configuration (e.g., `backend/app/core/celery_app.py` or environment):
-```python
-from celery.schedules import crontab
-
-beat_schedule = {
-    'ingest-new-movies': {
-        'task': 'app.services.tasks.ingest_new_movies',
-        'schedule': crontab(hour=2, minute=0),  # Daily at 2 AM
-    },
-    'ingest-new-shows': {
-        'task': 'app.services.tasks.ingest_new_shows',
-        'schedule': crontab(hour=3, minute=0),  # Daily at 3 AM
-    },
-    'refresh-votes-movies': {
-        'task': 'app.services.tasks.refresh_recent_votes_movies',
-        'schedule': crontab(hour=4, minute=0, day_of_week='0,3'),  # Twice a week
-    },
-    'refresh-votes-shows': {
-        'task': 'app.services.tasks.refresh_recent_votes_shows',
-        'schedule': crontab(hour=5, minute=0, day_of_week='0,3'),
-    },
-}
-```
-
-Or use Docker Compose environment variables to configure intervals (implementation-specific).
-
-### Obscurity & Mainstream Scoring
-The persistent pool pre-computes heuristic scores:
-- **`obscurity_score`**: High rating with low vote_count/popularity = interesting obscure content
-- **`mainstream_score`**: High rating + high popularity + high votes = mainstream hits
-- **`freshness_score`**: Recency decay over 3 years for new content boost
-
-These scores accelerate discovery mode filtering (obscure/popular/balanced) without re-computation.
-
-### Manual CSV Import
-If you need to manually import or update datasets after initial bootstrap:
-```bash
-docker exec -it watchbuddy-backend-1 python -m app.scripts.import_tmdb_csv /app/data/your_file.csv movie
-```
 
