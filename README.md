@@ -369,23 +369,6 @@ docker compose up -d
 
 ---
 
-## 🐳 Docker: Local vs Server and Versioning
-
-- Use `docker-compose.yml` for server/production; it points to published images (`lsdking101/*`).
-- Use `docker-compose.override.yml` locally to build images from source while keeping server deploys clean.
-- The override file is automatically picked up by `docker compose` when present locally and is ignored by remote builds via `.dockerignore`.
-
-### CI Releases
-- On pushes to `main`, GitHub Actions builds and pushes Docker images for backend and frontend with tags:
-    - `latest`
-    - date-based version (e.g., `v2025.10.15.123`)
-    - short commit SHA
-- Pushing a git tag like `v1.2.3` will use that semantic version for image tags.
-
-Images include labels `org.opencontainers.image.version` and `org.opencontainers.image.revision`, and both Dockerfiles accept `APP_VERSION` and `GIT_SHA` build args.
-- Check logs: `docker logs watchbuddy-backend-1 --tail 100`
-- Try forcing a full sync: Click list → "Sync" button
-
 ### Container Issues?
 ```bash
 # Restart all services
