@@ -90,6 +90,25 @@ def import_database(bootstrap_dir):
     
     db = SessionLocal()
     try:
+        # Check if data already exists
+        existing_count = db.execute(text("SELECT COUNT(*) FROM persistent_candidates")).scalar()
+        if existing_count > 100000:  # Threshold to detect if bootstrap already loaded
+            logger.warning(f"⚠️ Database already contains {existing_count:,} candidates - skipping import")
+            
+            # Set completion flag since bootstrap data exists
+            try:
+                from app.core.redis_client import get_redis
+                import asyncio
+                async def _set_flag():
+                    r = get_redis()
+                    await r.set("metadata_build:scan_completed", "true")
+                asyncio.run(_set_flag())
+                logger.warning("Metadata scan marked as completed (bootstrap data detected)")
+            except Exception:
+                pass
+            
+            return True  # Return success since data exists
+        
         # Increase statement timeout for large import (30 minutes)
         logger.warning("Setting statement timeout to 30 minutes...")
         db.execute(text("SET statement_timeout = '1800000'"))  # 30 minutes in ms
@@ -138,6 +157,20 @@ def import_database(bootstrap_dir):
         # Verify import
         count = db.execute(text("SELECT COUNT(*) FROM persistent_candidates")).scalar()
         logger.warning(f"✅ Database imported: {count:,} candidates")
+        
+        # Set completion flag immediately after successful import
+        if count > 0:
+            try:
+                from app.core.redis_client import get_redis
+                import asyncio
+                async def _set_flag():
+                    r = get_redis()
+                    await r.set("metadata_build:scan_completed", "true")
+                asyncio.run(_set_flag())
+                logger.warning("Metadata scan marked as completed (bootstrap uses TMDB IDs)")
+            except Exception:
+                pass
+        
         return count > 0
         
     except Exception as e:
@@ -162,12 +195,26 @@ def import_faiss_index(bootstrap_dir):
     # Ensure target directory exists
     FAISS_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Copy files
-    shutil.copy2(index_file, FAISS_DIR / "faiss_index.bin")
-    shutil.copy2(map_file, FAISS_DIR / "faiss_map.json")
+    # Check if FAISS files already exist
+    target_index = FAISS_DIR / "faiss_index.bin"
+    target_map = FAISS_DIR / "faiss_map.json"
     
-    logger.warning(f"✅ FAISS index imported to {FAISS_DIR}")
-    return True
+    if target_index.exists() and target_map.exists():
+        # Check if existing files are valid (non-empty)
+        if target_index.stat().st_size > 1000 and target_map.stat().st_size > 10:
+            logger.warning(f"⚠️ FAISS index already exists at {FAISS_DIR} - skipping import")
+            return True
+    
+    try:
+        # Copy files
+        shutil.copy2(index_file, target_index)
+        shutil.copy2(map_file, target_map)
+        
+        logger.warning(f"✅ FAISS index imported to {FAISS_DIR}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to copy FAISS files: {e}")
+        return False
 
 
 def import_elasticsearch_data(bootstrap_dir, rebuild_now=True):
@@ -202,7 +249,38 @@ def import_bootstrap_bundle():
     """
     Main import function. Returns True if successful, False otherwise.
     This function is called by database.py init_db() on first startup.
+    Uses Redis lock to prevent duplicate imports.
     """
+    # Try to acquire a Redis-backed lock to prevent duplicate imports.
+    # Use a unique token and atomic release to avoid accidental unlocks from other processes.
+    try:
+        from app.core.redis_client import get_redis
+        import asyncio
+        import uuid
+        
+        async def _try_acquire_lock_with_retries(retries: int = 5, backoff_seconds: float = 1.0):
+            r = get_redis()
+            token = str(uuid.uuid4())
+            for attempt in range(retries):
+                try:
+                    # NX ensures we only set if not exists; ex sets expiry to avoid stuck locks
+                    acquired = await r.set("bootstrap_import_lock", token, nx=True, ex=1800)
+                    if acquired:
+                        return token
+                except Exception:
+                    # Redis may not be ready yet; wait and retry
+                    await asyncio.sleep(backoff_seconds)
+                    continue
+            return None
+
+        lock_token = asyncio.run(_try_acquire_lock_with_retries())
+        if not lock_token:
+            logger.warning("Could not acquire bootstrap import lock (another importer running or Redis unavailable) - skipping import")
+            return False
+    except Exception as lock_err:
+        logger.warning(f"Critical: Redis unavailable while attempting to acquire import lock: {lock_err} - skipping bootstrap import")
+        return False
+    
     try:
         if not check_bundle_exists():
             logger.warning("No bootstrap bundle found, will use CSV import fallback")
@@ -218,40 +296,135 @@ def import_bootstrap_bundle():
         # Load metadata
         metadata = load_metadata(bootstrap_dir)
         
-        # Import components
-        db_success = import_database(bootstrap_dir)
-        faiss_success = import_faiss_index(bootstrap_dir)
-        es_success = import_elasticsearch_data(bootstrap_dir)
+        # Import components (each is independent, failures don't block others)
+        db_success = False
+        faiss_success = False
+        es_success = False
+        
+        try:
+            db_success = import_database(bootstrap_dir)
+        except Exception as e:
+            logger.error(f"Database import failed: {e}", exc_info=True)
+            logger.warning("Continuing with FAISS and ES imports...")
+        
+        try:
+            faiss_success = import_faiss_index(bootstrap_dir)
+        except Exception as e:
+            logger.error(f"FAISS import failed: {e}", exc_info=True)
+        
+        try:
+            es_success = import_elasticsearch_data(bootstrap_dir)
+        except Exception as e:
+            logger.error(f"Elasticsearch import failed: {e}", exc_info=True)
         
         # Cleanup
         cleanup_extract_dir()
         
         if db_success:
-            # Mark metadata scan as completed to prevent auto-trigger of metadata builder
-            # Bootstrap data is complete without Trakt IDs (we use TMDB IDs instead)
+            logger.warning("=" * 60)
+            logger.warning("✅ Bootstrap import complete!")
+            logger.warning(f"Database: {'✅' if db_success else '❌'}")
+            logger.warning(f"FAISS Index: {'✅' if faiss_success else '❌'}")
+            logger.warning(f"Elasticsearch: {'✅' if es_success else '❌'}")
+            logger.warning(f"Imported {metadata.get('counts', {}).get('total_candidates', 'unknown')} candidates")
+            logger.warning("=" * 60)
+            
+            # Release lock on success (only if token still matches)
             try:
                 from app.core.redis_client import get_redis
                 import asyncio
-                async def _set_completion_flag():
+
+                async def _release_lock(token: str):
                     r = get_redis()
-                    await r.set("metadata_build:scan_completed", "true")
-                    logger.warning("Metadata scan marked as completed (bootstrap uses TMDB IDs)")
-                asyncio.run(_set_completion_flag())
-            except Exception as flag_err:
-                logger.warning(f"Failed to set metadata completion flag: {flag_err}")
+                    # Use a small Lua script to delete the key only if the value matches our token
+                    lua = """
+                    if redis.call('get', KEYS[1]) == ARGV[1] then
+                        return redis.call('del', KEYS[1])
+                    else
+                        return 0
+                    end
+                    """
+                    try:
+                        await r.eval(lua, keys=["bootstrap_import_lock"], args=[token])
+                    except Exception:
+                        # Fallback: best-effort delete
+                        try:
+                            await r.delete("bootstrap_import_lock")
+                        except Exception:
+                            pass
+
+                asyncio.run(_release_lock(lock_token))
+            except Exception:
+                pass
             
-            logger.warning("=" * 60)
-            logger.warning("✅ Bootstrap import complete!")
-            logger.warning(f"Imported {metadata.get('counts', {}).get('total_candidates', 'unknown')} candidates")
-            logger.warning("=" * 60)
             return True
         else:
             logger.error("Bootstrap import failed")
+            
+            # Release lock on failure (only if token still matches)
+            try:
+                from app.core.redis_client import get_redis
+                import asyncio
+
+                async def _release_lock(token: str):
+                    r = get_redis()
+                    lua = """
+                    if redis.call('get', KEYS[1]) == ARGV[1] then
+                        return redis.call('del', KEYS[1])
+                    else
+                        return 0
+                    end
+                    """
+                    try:
+                        await r.eval(lua, keys=["bootstrap_import_lock"], args=[token])
+                    except Exception:
+                        try:
+                            await r.delete("bootstrap_import_lock")
+                        except Exception:
+                            pass
+
+                asyncio.run(_release_lock(lock_token))
+            except Exception:
+                pass
+            
             return False
             
     except Exception as e:
         logger.error(f"Bootstrap import failed: {e}", exc_info=True)
         cleanup_extract_dir()
+        
+        # Release lock on exception (best-effort; only release if token matches)
+        try:
+            from app.core.redis_client import get_redis
+            import asyncio
+
+            async def _release_lock(token: str):
+                r = get_redis()
+                lua = """
+                if redis.call('get', KEYS[1]) == ARGV[1] then
+                    return redis.call('del', KEYS[1])
+                else
+                    return 0
+                end
+                """
+                try:
+                    await r.eval(lua, keys=["bootstrap_import_lock"], args=[token])
+                except Exception:
+                    try:
+                        await r.delete("bootstrap_import_lock")
+                    except Exception:
+                        pass
+
+            # Only try to release if we had acquired a token
+            try:
+                token = lock_token
+            except NameError:
+                token = None
+            if token:
+                asyncio.run(_release_lock(token))
+        except Exception:
+            pass
+        
         return False
 
 

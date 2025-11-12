@@ -162,20 +162,15 @@ def run_nightly_maintenance(self):
                 tz = pytz.UTC
             now_local = utc_now().astimezone(tz)
             if 0 <= now_local.hour < 7:
-                # Run metadata builder (retry missing trakt_ids) - 4 hour limit
-                try:
-                    build_metadata.apply_async(
-                        args=[1, False],  # user_id, force
-                        soft_time_limit=14400,  # 4 hours
-                        time_limit=14400 + 300  # 4h + 5min grace period
-                    )
-                except Exception as e:
-                    logger.warning(f"Nightly: failed to queue metadata build: {e}")
+                # METADATA BUILDER DISABLED - Bootstrap import provides all necessary data
+                logger.info("Nightly: metadata builder permanently disabled (bootstrap path active)")
+
                 # Run comprehensive AI optimization for all candidates - 2 hour limit
                 try:
                     await _backfill_ai_segments(max_minutes=120)  # 2 hours max
                 except Exception as e:
                     logger.warning(f"Nightly: AI optimization failed: {e}")
+
                 # Rebuild ElasticSearch index after embeddings and FAISS updates - 1 hour limit
                 try:
                     await asyncio.wait_for(
@@ -487,50 +482,51 @@ async def _backfill_ai_segments(max_minutes: int = 420):
     finally:
         db.close()
 
-    def _prepare_es_candidates_batch(rows):
-        """
-        Prepare a batch of rows for ElasticSearch indexing.
-        Converts DB rows to ES document format with JSON field parsing.
-        Memory-efficient: processes in-place without accumulating.
-        """
-        import json
-    
-        def parse_json_field(field_value):
-            """Parse JSON field to searchable text."""
-            if not field_value:
-                return ""
-            try:
-                data = json.loads(field_value)
-                if isinstance(data, list):
-                    return " ".join(str(item) for item in data)
-                return str(data)
-            except:
-                return ""
-    
-        candidates = []
-        for row in rows:
-            candidate = {
-                "tmdb_id": row.tmdb_id,
-                "media_type": row.media_type,
-                "title": row.title or "",
-                "original_title": row.original_title or "",
-                "year": row.year,
-                "overview": row.overview or "",
-                "tagline": row.tagline or "",
-                "genres": parse_json_field(row.genres),
-                "keywords": parse_json_field(row.keywords),
-                "cast": parse_json_field(row.cast_json),
-                "created_by": parse_json_field(row.created_by),
-                "networks": parse_json_field(row.networks),
-                "production_companies": parse_json_field(row.production_companies),
-                "production_countries": parse_json_field(row.production_countries),
-                "spoken_languages": parse_json_field(row.spoken_languages),
-                "popularity": row.popularity,
-                "vote_average": row.vote_average,
-                "vote_count": row.vote_count
-            }
-            candidates.append(candidate)
-        return candidates
+def _prepare_es_candidates_batch(rows):
+    """
+    Prepare a batch of rows for ElasticSearch indexing.
+    Converts DB rows to ES document format with JSON field parsing.
+    Memory-efficient: processes in-place without accumulating.
+    """
+    import json
+
+    def parse_json_field(field_value):
+        """Parse JSON field to searchable text."""
+        if not field_value:
+            return ""
+        try:
+            data = json.loads(field_value)
+            if isinstance(data, list):
+                return " ".join(str(item) for item in data)
+            return str(data)
+        except:
+            return ""
+
+    candidates = []
+    for row in rows:
+        candidate = {
+            "tmdb_id": row.tmdb_id,
+            "media_type": row.media_type,
+            "title": row.title or "",
+            "original_title": row.original_title or "",
+            "year": row.year,
+            "overview": row.overview or "",
+            "tagline": row.tagline or "",
+            "genres": parse_json_field(row.genres),
+            "keywords": parse_json_field(row.keywords),
+            "cast": parse_json_field(row.cast_json),
+            "created_by": parse_json_field(row.created_by),
+            "networks": parse_json_field(row.networks),
+            "production_companies": parse_json_field(row.production_companies),
+            "production_countries": parse_json_field(row.production_countries),
+            "spoken_languages": parse_json_field(row.spoken_languages),
+            "popularity": row.popularity,
+            "vote_average": row.vote_average,
+            "vote_count": row.vote_count
+        }
+        candidates.append(candidate)
+    return candidates
+
 
 async def _rebuild_elasticsearch_index():
     """Rebuild ElasticSearch index from persistent candidates (incremental or full).
@@ -627,7 +623,7 @@ async def _rebuild_elasticsearch_index():
                             break
                         
                         # Prepare candidates for indexing (process immediately, don't accumulate)
-                            candidates = _prepare_es_candidates_batch(rows)
+                        candidates = _prepare_es_candidates_batch(rows)
                         
                         # Index batch immediately (stream to ES, don't accumulate)
                         count = es_client.index_candidates(candidates)
@@ -654,48 +650,48 @@ async def _rebuild_elasticsearch_index():
             logger.error("[ElasticSearch] Failed to create index")
             return 0
         
-            from app.core.memory_manager import managed_memory
+        from app.core.memory_manager import managed_memory
         
         indexed = 0
         offset = 0
-            batch_size = 250  # Reduced for better memory efficiency
+        batch_size = 250  # Reduced for better memory efficiency
         
-            with managed_memory("elasticsearch_full_rebuild"):
-                while offset < total:
-                    # Fetch batch
-                    rows = db.execute(text(
-                        """
-                        SELECT 
-                            tmdb_id, media_type, title, original_title, year, overview, tagline,
-                            genres, keywords, "cast" AS cast_json, created_by, networks,
-                            production_companies, production_countries, spoken_languages,
-                            popularity, vote_average, vote_count
-                        FROM persistent_candidates
-                        WHERE active=true
-                        ORDER BY id
-                        OFFSET :off LIMIT :lim
-                        """
-                    ), {"off": offset, "lim": batch_size}).fetchall()
+        with managed_memory("elasticsearch_full_rebuild"):
+            while offset < total:
+                # Fetch batch
+                rows = db.execute(text(
+                    """
+                    SELECT 
+                        tmdb_id, media_type, title, original_title, year, overview, tagline,
+                        genres, keywords, "cast" AS cast_json, created_by, networks,
+                        production_companies, production_countries, spoken_languages,
+                        popularity, vote_average, vote_count
+                    FROM persistent_candidates
+                    WHERE active=true
+                    ORDER BY id
+                    OFFSET :off LIMIT :lim
+                    """
+                ), {"off": offset, "lim": batch_size}).fetchall()
                 
-                    if not rows:
-                        break
+                if not rows:
+                    break
                 
-                    # Prepare candidates using helper function
-                    candidates = _prepare_es_candidates_batch(rows)
+                # Prepare candidates using helper function
+                candidates = _prepare_es_candidates_batch(rows)
                 
-                    # Index batch immediately
-                    count = es_client.index_candidates(candidates)
-                    indexed += count
-                    offset += len(rows)
+                # Index batch immediately
+                count = es_client.index_candidates(candidates)
+                indexed += count
+                offset += len(rows)
                 
-                    # Clear to free memory
-                    candidates.clear()
-                    del rows
+                # Clear to free memory
+                candidates.clear()
+                del rows
                 
-                    # Log progress every 5k items
-                    if indexed % 5000 == 0 or indexed == total:
-                        elapsed_min = (time.time() - start_time) / 60
-                        logger.info(f"[ElasticSearch] Progress: {indexed}/{total} indexed ({indexed/total*100:.1f}%)")
+                # Log progress every 5k items
+                if indexed % 5000 == 0 or indexed == total:
+                    elapsed_min = (time.time() - start_time) / 60
+                    logger.info(f"[ElasticSearch] Progress: {indexed}/{total} indexed ({indexed/total*100:.1f}%)")
         
         elapsed_min = (time.time() - start_time) / 60
         logger.info(f"[ElasticSearch] ✅ Full rebuild complete! {indexed} items indexed in {elapsed_min:.1f} minutes")
@@ -808,30 +804,15 @@ def refresh_recent_votes_shows():
 @shared_task(bind=True)
 def build_metadata(self, user_id: int = 1, force: bool = False):
     """
-    Build Trakt IDs for persistent candidates with progress tracking.
+    METADATA BUILDER PERMANENTLY DISABLED.
     
-    Args:
-        user_id: User ID for Trakt authentication
-        force: Force rebuild even if already complete
+    Bootstrap import provides complete candidate pool with TMDB IDs.
+    Trakt ID mapping is now handled on-demand by TraktIdResolver, not bulk build.
+    
+    This task is a no-op to prevent errors if accidentally triggered.
     """
-    from app.core.database import SessionLocal
-    from app.services.metadata_builder import MetadataBuilder
-    
-    async def _run():
-        db = SessionLocal()
-        try:
-            builder = MetadataBuilder()
-            logger.info(f"Starting metadata build (user_id={user_id}, force={force})")
-            await builder.build_trakt_ids(db, user_id=user_id, force=force)
-            logger.info("Metadata build completed successfully")
-        except Exception as e:
-            logger.error(f"Metadata build failed: {e}", exc_info=True)
-            raise
-        finally:
-            db.close()
-    
-    # Execute metadata build coroutine
-    return asyncio.run(_run())
+    logger.warning(f"build_metadata called but is DISABLED - bootstrap path active (no-op)")
+    return {"status": "disabled", "message": "Metadata builder permanently disabled - bootstrap import active"}
 
 
 @shared_task(bind=True, max_retries=2, default_retry_delay=60)
@@ -1264,19 +1245,25 @@ def populate_new_list_async(
             try:
                 if user_list.trakt_list_id:
                     trakt_items = []
+                    trakt_count = 0
+                    tmdb_fallback = 0
                     for it in to_write:
-                        if it.get("trakt_id"):
-                            trakt_items.append({
-                                "trakt_id": it.get("trakt_id"),
-                                "media_type": it.get("media_type") or "movie"
-                            })
+                        mtype = it.get("media_type") or "movie"
+                        tid = it.get("trakt_id")
+                        tmdb_id = it.get("tmdb_id") or (it.get("ids", {}) if isinstance(it.get("ids"), dict) else {}).get("tmdb")
+                        if tid:
+                            trakt_items.append({"trakt_id": tid, "media_type": mtype})
+                            trakt_count += 1
+                        elif tmdb_id:
+                            trakt_items.append({"tmdb_id": tmdb_id, "media_type": mtype})
+                            tmdb_fallback += 1
                     if trakt_items:
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
                         try:
                             trakt_client = TraktClient(user_id=user_id)
                             loop.run_until_complete(trakt_client.add_items_to_list(user_list.trakt_list_id, trakt_items))
-                            logger.info(f"Pushed {len(trakt_items)} items to Trakt list {user_list.trakt_list_id}")
+                            logger.info(f"Pushed {len(trakt_items)} items (trakt_ids={trakt_count}, tmdb_fallback={tmdb_fallback}) to Trakt list {user_list.trakt_list_id}")
                             # Notify success
                             from app.api.notifications import send_notification
                             try:

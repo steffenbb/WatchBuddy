@@ -28,6 +28,7 @@ from app.services.tmdb_client import fetch_tmdb_metadata, fetch_tmdb_upcoming
 from app.models import MediaMetadata
 from app.utils.timezone import utc_now
 from app.core.redis_client import get_redis_sync
+from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
@@ -1330,7 +1331,34 @@ class OverviewService:
             )
             
             db.add(candidate)
-            logger.info(f"[Ingest] Added new candidate: {title} (trakt:{trakt_id}, tmdb:{tmdb_id})")
+            try:
+                # Use flush to attempt the INSERT immediately and catch unique constraint races
+                db.flush()
+                logger.info(f"[Ingest] Added new candidate: {title} (trakt:{trakt_id}, tmdb:{tmdb_id})")
+            except IntegrityError as ie:
+                # Likely a concurrent insert created the same tmdb_id+media_type
+                logger.warning(f"[Ingest] Candidate insert race detected for tmdb:{tmdb_id}, media_type:{media_type} - fetching existing row")
+                try:
+                    db.rollback()  # rollback the failed insert
+                except Exception:
+                    pass
+                # Re-fetch existing candidate to backfill trakt_id if needed
+                try:
+                    existing = db.query(PersistentCandidate).filter(
+                        and_(
+                            PersistentCandidate.tmdb_id == tmdb_id,
+                            PersistentCandidate.media_type == media_type
+                        )
+                    ).first()
+                    if existing and not existing.trakt_id:
+                        existing.trakt_id = trakt_id
+                        db.add(existing)
+                        try:
+                            db.flush()
+                        except Exception:
+                            db.rollback()
+                except Exception as e:
+                    logger.debug(f"[Ingest] Failed to recover from insert race: {e}")
             
         except Exception as e:
             logger.error(f"[Ingest] Failed to create candidate from TMDB: {e}", exc_info=True)

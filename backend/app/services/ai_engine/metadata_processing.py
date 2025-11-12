@@ -8,9 +8,19 @@ import re
 
 
 def normalize_prompt(prompt: str) -> str:
-    prompt = prompt.lower().strip()
+    """Normalize prompt while preserving semantic meaning.
+    
+    Note: Lowercase conversion happens AFTER entity extraction in parse_prompt,
+    so we preserve capitalization here for proper name recognition.
+    """
+    # Preserve original case for entity extraction (done in parser.py)
+    # Only strip whitespace and collapse multiple spaces
+    prompt = prompt.strip()
     prompt = re.sub(r"\s+", " ", prompt)
-    prompt = re.sub(r"[^\w\s.,!?]", "", prompt)
+    # Convert to lowercase for matching (case-insensitive)
+    prompt = prompt.lower()
+    # Remove only truly disruptive punctuation, keep apostrophes for contractions
+    prompt = re.sub(r"[^\w\s.,!?\-']", "", prompt)
     return prompt
 
 

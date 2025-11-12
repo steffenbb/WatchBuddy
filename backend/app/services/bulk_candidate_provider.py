@@ -117,11 +117,12 @@ class BulkCandidateProvider:
                                   existing_list_ids: Optional[Set[int]], enrich_with_tmdb: bool,
                                   genres: Optional[List[str]], languages: Optional[List[str]],
                                   min_year: Optional[int], max_year: Optional[int], min_rating: Optional[float],
-                                  genre_mode: str = "any") -> List[Dict[str, Any]]:
+                                  genre_mode: str = "any", exclusion_metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Finalize cached candidates with current filters and enrichment."""
         # Apply current exclusions and filters
         filtered = self._apply_filters(
-            candidates, exclude_ids, genres, languages, min_year, max_year, min_rating, genre_mode=genre_mode
+            candidates, exclude_ids, genres, languages, min_year, max_year, min_rating, genre_mode=genre_mode,
+            exclusion_metadata=exclusion_metadata
         )
         # Strict media_type filter: only allow items matching the first candidate's media_type (movie/show)
         if filtered:
@@ -358,7 +359,8 @@ class BulkCandidateProvider:
         list_title: Optional[str] = None,  # List title for fusion mode genre extraction
         fusion_mode: bool = False,  # Enable fusion mode logic
         exclude_ids: Optional[Set] = None,  # NEW: Exclude these trakt/tmdb/item_ids from candidates
-        persistent_only: bool = False  # NEW: Only use persistent DB, skip all external discovery/enrichment
+        persistent_only: bool = False,  # NEW: Only use persistent DB, skip all external discovery/enrichment
+        strict_mode: bool = False  # NEW: Strict fetch for manual/custom lists (no lenient fallbacks)
     ) -> List[Dict[str, Any]]:
         """
         Fetch enhanced candidates with mood-based filtering and search.
@@ -377,6 +379,7 @@ class BulkCandidateProvider:
             list_title: Title of the list (for genre extraction in fusion mode)
             fusion_mode: Whether this is a fusion-powered list
             exclude_ids: Set of trakt_ids or tmdb_ids to exclude from candidates for diversity filtering
+            strict_mode: When True, disable any lenient fallbacks; fetch only strict matches from persistent store
         """
         from app.services.trakt_client import TraktAPIError, TraktAuthError, TraktNetworkError, TraktUnavailableError
         logger.warning(f"[MEDIA_TYPE_DIAGNOSTIC] get_candidates CALLED for media_type={media_type}, limit={limit}, languages={languages}, genres={genres}")
@@ -389,8 +392,7 @@ class BulkCandidateProvider:
                     PersistentCandidate.active == True,
                     PersistentCandidate.media_type == ("movie" if media_type == "movies" else "show"),
                     (PersistentCandidate.is_adult == False),
-                    PersistentCandidate.title != None,
-                    PersistentCandidate.trakt_id.isnot(None)
+                    PersistentCandidate.title != None
                 )
                 
                 # Minimum vote count filter to avoid spam/garbage entries with fake ratings
@@ -419,7 +421,10 @@ class BulkCandidateProvider:
 
                 # Diversity: exclude items present in other lists
                 if exclude_ids:
-                    q = q.filter(~PersistentCandidate.trakt_id.in_(exclude_ids))
+                    # IMPORTANT: Do not exclude rows with NULL trakt_id. In SQL, `NOT IN` with NULL yields NULL (filtered out).
+                    # We want to allow rows missing trakt_id so the in-memory pass can still include them (using tmdb_id fallback).
+                    from sqlalchemy import or_
+                    q = q.filter(or_(PersistentCandidate.trakt_id == None, ~PersistentCandidate.trakt_id.in_(exclude_ids)))
                 # Discovery weighting: adjust ordering heuristics
                 if discovery in ("popular","mainstream"):
                     q = q.order_by(PersistentCandidate.mainstream_score.desc(), PersistentCandidate.popularity.desc())
@@ -436,78 +441,81 @@ class BulkCandidateProvider:
                         return ''
                     g = g.strip().lower()
                     # TMDB-style genres → simplified forms (comprehensive mapping)
+                    # NOTE: Only map composite TMDB genres to simpler forms, DO NOT conflate distinct genres
                     mappings = {
-                        # Action variants
+                        # Action variants (composite TMDB genres)
                         'action & adventure': 'action',
                         'action and adventure': 'action',
                         'action/adventure': 'action',
-                        'adventure': 'action',
                         
-                        # Sci-Fi variants
+                        # Sci-Fi variants (composite TMDB genres)
                         'sci-fi & fantasy': 'sci-fi',
                         'sci-fi and fantasy': 'sci-fi',
                         'sci-fi/fantasy': 'sci-fi',
                         'science fiction': 'sci-fi',
                         'scifi': 'sci-fi',
-                        'fantasy': 'sci-fi',
                         
-                        # War & Politics → Drama/Thriller
+                        # War & Politics → Drama (TMDB composite genre)
                         'war & politics': 'drama',
                         'war and politics': 'drama',
                         'war/politics': 'drama',
-                        'war': 'drama',
-                        'politics': 'drama',
                         
-                        # Crime → Mystery/Thriller
-                        'crime': 'mystery',
-                        
-                        # Kids & Family → Family/Animation
+                        # Kids & Family → Family (normalize variant spellings)
                         'kids': 'family',
-                        'family': 'family',
                         
-                        # News & Documentary
+                        # News & Documentary (TMDB composite)
                         'news': 'documentary',
                         
-                        # Soap → Drama
+                        # Soap → Drama (TMDB genre)
                         'soap': 'drama',
                         
-                        # Reality & Talk shows
+                        # Reality & Talk shows (TMDB genres)
                         'reality': 'documentary',
                         'talk': 'documentary',
-                        
-                        # Western → Action/Drama
-                        'western': 'action',
                     }
                     return mappings.get(g, g)
 
-                required_genres = [_norm(g) for g in (genres or [])]
+                # DO NOT normalize user's selected genres - use them exactly as provided from the list
+                # Only normalize candidate genres to handle TMDB composite genres like "Action & Adventure"
+                required_genres_lower = [g.lower().strip() for g in (genres or [])]
 
                 def _genres_match(parsed: list) -> bool:
-                    if not required_genres:
+                    if not required_genres_lower:
                         return True
+                    # Normalize candidate's genres to handle TMDB composite forms
                     have = set(_norm(x) for x in parsed if isinstance(x, str))
+                    
+                    # If item has no genres but filters require some: REJECT
+                    # Empty genres cannot match ANY filter requirements for custom/manual lists
                     if not have:
+                        logger.warning(f"[FILTER_DEBUG] Rejecting candidate with empty genres (required: {genres})")
                         return False
                     
-                    # Expand "crime" to also match "thriller" and "mystery" searches
-                    if 'crime' in have:
-                        have.add('thriller')
-                        have.add('mystery')
-                    
-                    # Allow "thriller" or "mystery" filter to match "crime" genre
-                    if any(g in required_genres for g in ['thriller', 'mystery']):
-                        if 'crime' in have:
-                            return True
-                    
                     if genre_mode == 'all':
-                        return all(r in have for r in required_genres)
-                    return any(r in have for r in required_genres)
+                        # ALL mode: every required genre must be present in candidate
+                        match = all(r in have for r in required_genres_lower)
+                        if not match:
+                            logger.warning(f"[FILTER_DEBUG] ALL mode: genres {list(have)} missing required {[r for r in required_genres_lower if r not in have]}")
+                        return match
+                    else:
+                        # ANY mode: at least one required genre must match
+                        match = any(r in have for r in required_genres_lower)
+                        if not match:
+                            logger.warning(f"[FILTER_DEBUG] ANY mode: genres {list(have)} don't match any of required {required_genres_lower}")
+                        return match
 
                 # First pass: fetch matching candidates from persistent DB in batches to reduce memory
                 import time
                 from app.core.memory_manager import batch_query_iterator, managed_memory
                 
                 logger.warning(f"[BULK_PROVIDER] Executing DB query for media_type={media_type}, limit={limit}, filters: languages={languages}, min_year={min_year}, max_year={max_year}, min_rating={min_rating}, genres={genres}")
+                # Debug: log the actual SQL query being executed
+                try:
+                    from sqlalchemy.dialects import postgresql
+                    compiled = q.statement.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
+                    logger.warning(f"[SQL_DEBUG] Query: {compiled}")
+                except Exception as e:
+                    logger.debug(f"Could not compile SQL for debug: {e}")
                 t0 = time.time()
                 
                 stored_candidates = []
@@ -533,26 +541,155 @@ class BulkCandidateProvider:
                                 
                                 # In-memory genre filter
                                 if not _genres_match(parsed_genres):
+                                    logger.warning(f"[FILTER_DEBUG] Skipping {row.title} ({row.tmdb_id}): genres {parsed_genres} don't match required {genres} (normalized: {required_genres}, mode={genre_mode})")
                                     continue
                                 # STRICT: skip if title is missing/null/empty
                                 if not row.title or not isinstance(row.title, str) or not row.title.strip():
+                                    logger.warning(f"[FILTER_DEBUG] Skipping {row.tmdb_id}: empty/invalid title")
                                     continue
-                                # QUALITY FILTER: Skip items with very low mainstream_score or few votes (poor quality/unreliable data)
-                                # Minimum thresholds: 50 votes and mainstream_score > 50 to ensure decent quality
-                                if row.mainstream_score is None or row.mainstream_score < 50:
-                                    continue
-                                if row.vote_count is None or row.vote_count < 50:
-                                    continue
+                                # QUALITY FILTER: Be adaptive by discovery mode.
+                                # For 'popular'/'mainstream', require reasonable mainstream_score; otherwise be lenient.
+                                if discovery in ("popular", "mainstream"):
+                                    if row.mainstream_score is None or row.mainstream_score < 40:
+                                        logger.warning(f"[FILTER_DEBUG] Skipping {row.title} ({row.tmdb_id}): mainstream_score={row.mainstream_score} < 40 for discovery={discovery}")
+                                        continue
+                                # vote_count is already enforced at SQL level (>=100 for balanced/default), skip redundant in-memory gate
                                 # Exclude items in exclude_ids
                                 cid = row.trakt_id or row.tmdb_id or row.id
                                 if exclude_ids and cid in exclude_ids:
+                                    logger.debug(f"[FILTER_DEBUG] Skipping {row.title} ({row.tmdb_id}): in exclude_ids")
                                     continue
-                                # Only include candidates with a valid trakt_id
+                                # Include candidates even if trakt_id is missing; use tmdb_id fallback.
+                                # Downstream sync can resolve trakt_id on-demand and we support tmdb-only publish.
+                                if row.tmdb_id is None and row.trakt_id is None:
+                                    # Skip unresolvable rows with no identifiers
+                                    continue
+                                item_ids = {}
+                                if row.tmdb_id is not None:
+                                    item_ids['tmdb'] = row.tmdb_id
                                 if row.trakt_id is not None:
+                                    item_ids['trakt'] = row.trakt_id
+
+                                item = {
+                                    'title': row.title,
+                                    'year': row.year,
+                                    'ids': item_ids,
+                                    'media_type': row.media_type,
+                                    'language': row.language,
+                                    'obscurity_score': row.obscurity_score,
+                                    'mainstream_score': row.mainstream_score,
+                                    'freshness_score': row.freshness_score,
+                                    'tmdb_data': {
+                                        'popularity': row.popularity,
+                                        'vote_average': row.vote_average,
+                                        'vote_count': row.vote_count,
+                                        'genres': parsed_genres,
+                                        'poster_path': row.poster_path,
+                                        'backdrop_path': row.backdrop_path,
+                                        'overview': row.overview
+                                    },
+                                    'scoring_features': {
+                                        'tmdb_popularity': row.popularity,
+                                        'tmdb_rating': row.vote_average,
+                                        'tmdb_votes': row.vote_count,
+                                        'has_overview': bool(row.overview),
+                                        'has_poster': bool(row.poster_path),
+                                        'genre_count': len(parsed_genres)
+                                    },
+                                    '_from_persistent_store': True
+                                }
+                                stored_candidates.append(item)
+                            except Exception as e_row:
+                                # Skip malformed rows gracefully
+                                logger.debug(f"Skipping row due to error: {e_row}")
+                                continue
+                        # For persistent_only mode (custom/manual lists), fetch ALL matching candidates
+                        # to give scoring engine maximum flexibility. For external discovery, limit to avoid
+                        # excessive API calls.
+                        if not persistent_only and len(stored_candidates) >= limit * 3:
+                            logger.info(f"Early exit: collected {len(stored_candidates)} candidates (target: {limit})")
+                            break
+                
+                logger.warning(f"[BULK_PROVIDER] DB query processed {total_rows_processed} rows, collected {len(stored_candidates)} candidates in {time.time()-t0:.2f}s")
+                
+                # Second pass removed: always return all matching candidates from first pass
+                if stored_candidates:
+                    logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
+                    # Return all matching candidates for scoring engine to rank
+                    logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (all matches)")
+                    return stored_candidates
+
+                # Lenient fallback: if we couldn't collect any candidates from persistent store,
+                # try relaxing genre/language/quality gates while still honoring core filters.
+                # IMPORTANT: Skip this fallback for persistent_only (manual/custom lists) to avoid off-genre noise.
+                try:
+                    if (not persistent_only) and (not strict_mode) and (genres or languages) and not stored_candidates:
+                        logger.info("[LENIENT_FALLBACK] No candidates found; retrying with relaxed gates (ignore genres, allow low mainstream_score)")
+                        from app.models import PersistentCandidate
+                        from sqlalchemy import desc
+                        q2 = self.db.query(PersistentCandidate).filter(
+                            PersistentCandidate.active == True,
+                            PersistentCandidate.media_type == ("movie" if media_type == "movies" else "show"),
+                            (PersistentCandidate.is_adult == False),
+                            PersistentCandidate.title != None
+                        )
+                        # Keep year/rating filters
+                        if min_year:
+                            q2 = q2.filter(PersistentCandidate.year >= min_year)
+                        if max_year:
+                            q2 = q2.filter(PersistentCandidate.year <= max_year)
+                        if min_rating is not None:
+                            try:
+                                q2 = q2.filter(PersistentCandidate.vote_average >= float(min_rating))
+                            except Exception:
+                                pass
+                        # Soften language requirement: expand nordic fallbacks; if still empty later, we'll accept missing language
+                        expanded_langs = []
+                        if languages:
+                            lower_langs = [l.lower() for l in languages]
+                            expanded_langs.extend(lower_langs)
+                            if "da" in lower_langs:
+                                expanded_langs.extend(["sv", "no", "nb", "nn"])  # nordic fallback
+                            expanded_langs = list(dict.fromkeys(expanded_langs))
+                            q2 = q2.filter(PersistentCandidate.language.in_(expanded_langs))
+                        # Preserve diversity exclusion
+                        if exclude_ids:
+                            from sqlalchemy import or_
+                            q2 = q2.filter(or_(PersistentCandidate.trakt_id == None, ~PersistentCandidate.trakt_id.in_(exclude_ids)))
+                        # Reasonable ordering
+                        if discovery in ("popular","mainstream"):
+                            q2 = q2.order_by(PersistentCandidate.mainstream_score.desc(), PersistentCandidate.popularity.desc())
+                        else:
+                            q2 = q2.order_by(desc(PersistentCandidate.freshness_score), desc(PersistentCandidate.mainstream_score))
+
+                        t1 = time.time()
+                        lenient = []
+                        for batch in batch_query_iterator(self.db, q2, batch_size=1000, expunge=True):
+                            for row in batch:
+                                try:
+                                    if not row.title or not isinstance(row.title, str) or not row.title.strip():
+                                        continue
+                                    if (row.tmdb_id is None and row.trakt_id is None):
+                                        continue
+                                    cid = row.trakt_id or row.tmdb_id or row.id
+                                    if exclude_ids and cid in exclude_ids:
+                                        continue
+                                    item_ids = {}
+                                    if row.tmdb_id is not None:
+                                        item_ids['tmdb'] = row.tmdb_id
+                                    if row.trakt_id is not None:
+                                        item_ids['trakt'] = row.trakt_id
+                                    # Parse genres but do NOT enforce match
+                                    try:
+                                        parsed_genres = json.loads(row.genres) if row.genres else []
+                                        if not isinstance(parsed_genres, list):
+                                            parsed_genres = []
+                                    except Exception:
+                                        parsed_genres = []
                                     item = {
                                         'title': row.title,
                                         'year': row.year,
-                                        'ids': {'tmdb': row.tmdb_id, 'trakt': row.trakt_id},
+                                        'ids': item_ids,
                                         'media_type': row.media_type,
                                         'language': row.language,
                                         'obscurity_score': row.obscurity_score,
@@ -577,24 +714,18 @@ class BulkCandidateProvider:
                                         },
                                         '_from_persistent_store': True
                                     }
-                                    stored_candidates.append(item)
-                            except Exception as row_err:
-                                # Skip bad rows rather than failing the entire request
-                                logger.debug(f"Skipping malformed persistent_candidate row tmdb_id={getattr(row, 'tmdb_id', None)}: {row_err}")
-                        
-                        # Stop if we have enough candidates
-                        if len(stored_candidates) >= limit * 3:
-                            logger.info(f"Early exit: collected {len(stored_candidates)} candidates (target: {limit})")
-                            break
-                
-                logger.warning(f"[BULK_PROVIDER] DB query processed {total_rows_processed} rows, collected {len(stored_candidates)} candidates in {time.time()-t0:.2f}s")
-                
-                # Second pass removed: always return all matching candidates from first pass
-                if stored_candidates:
-                    logger.info(f"Found {len(stored_candidates)} candidates from persistent store")
-                    # Return all matching candidates for scoring engine to rank
-                    logger.info(f"Serving {len(stored_candidates)} candidates from persistent store (all matches)")
-                    return stored_candidates
+                                    lenient.append(item)
+                                    if len(lenient) >= limit * 2:
+                                        break
+                                except Exception:
+                                    continue
+                            if len(lenient) >= limit * 2:
+                                break
+                        logger.info(f"[LENIENT_FALLBACK] Collected {len(lenient)} candidates in {time.time()-t1:.2f}s (expanded_langs={expanded_langs or languages})")
+                        if len(lenient) > 0:
+                            return lenient
+                except Exception as e_len:
+                    logger.debug(f"Lenient fallback failed: {e_len}")
             except Exception as e_pc:
                 logger.debug(f"PersistentCandidate sourcing failed or not available: {e_pc}")
                 stored_candidates = []  # Ensure it's defined for later merge
@@ -608,7 +739,8 @@ class BulkCandidateProvider:
                 # Defensive: ensure items are the correct media_type
                 expected_type = "movie" if media_type == "movies" else "show"
                 stored_candidates = [c for c in stored_candidates if c.get("media_type") == expected_type]
-                return stored_candidates
+                # Ensure downstream fields (flatten ids, add trakt_id/tmdb_id)
+                return self._ensure_downstream_fields(stored_candidates[:limit], media_type)
             # For fusion mode lists without explicit genres, extract from title
             if fusion_mode and list_title and not genres:
                 title_genres = self._extract_genres_from_title(list_title)
@@ -633,14 +765,15 @@ class BulkCandidateProvider:
                 cached_candidates = await self._get_cached_candidates(cache_key)
                 if cached_candidates:
                     logger.info(f"Using {len(cached_candidates)} cached candidates for {discovery_mode}")
+                    excluded_ids, exclusion_metadata = await self._get_excluded_ids(media_type, include_watched)
                     return await self._finalize_candidates(
-                        cached_candidates, limit, exclude_ids=await self._get_excluded_ids(media_type, include_watched),
+                        cached_candidates, limit, exclude_ids=excluded_ids, exclusion_metadata=exclusion_metadata,
                         existing_list_ids=existing_list_ids, enrich_with_tmdb=enrich_with_tmdb,
                         genres=genres, languages=languages, min_year=min_year, max_year=max_year,
                         min_rating=min_rating, genre_mode=genre_mode
                     )
-            excluded_ids = await self._get_excluded_ids(media_type, include_watched)
-            logger.info(f"Excluding {len(excluded_ids)} items based on filters")
+            excluded_ids, exclusion_metadata = await self._get_excluded_ids(media_type, include_watched)
+            logger.info(f"Excluding {len(excluded_ids)} items based on filters (Trakt IDs: {len(exclusion_metadata['trakt_ids'])}, TMDB IDs: {len(exclusion_metadata['tmdb_ids'])}, title/year pairs: {len(exclusion_metadata['title_year_pairs'])})")
 
             # If we have language filters, prioritize TMDB discover API for targeted search
             # This is much more efficient than generic searches
@@ -734,7 +867,8 @@ class BulkCandidateProvider:
 
             # Filter out excluded items and apply additional filters
             filtered = self._apply_filters(
-                candidates, excluded_ids, genres, languages, min_year, max_year, min_rating, genre_mode=genre_mode
+                candidates, excluded_ids, genres, languages, min_year, max_year, min_rating, genre_mode=genre_mode,
+                exclusion_metadata=exclusion_metadata
             )
 
             # If we have too few results after filtering, try a more lenient approach
@@ -745,7 +879,8 @@ class BulkCandidateProvider:
                     min_year - 10 if min_year else None, 
                     max_year + 5 if max_year else None, 
                     min_rating - 1.0 if min_rating and min_rating > 1.0 else None, 
-                    genre_mode="any"
+                    genre_mode="any",
+                    exclusion_metadata=exclusion_metadata
                 )
                 if len(lenient_filtered) > len(filtered):
                     filtered = lenient_filtered
@@ -1689,39 +1824,56 @@ class BulkCandidateProvider:
         
         return variations
     
-    async def _get_excluded_ids(self, media_type: str, include_watched: bool) -> Set[int]:
-        """Get Trakt IDs to exclude based on user preferences (uses database for speed)."""
-        excluded = set()
+    async def _get_excluded_ids(self, media_type: str, include_watched: bool) -> tuple[Set[int], Dict[str, Any]]:
+        """Get IDs and metadata to exclude based on user preferences.
+        
+        Returns:
+            Tuple of (excluded_ids_set, exclusion_metadata_dict) where metadata includes:
+            - 'trakt_ids': set of Trakt IDs
+            - 'tmdb_ids': set of TMDB IDs  
+            - 'title_year_pairs': set of (normalized_title, year) tuples for fuzzy matching
+        """
+        excluded_ids = set()
+        exclusion_metadata = {
+            'trakt_ids': set(),
+            'tmdb_ids': set(),
+            'title_year_pairs': set()
+        }
         
         if not include_watched:
             try:
-                # Use database watch history (much faster than API)
-                from app.services.watch_history_helper import WatchHistoryHelper
+                # Query directly from TraktWatchHistory table for best performance
+                from app.models import TraktWatchHistory
                 
-                helper = WatchHistoryHelper(self.user_id, self.db)
-                # Get watched IDs from database
-                watched_ids = helper.get_watched_trakt_ids(media_type=media_type[:-1] if media_type.endswith('s') else media_type)
-                excluded.update(watched_ids)
+                singular_type = media_type[:-1] if media_type.endswith('s') else media_type
                 
-                logger.info(f"Excluding {len(watched_ids)} watched {media_type} from database")
+                # Fetch all watched items for this user and media type
+                watched_items = self.db.query(TraktWatchHistory).filter(
+                    TraktWatchHistory.user_id == self.user_id,
+                    TraktWatchHistory.media_type == singular_type
+                ).all()
+                
+                for item in watched_items:
+                    # Add Trakt ID
+                    if item.trakt_id:
+                        excluded_ids.add(item.trakt_id)
+                        exclusion_metadata['trakt_ids'].add(item.trakt_id)
+                    
+                    # Add TMDB ID
+                    if item.tmdb_id:
+                        exclusion_metadata['tmdb_ids'].add(item.tmdb_id)
+                    
+                    # Add normalized title/year for fuzzy matching
+                    if item.title:
+                        normalized_title = item.title.lower().strip()
+                        exclusion_metadata['title_year_pairs'].add((normalized_title, item.year))
+                
+                logger.info(f"Excluding {len(watched_items)} watched {media_type} from TraktWatchHistory table: {len(exclusion_metadata['trakt_ids'])} Trakt IDs, {len(exclusion_metadata['tmdb_ids'])} TMDB IDs, {len(exclusion_metadata['title_year_pairs'])} title/year pairs")
                 
             except Exception as e:
-                logger.warning(f"Failed to fetch watched history from DB, falling back to API: {e}")
-                # Fallback to API if database fails
-                try:
-                    watched = await self.trakt_client.get_my_history(
-                        media_type=media_type, 
-                        limit=2000
-                    )
-                    
-                    for item in watched:
-                        content = item.get(media_type[:-1]) if media_type.endswith('s') else item.get(media_type)
-                        if content and content.get('ids', {}).get('trakt'):
-                            excluded.add(content['ids']['trakt'])
-                    
-                    logger.info(f"Excluding {len(excluded)} watched {media_type} from API")
-                except Exception as api_err:
-                    logger.warning(f"API fallback also failed: {api_err}")
+                logger.warning(f"Failed to fetch watched history from TraktWatchHistory table: {e}")
+                # Only log the error - don't fall back to API to avoid rate limiting
+                # If the DB query fails, we'll just not exclude watched items this time
         
         # Add items from existing lists if user doesn't want duplicates
         try:
@@ -1736,14 +1888,14 @@ class BulkCandidateProvider:
             for item in existing_items:
                 try:
                     if item.item_id.isdigit():
-                        excluded.add(int(item.item_id))
+                        excluded_ids.add(int(item.item_id))
                 except (ValueError, AttributeError):
                     continue
             logger.info(f"Excluding {len(existing_items)} items from existing lists")
         except Exception as e:
             logger.warning(f"Failed to fetch existing list items: {e}")
         
-        return excluded
+        return excluded_ids, exclusion_metadata
     
     
     async def _fetch_trending(self, media_type: str, limit: int) -> List[Dict[str, Any]]:
@@ -1832,11 +1984,18 @@ class BulkCandidateProvider:
         languages: Optional[List[str]] = None,
         min_year: Optional[int] = None,
         max_year: Optional[int] = None,
-        min_rating: Optional[float] = None
-        , genre_mode: str = "any"
+        min_rating: Optional[float] = None,
+        genre_mode: str = "any",
+        exclusion_metadata: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """Apply all filters to candidate items."""
+        """Apply all filters to candidate items with fuzzy matching for watched items."""
         filtered = []
+        fuzzy_matched_count = 0
+        
+        # Extract exclusion sets for efficient lookup
+        excluded_trakt_ids = exclusion_metadata.get('trakt_ids', set()) if exclusion_metadata else set()
+        excluded_tmdb_ids = exclusion_metadata.get('tmdb_ids', set()) if exclusion_metadata else set()
+        excluded_title_year_pairs = exclusion_metadata.get('title_year_pairs', set()) if exclusion_metadata else set()
         
         for item in items:
             # Support both flat and nested Trakt structures from search results
@@ -1858,10 +2017,40 @@ class BulkCandidateProvider:
             if not trakt_id and not tmdb_id:
                 continue
             
-            # Skip excluded items (check both Trakt and TMDB IDs)
+            # Enhanced exclusion logic: check Trakt ID, TMDB ID, and fuzzy title/year match
+            is_excluded = False
+            
+            # 1. Direct ID match (fast path)
             if excluded_ids:
                 if trakt_id in excluded_ids or tmdb_id in excluded_ids:
-                    continue
+                    is_excluded = True
+            
+            # 2. Check Trakt and TMDB ID sets from exclusion metadata
+            if not is_excluded and exclusion_metadata:
+                if trakt_id and trakt_id in excluded_trakt_ids:
+                    is_excluded = True
+                elif tmdb_id and tmdb_id in excluded_tmdb_ids:
+                    is_excluded = True
+            
+            # 3. Fuzzy match by normalized title and year (fallback when IDs don't match)
+            if not is_excluded and excluded_title_year_pairs:
+                title = item.get('title')
+                if not title and inner and isinstance(inner, dict):
+                    title = inner.get('title')
+                
+                year = item.get('year')
+                if year is None and inner and isinstance(inner, dict):
+                    year = inner.get('year')
+                
+                if title:
+                    normalized_title = title.lower().strip()
+                    # Check if (title, year) pair matches any excluded item
+                    if (normalized_title, year) in excluded_title_year_pairs:
+                        is_excluded = True
+                        fuzzy_matched_count += 1
+            
+            if is_excluded:
+                continue
             
             # Apply year filters
             year = item.get('year')
@@ -1893,26 +2082,27 @@ class BulkCandidateProvider:
                 item_genres = item.get('genres', [])
                 if (not item_genres) and inner and isinstance(inner, dict):
                     item_genres = inner.get('genres', [])
-                # If no matching genres found in basic check, still include item for metadata enhancement
-                # We'll be aggressive about finding metadata for items missing genre info
-                if not item_genres:
-                    # Mark item as needing metadata enhancement
-                    item['_needs_metadata_enhancement'] = True
-                else:
+                
+                # Skip genre check if no genres present (will be enriched later)
+                if item_genres:
                     genre_set = set(g.lower() for g in item_genres)
                     filter_set = set(g.lower() for g in genres)
                     if genre_mode == "all":
-                        # Require all genres to be present
+                        # ALL mode: every required genre must be present
                         if not filter_set.issubset(genre_set):
-                            # Still include but mark for enhancement
-                            item['_needs_metadata_enhancement'] = True
+                            # Genres don't match - exclude this item
+                            continue
                     else:
-                        # Require any genre to match
+                        # ANY mode: at least one genre must match
                         if not genre_set.intersection(filter_set):
-                            # Still include but mark for enhancement
-                            item['_needs_metadata_enhancement'] = True
+                            # No matching genres - exclude this item
+                            continue
             
             filtered.append(item)
+        
+        # Log fuzzy match statistics
+        if fuzzy_matched_count > 0:
+            logger.info(f"Fuzzy title/year matching excluded {fuzzy_matched_count} additional watched items (total filtered: {len(items) - len(filtered)})")
         
         return filtered
     

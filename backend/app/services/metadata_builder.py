@@ -63,8 +63,11 @@ class MetadataBuilder:
         Check if metadata has been built (Trakt IDs populated) or if the build has completed.
         
         Returns True if:
-        1. At least 80% of candidates have Trakt IDs, OR
-        2. A metadata scan has been marked as completed (even if below 80%)
+        1. A metadata scan has been marked as completed, OR
+        2. At least 80% of candidates have Trakt IDs, OR
+        3. Candidates exist but 0% have Trakt IDs (indicating bootstrap import with TMDB IDs only)
+        
+        Bootstrap import uses TMDB IDs only and doesn't require Trakt ID enrichment.
         """
         from app.models import PersistentCandidate
         from sqlalchemy import func
@@ -81,10 +84,17 @@ class MetadataBuilder:
             PersistentCandidate.trakt_id.isnot(None)
         ).scalar() or 0
         
-        # Consider ready if at least 80% have Trakt IDs
         if total == 0:
             return False
         
+        # If we have many candidates (bootstrap) but 0% have Trakt IDs, consider ready
+        # This indicates bootstrap import (which uses TMDB IDs only)
+        if total > 100000 and with_trakt == 0:
+            logger.info(f"Bootstrap detected: {total} candidates without Trakt IDs - marking as ready")
+            await r.set("metadata_build:scan_completed", "true")
+            return True
+        
+        # Consider ready if at least 80% have Trakt IDs (CSV import path)
         percent = (with_trakt / total) * 100
         if percent >= 80.0:
             # Set completion flag so we don't show the screen again
@@ -95,18 +105,23 @@ class MetadataBuilder:
     
     async def build_trakt_ids(self, db: Session, user_id: int = 1, force: bool = False, retry_limit: int = 3):
         """
-        Bulk lookup and populate Trakt IDs for persistent candidates.
-        Retries candidates with missing trakt_id up to retry_limit times.
+        METADATA BUILDER PERMANENTLY DISABLED.
         
-        Args:
-            db: Database session
-            user_id: User ID for Trakt authentication
-            force: Force rebuild even if already complete
-            retry_limit: Max number of attempts for each candidate
+        Bootstrap import provides complete candidate pool with TMDB IDs.
+        Trakt ID mapping is now handled on-demand by TraktIdResolver.
+        
+        This method is a no-op to prevent any accidental execution.
         """
-        from app.models import PersistentCandidate
-        from sqlalchemy import func
+        logger.warning("build_trakt_ids called but metadata builder is PERMANENTLY DISABLED")
+        logger.warning("Bootstrap import active - Trakt IDs resolved on-demand only")
         
+        # Set completion flag and return immediately
+        r = get_redis()
+        await r.set("metadata_build:scan_completed", "true")
+        
+        return {"status": "disabled", "message": "Metadata builder permanently disabled"}
+        
+        # OLD CODE BELOW - NEVER EXECUTED
         # Check if a pause has been requested
         try:
             r_pause = get_redis()

@@ -116,9 +116,28 @@ class IndividualListSearchService:
                     item['fit_score'] = 0.5
         
         # Sort by combined score: relevance * 0.7 + fit_score * 0.3 (prioritize search relevance)
+        # Add exact/prefix title boost to improve queries like "Harry Potter"
+        qnorm = (query or "").strip().lower()
         for candidate in scored:
-            relevance = candidate.get('_search_score', 0.5)
+            base_relevance = candidate.get('_search_score', 0.5)
             fit = candidate.get('fit_score', 0.5)
+
+            # Title-based boosts applied post-enrichment
+            try:
+                title = (candidate.get('title') or "").strip().lower()
+                otitle = (candidate.get('original_title') or "").strip().lower()
+                boost = 0.0
+                if qnorm:
+                    if title == qnorm or otitle == qnorm:
+                        boost += 0.4  # exact title match
+                    elif title.startswith(qnorm) or otitle.startswith(qnorm):
+                        boost += 0.25  # prefix match (common for series collections)
+                    elif qnorm in title or qnorm in otitle:
+                        boost += 0.1  # substring match
+                relevance = min(1.0, base_relevance + boost)
+            except Exception:
+                relevance = base_relevance
+
             candidate['relevance_score'] = relevance
             candidate['_final_score'] = relevance * 0.7 + fit * 0.3
         

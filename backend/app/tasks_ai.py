@@ -188,6 +188,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
         # Prompt cache (include seeds/tone/negatives to reflect blended query)
         seeds = (parsed.get("seed_titles") or [])
         tone_words = (parsed.get("filters", {}).get("tone") or [])
+        seasonal_words = (parsed.get("filters", {}).get("seasonal") or [])
         negative_cues = (parsed.get("filters", {}).get("negative_cues") or [])
         
         # Extract rich filters from parsed prompt for semantic targeting
@@ -200,18 +201,86 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
         extracted_directors = parsed.get("filters", {}).get("directors") or []
         extracted_phrases = parsed.get("filters", {}).get("phrases") or []
         
-        # Log extracted filters for visibility
+        # Log ALL extracted filters for visibility and debugging
+        extracted_actors = parsed.get("filters", {}).get("actors") or []
+        extracted_studios = parsed.get("filters", {}).get("studios") or []
+        extracted_years = parsed.get("filters", {}).get("years") or []
+        extracted_year_range = parsed.get("filters", {}).get("year_range") or []
+        extracted_obscurity = parsed.get("filters", {}).get("obscurity")
+        extracted_rating = parsed.get("filters", {}).get("rating_cmp")
+        extracted_adult = parsed.get("filters", {}).get("adult")
+        
         logger.info(
-            f"[{ai_list_id}] Extracted filters: "
-            f"seeds={len(seeds)}, tone={len(tone_words)}, genres={len(extracted_genres)}, "
-            f"languages={len(extracted_languages)}, media_type={media_type_filter}, negative={len(negative_cues)}, "
-            f"networks={len(extracted_networks)}, creators={len(extracted_creators)}, directors={len(extracted_directors)}"
+            f"[{ai_list_id}] Extracted filters from prompt: "
+            f"seeds={seeds}, tone={tone_words}, seasonal={seasonal_words}, genres={extracted_genres}, "
+            f"languages={extracted_languages}, media_type={media_type_filter}, negative={negative_cues}, "
+            f"networks={extracted_networks}, countries={extracted_countries}, "
+            f"creators={extracted_creators}, directors={extracted_directors}, "
+            f"actors={extracted_actors}, studios={extracted_studios}, "
+            f"years={extracted_years}, year_range={extracted_year_range}, "
+            f"obscurity={extracted_obscurity}, rating={extracted_rating}, adult={extracted_adult}"
         )
         
         # Build enriched query text incorporating all extracted metadata
         # This makes FAISS return semantically targeted candidates from the start
         # Mirror the rich metadata structure used in compose_text_for_embedding
-        query_parts = [normalized]
+        
+        # For mood/theme/fusion lists, LEAD with the mood for maximum FAISS impact
+        if ai_list.type in ['mood', 'theme', 'fusion'] and tone_words:
+            tone_text = " ".join(tone_words[:8])
+            # Mood-first structure: emphasize the emotional/atmospheric dimension
+            query_parts = [
+                f"Mood: {tone_text}",
+                f"Atmosphere: {tone_text}",
+                f"{tone_text} vibe",
+                normalized,
+            ]
+            # Add mood as descriptive phrases for richer semantic matching
+            mood_descriptors = " ".join([f"{word} feeling and {word} atmosphere" for word in tone_words[:3]])
+            query_parts.append(mood_descriptors)
+            logger.info(f"[{ai_list_id}] MOOD/THEME list - Leading FAISS query with mood: {tone_text}")
+        elif ai_list.type in ['mood', 'theme', 'fusion']:
+            # Even if no explicit tone words, use the prompt itself which should contain mood descriptors
+            # For preset mood/theme lists, the prompt_text itself IS the mood (e.g., "dark", "uplifting")
+            query_parts = [
+                f"Mood: {normalized}",
+                f"Atmosphere: {normalized}",
+                f"{normalized} feeling",
+                f"{normalized} vibe and tone",
+                f"{normalized} mood movies and shows",
+                normalized,
+            ]
+            # Also extract mood words directly from the prompt for additional emphasis
+            from app.services.ai_engine.classifiers import detect_tone_keywords
+            direct_mood_keywords = detect_tone_keywords(normalized)
+            if direct_mood_keywords:
+                mood_emphasis = " ".join(direct_mood_keywords[:5])
+                query_parts.insert(0, f"Emotional tone: {mood_emphasis}")
+                logger.info(f"[{ai_list_id}] MOOD/THEME list - Detected direct moods: {direct_mood_keywords}")
+            logger.info(f"[{ai_list_id}] MOOD/THEME list - Using prompt as mood: {normalized}")
+        else:
+            # For chat lists, start with normalized prompt then add mood
+            query_parts = [normalized]
+            if tone_words:
+                tone_text = " ".join(tone_words[:8])
+                # Add mood in multiple forms for emphasis in embedding
+                query_parts.append(f"Mood: {tone_text}")
+                query_parts.append(f"Tone: {tone_text}")
+                query_parts.append(f"Atmosphere: {tone_text}")
+                # Repeat as descriptive adjectives for semantic richness
+                mood_descriptors = " ".join([f"{word} feeling" for word in tone_words[:5]])
+                query_parts.append(mood_descriptors)
+                logger.info(f"[{ai_list_id}] Enhanced FAISS query with mood: {tone_text}")
+            
+            # Add seasonal keywords for thematic emphasis
+            if seasonal_words:
+                seasonal_text = " ".join(seasonal_words)
+                query_parts.append(f"Theme: {seasonal_text}")
+                query_parts.append(f"Holiday: {seasonal_text}")
+                # Repeat for emphasis in embedding space
+                seasonal_descriptors = " ".join([f"{word} themed" for word in seasonal_words])
+                query_parts.append(seasonal_descriptors)
+                logger.info(f"[{ai_list_id}] Enhanced FAISS query with seasonal: {seasonal_text}")
         
         # Add seed metadata context (genres, keywords, overviews from TMDB)
         if seeds and enhanced_prompt and enhanced_prompt != normalized:
@@ -229,11 +298,6 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
         if extracted_languages:
             lang_text = " ".join(extracted_languages[:3])
             query_parts.append(f"Language: {lang_text}")
-        
-        # Add tone/mood keywords to query text
-        if tone_words:
-            tone_text = " ".join(tone_words[:8])
-            query_parts.append(f"Mood: {tone_text}")
         
         # Add media type for better semantic targeting
         if media_type_filter:
@@ -270,6 +334,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             f"ai:prompt_cache_v2:{normalized}"
             f"|seeds:{','.join(seeds[:5])}"
             f"|tone:{','.join(tone_words[:6])}"
+            f"|seasonal:{','.join(seasonal_words[:3])}"
             f"|neg:{','.join(negative_cues[:6])}"
             f"|genres:{','.join(extracted_genres[:5])}"
             f"|langs:{','.join(extracted_languages[:3])}"
@@ -277,52 +342,59 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
         cached = r.get(cache_key)
         embedder = EmbeddingService()
         index, mapping = load_index()
+        small_index = False
+        try:
+            small_index = len(mapping) < 1000
+            if small_index:
+                logger.warning(f"[{ai_list_id}] FAISS index appears small (size={len(mapping)}). Will use DB fallback if needed.")
+        except Exception:
+            small_index = False
         
         # Use enriched query text for embedding instead of just base prompt
         # This incorporates genres, languages, mood, and seed metadata into semantic search
         logger.info(f"[{ai_list_id}] Enriched query for FAISS: {enriched_query[:200]}")
         
+        # --- FAISS fallback logic: up to 3 attempts with increasing top_k ---
+        cache_key = (
+            f"ai:prompt_cache_v2:{normalized}"
+            f"|seeds:{','.join(seeds[:5])}"
+            f"|tone:{','.join(tone_words[:6])}"
+            f"|seasonal:{','.join(seasonal_words[:3])}"
+            f"|neg:{','.join(negative_cues[:6])}"
+            f"|genres:{','.join(extracted_genres[:5])}"
+            f"|langs:{','.join(extracted_languages[:3])}"
+        )
+        embedder = EmbeddingService()
+        index, mapping = load_index()
+        logger.info(f"[{ai_list_id}] Enriched query for FAISS: {enriched_query[:200]}")
         try:
             query_emb = embedder.encode_text(enriched_query)
         except Exception as e:
             logger.warning(f"Embedding enriched query failed: {e}, falling back to base prompt")
             query_emb = embedder.encode_text(normalized)
-
-        # Negative cue handling: subtract vector component for negatives like "without horror/gore"
         if negative_cues:
             try:
-                # Build a single negative descriptor to keep calls minimal
                 neg_text = ", ".join(negative_cues[:6])
                 neg_vec = embedder.encode_text(f"avoid: {neg_text}")
-                # Project and subtract a scaled component
                 import numpy as _np
                 q = query_emb.astype(_np.float32)
                 n = neg_vec.astype(_np.float32)
-                # Remove up to 25% of the negative direction
                 alpha = float(_np.dot(q, n))
                 q_adj = q - 0.25 * alpha * n
-                # Renormalize
                 q_adj = q_adj / (float((q_adj ** 2).sum()) ** 0.5 + 1e-8)
                 query_emb = q_adj.astype(np.float16)
             except Exception as e:
                 logger.debug(f"Negative cue embedding adjustment skipped: {e}")
-        # We don't know if the FAISS mapping stores tmdb_id or trakt_id; support both.
+
+        # Try up to 3 FAISS attempts with increasing top_k
+        faiss_attempts = [40000, 80000, 120000]
         topk_ids = []
-        if cached:
-            try:
-                data = json.loads(cached)
-                topk_ids = data.get("topk_ids") or data.get("topk_tmdb_ids") or []
-            except Exception:
-                topk_ids = []
         faiss_scores_dict = {}
-        if not topk_ids:
-            # With enriched semantic query (genres, languages, mood, seed metadata),
-            # we can use a smaller top_k that returns semantically targeted candidates
-            # instead of post-filtering a huge pool. Balance: speed + semantic coverage.
-            # Increase initial FAISS pool for better coverage; downstream we will
-            # hard-filter by all user filters (genres/languages/media types/years/obscurity)
-            ids, faiss_scores = search_index(index, query_emb, top_k=40000)
-            # Map FAISS internal IDs to real IDs (trakt_id preferred)
+        rows = []
+        scored = []
+        # Iterate FAISS attempts
+        for attempt, top_k in enumerate(faiss_attempts, 1):
+            ids, faiss_scores = search_index(index, query_emb, top_k=top_k)
             topk_ids = []
             for idx, internal_id in enumerate(ids):
                 if int(internal_id) in mapping:
@@ -338,22 +410,13 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                         faiss_scores_dict[mapped_id_int] = float(faiss_scores[idx])
                     except Exception:
                         faiss_scores_dict[mapped_id_int] = 0.0
-            # Back-compat: store under both keys
-            r.set(cache_key, json.dumps({"topk_ids": topk_ids, "topk_tmdb_ids": topk_ids}), ex=86400)
-        
-        logger.info(f"[{ai_list_id}] FAISS returned {len(topk_ids)} candidate IDs for enriched query: {enriched_query[:80]}")
-
-        # Fetch candidate rows from DB using FAISS-targeted IDs (semantically enriched query)
-        # This is much faster than full-pool and gives semantically relevant candidates from the start
-        rows = []
-        if topk_ids:
-            # Support both tmdb_id and trakt_id in FAISS mapping
+            logger.info(f"[{ai_list_id}] FAISS attempt {attempt} (top_k={top_k}) returned {len(topk_ids)} candidate IDs")
+            # DB fetch as before
             filters = parsed.get("filters", {}) or {}
             genres = [g.lower() for g in (filters.get("genres") or [])]
             genre_mode = (filters.get("genre_mode") or filters.get("genres_mode") or "any").lower()
             languages = [l.lower() for l in (filters.get("languages") or [])]
             media_types = filters.get("media_types") or []
-            # Optional extended filters parsed from prompt
             networks = [n.lower() for n in (filters.get("networks") or [])]
             countries = [c.lower() for c in (filters.get("countries") or [])]
             creators = [c.lower() for c in (filters.get("creators") or [])]
@@ -365,19 +428,16 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             year_from = filters.get("year_from")
             year_to = filters.get("year_to")
             obscurity = (filters.get("obscurity") or "").lower()
-
-            # Build dynamic SQL with safe parameters
             where_clauses = [
                 "(tmdb_id = ANY(:ids) OR trakt_id = ANY(:ids))",
                 "active = true",
             ]
             params = {}
-
             if media_types:
                 where_clauses.append("media_type = ANY(:media_types)")
                 params["media_types"] = media_types
             if languages:
-                where_clauses.append("LOWER(COALESCE(original_language, '')) = ANY(:languages)")
+                where_clauses.append("(LOWER(COALESCE(original_language, '')) = ANY(:languages) OR LOWER(COALESCE(language, '')) = ANY(:languages))")
                 params["languages"] = languages
             if isinstance(year_from, int):
                 where_clauses.append("COALESCE(year, 0) >= :year_from")
@@ -385,15 +445,12 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             if isinstance(year_to, int):
                 where_clauses.append("COALESCE(year, 9999) <= :year_to")
                 params["year_to"] = int(year_to)
-            # Obscurity buckets (use persistent precomputed scores if available)
             if obscurity in ("very_obscure", "very-obscure"):
                 where_clauses.append("COALESCE(obscurity_score, 0) >= 0.8")
             elif obscurity in ("obscure",):
                 where_clauses.append("COALESCE(obscurity_score, 0) >= 0.6")
             elif obscurity in ("popular", "mainstream"):
                 where_clauses.append("COALESCE(mainstream_score, 0) >= 0.6")
-
-            # Genres matching (stored as free-text comma list). Build LIKE conditions.
             genre_like_clauses = []
             for i, g in enumerate(genres):
                 key = f"g{i}"
@@ -404,8 +461,6 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     where_clauses.extend(genre_like_clauses)
                 else:
                     where_clauses.append("(" + " OR ".join(genre_like_clauses) + ")")
-
-            # Networks (TV) any-match OR across provided names
             if networks:
                 net_like = []
                 for i, n in enumerate(networks):
@@ -413,8 +468,6 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     net_like.append(f"LOWER(COALESCE(networks, '')) LIKE :{key}")
                     params[key] = f"%{n}%"
                 where_clauses.append("(" + " OR ".join(net_like) + ")")
-
-            # Production countries any-match OR
             if countries:
                 ctry_like = []
                 for i, c in enumerate(countries):
@@ -422,8 +475,6 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     ctry_like.append(f"LOWER(COALESCE(production_countries, '')) LIKE :{key}")
                     params[key] = f"%{c}%"
                 where_clauses.append("(" + " OR ".join(ctry_like) + ")")
-
-            # Creators (TV) any-match OR
             if creators:
                 cr_like = []
                 for i, c in enumerate(creators):
@@ -431,34 +482,33 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     cr_like.append(f"LOWER(COALESCE(created_by, '')) LIKE :{key}")
                     params[key] = f"%{c}%"
                 where_clauses.append("(" + " OR ".join(cr_like) + ")")
-
-            # Directors (movies/TV) - no dedicated column; match against created_by (TV) OR cast (movies)
             if directors:
                 dir_like_or_groups = []
                 for i, d in enumerate(directors):
                     key = f"dir{i}"
-                    # Note: "cast" needs quoting in SQL
                     dir_like_or_groups.append(f"LOWER(COALESCE(created_by, '')) LIKE :{key} OR LOWER(COALESCE(\"cast\", '')) LIKE :{key}")
                     params[key] = f"%{d}%"
                 where_clauses.append("(" + " OR ".join(dir_like_or_groups) + ")")
-
             where_sql = " AND ".join(where_clauses)
             base_sql = f"SELECT * FROM persistent_candidates WHERE {where_sql}"
-
-            id_list = topk_ids[:40000]
+            id_list = topk_ids[:top_k]
             CHUNK = 1000
-            MAX_PREFILTERED = 6000  # cap to avoid excessive memory before scoring
+            try:
+                desired = int(ai_list.item_limit or 50)
+            except Exception:
+                desired = 50
+            MAX_PREFILTERED = 6000
+            rows = []
             for start in range(0, len(id_list), CHUNK):
                 if len(rows) >= MAX_PREFILTERED:
                     break
                 chunk_ids = id_list[start:start+CHUNK]
                 params_chunk = dict(params)
                 params_chunk["ids"] = chunk_ids
-                res = db.execute(text(base_sql), params_chunk)  # Chunked DB fetch with filters applied in SQL
+                res = db.execute(text(base_sql), params_chunk)
                 cols = res.keys()
                 for row in res:
                     row_dict = dict(zip(cols, row))
-                    # Annotate with FAISS score if available (prefer trakt_id, fallback tmdb_id)
                     try:
                         rid_trakt = row_dict.get("trakt_id")
                         rid_tmdb = row_dict.get("tmdb_id")
@@ -473,12 +523,61 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     except Exception:
                         pass
                     rows.append(row_dict)
-                # Safety: trim if we crossed the cap within this chunk
                 if len(rows) > MAX_PREFILTERED:
                     rows = rows[:MAX_PREFILTERED]
                     break
-
-            # Preserve FAISS ranking order for downstream steps (stable sort by position in topk_ids)
+            # If FAISS-targeted fetch is too small, relax DB-side filters (keep only ID and active/media_type)
+            if len(rows) < max(20, int((ai_list.item_limit or 50) * 0.4)):
+                try:
+                    relaxed_where = [
+                        "(tmdb_id = ANY(:ids) OR trakt_id = ANY(:ids))",
+                        "active = true",
+                    ]
+                    relaxed_params = {"ids": id_list[:top_k]}
+                    # Preserve media_type if explicitly requested
+                    if media_types:
+                        relaxed_where.append("media_type = ANY(:media_types)")
+                        relaxed_params["media_types"] = media_types
+                    relaxed_sql = f"SELECT * FROM persistent_candidates WHERE {' AND '.join(relaxed_where)}"
+                    res_rel = db.execute(text(relaxed_sql), relaxed_params)
+                    cols_rel = res_rel.keys()
+                    relaxed_rows = []
+                    for r2 in res_rel:
+                        d2 = dict(zip(cols_rel, r2))
+                        try:
+                            rid_trakt = d2.get("trakt_id")
+                            rid_tmdb = d2.get("tmdb_id")
+                            s = None
+                            if rid_trakt is not None and int(rid_trakt) in faiss_scores_dict:
+                                s = faiss_scores_dict.get(int(rid_trakt))
+                            elif rid_tmdb is not None and int(rid_tmdb) in faiss_scores_dict:
+                                s = faiss_scores_dict.get(int(rid_tmdb))
+                            if s is not None:
+                                d2["_faiss_score"] = float(s)
+                                d2["_from_faiss"] = True
+                        except Exception:
+                            pass
+                        relaxed_rows.append(d2)
+                    # Sort relaxed rows by FAISS position
+                    rank = {val: idx for idx, val in enumerate(id_list)}
+                    def _pos2(c):
+                        try:
+                            tid = c.get("trakt_id")
+                            if tid is not None and int(tid) in rank:
+                                return rank[int(tid)]
+                            mid = c.get("tmdb_id")
+                            if mid is not None and int(mid) in rank:
+                                return rank[int(mid)]
+                        except Exception:
+                            return 10**9
+                        return 10**9
+                    relaxed_rows.sort(key=_pos2)
+                    # Only replace if it truly expands the pool
+                    if len(relaxed_rows) > len(rows):
+                        rows = relaxed_rows[:MAX_PREFILTERED]
+                        logger.info(f"[{ai_list_id}] FAISS-targeted fallback fetch expanded pool to {len(rows)} candidates")
+                except Exception as _rel_err:
+                    logger.debug(f"[{ai_list_id}] Relaxed DB fetch skipped: {_rel_err}")
             rank = {val: idx for idx, val in enumerate(id_list)}
             def _pos(c):
                 try:
@@ -492,15 +591,9 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     return 10**9
                 return 10**9
             rows.sort(key=_pos)
-        
-        logger.info(f"[{ai_list_id}] DB fetch (FAISS-targeted) returned {len(rows)} candidates for scoring")
-
-        # Use a managed memory wrapper for the heavy scoring block
-        with managed_memory("ai_scoring_and_mmr"):
+            logger.info(f"[{ai_list_id}] DB fetch (FAISS-targeted, attempt {attempt}) returned {len(rows)} candidates for scoring")
             # Compose texts for scoring
             texts = [compose_text_for_embedding(c) for c in rows]
-            # Load candidate embeddings from DB to enable semantic scoring
-            # If FAISS scores are present, skip loading embeddings (reuse FAISS similarity)
             cand_embs = None
             has_faiss_scores = any(isinstance(c.get("_faiss_score"), (float, int)) for c in rows)
             if not has_faiss_scores:
@@ -533,43 +626,146 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     cand_embs = None
             else:
                 logger.info(f"[{ai_list_id}] Using FAISS similarity; skipping candidate embedding load")
-
-            # Compose texts after aligning rows with embeddings
             texts = [compose_text_for_embedding(c) for c in rows]
-
-            # Use enriched_query for scoring to ensure TF-IDF uses same context as FAISS semantic search
-            # This includes genres, languages, mood, and seed metadata for better text similarity
+            # Increase candidate reduction window for dynamic lists to widen choice set
+            topk_reduce_val = 400 if ai_list.type in ("mood", "theme", "fusion") else 200
+            # Pass item_limit into filters so scorer can enforce hard-match quotas relative to final list size
+            _filters = dict(parsed.get("filters", {}))
+            try:
+                _filters["item_limit"] = int(ai_list.item_limit or 50)
+            except Exception:
+                _filters["item_limit"] = 50
             scored = score_candidates(
                 enriched_query,
                 rows,
                 texts,
                 candidate_embeddings=cand_embs,
                 query_embedding=query_emb if cand_embs is not None else None,
-                filters=parsed.get("filters", {}),
+                filters=_filters,
                 list_type=parsed.get("type", "chat"),
-                topk_reduce=800,
+                topk_reduce=topk_reduce_val,
                 user_id=user_id,
-                watch_history=watch_history,  # Pass Trakt history for personalization
+                watch_history=watch_history,
             )
-        logger.info(f"[{ai_list_id}] Scoring returned {len(scored)} candidates after filtering")
-        
-        # Fallback: if too few results, relax filters but keep trakt_id+embedding constraint
+            logger.info(f"[{ai_list_id}] Scoring (attempt {attempt}) returned {len(scored)} candidates after filtering")
+            # If enough candidates, break and use this pool
+            if len(scored) >= max(20, int((ai_list.item_limit or 50) * 0.6)):
+                break
+        # Non-FAISS pool fallback if index tiny or FAISS-targeted pool too small
+        if len(scored) < max(20, int((ai_list.item_limit or 50) * 0.6)):
+            need_pool_fallback = small_index or len(rows) < max(20, int((ai_list.item_limit or 50) * 0.4))
+            if need_pool_fallback:
+                try:
+                    logger.info(f"[{ai_list_id}] Entering DB pool fallback (small_index={small_index}, faiss_rows={len(rows)})")
+                    # Build a broad pool using filters (media_type, languages, genres ANY/ALL, years) and vote_count floor
+                    where2 = ["active = true"]
+                    p2 = {}
+                    # Vote floor based on obscurity intent
+                    intent = (parsed.get("filters", {}).get("obscurity") or "balanced").lower()
+                    if intent in ("obscure", "obscure_high", "very_obscure"):
+                        min_votes = 100
+                    elif intent in ("popular", "mainstream"):
+                        min_votes = 800
+                    else:
+                        min_votes = 400
+                    where2.append("COALESCE(vote_count, 0) >= :min_votes")
+                    p2["min_votes"] = int(min_votes)
+                    # Media type
+                    if media_type_filter:
+                        where2.append("media_type = :mt")
+                        p2["mt"] = str(media_type_filter)
+                    # Languages
+                    if extracted_languages:
+                        where2.append("(LOWER(COALESCE(original_language, '')) = ANY(:languages) OR LOWER(COALESCE(language, '')) = ANY(:languages))")
+                        p2["languages"] = [l.lower() for l in extracted_languages]
+                    # Years
+                    if extracted_year_range and len(extracted_year_range) == 2:
+                        where2.append("COALESCE(year, 0) BETWEEN :ylo AND :yhi")
+                        p2["ylo"], p2["yhi"] = int(extracted_year_range[0]), int(extracted_year_range[1])
+                    elif extracted_years:
+                        where2.append("COALESCE(year, 0) = ANY(:years)")
+                        p2["years"] = [int(y) for y in extracted_years if isinstance(y, (int, float, str)) and str(y).isdigit()]
+                    # Genres
+                    g2 = [str(g).lower() for g in extracted_genres]
+                    if g2:
+                        like_clauses = []
+                        for i, g in enumerate(g2):
+                            key = f"gg{i}"
+                            like_clauses.append(f"LOWER(COALESCE(genres, '')) LIKE :{key}")
+                            p2[key] = f"%{g}%"
+                        if (parsed.get("filters", {}).get("genre_mode") or parsed.get("filters", {}).get("genres_mode") or "any").lower() == "all":
+                            where2.extend(like_clauses)
+                        else:
+                            where2.append("(" + " OR ".join(like_clauses) + ")")
+                    sql2 = f"SELECT * FROM persistent_candidates WHERE {' AND '.join(where2)} ORDER BY popularity DESC LIMIT 6000"
+                    res2 = db.execute(text(sql2), p2)
+                    cols2 = res2.keys()
+                    pool_rows = [dict(zip(cols2, rr)) for rr in res2]
+                    # Use FAISS similarities if available (map by trakt/tmdb id), else rely on TF-IDF
+                    rank_map = {}
+                    try:
+                        rank_map = {val: idx for idx, val in enumerate(topk_ids)}
+                    except Exception:
+                        rank_map = {}
+                    for d in pool_rows:
+                        try:
+                            tid = d.get("trakt_id")
+                            mid = d.get("tmdb_id")
+                            pos = None
+                            if tid is not None and int(tid) in rank_map:
+                                pos = rank_map[int(tid)]
+                            elif mid is not None and int(mid) in rank_map:
+                                pos = rank_map[int(mid)]
+                            if pos is not None:
+                                # Convert rank to a similarity proxy
+                                d["_faiss_score"] = float(max(0.0, 1.0 - (pos / max(1, len(topk_ids)))))
+                                d["_from_faiss"] = True
+                        except Exception:
+                            pass
+                    texts2 = [compose_text_for_embedding(c) for c in pool_rows]
+                    scored_pool = score_candidates(
+                        enriched_query,
+                        pool_rows,
+                        texts2,
+                        candidate_embeddings=None,
+                        query_embedding=None,
+                        filters=parsed.get("filters", {}),
+                        list_type=parsed.get("type", "chat"),
+                        topk_reduce=topk_reduce_val,
+                        user_id=user_id,
+                        watch_history=watch_history,
+                    )
+                    if len(scored_pool) > len(scored):
+                        scored = scored_pool
+                        rows = pool_rows
+                        texts = texts2
+                        logger.info(f"[{ai_list_id}] DB pool fallback produced {len(scored_pool)} scored candidates")
+                except Exception as pool_err:
+                    logger.warning(f"[{ai_list_id}] DB pool fallback failed: {pool_err}")
+        # If after all attempts not enough candidates, fallback to relaxed filters
         if len(scored) < max(20, int((ai_list.item_limit or 50) * 0.6)):
             try:
                 with managed_memory("ai_scoring_relaxed"):
+                    # Keep core vote_count floor by supplying obscurity intent; preserve media_type if provided
+                    base_relaxed_filters = {}
+                    try:
+                        base_relaxed_filters["obscurity"] = parsed.get("filters", {}).get("obscurity") or "balanced"
+                        if media_type_filter:
+                            base_relaxed_filters["media_type"] = media_type_filter
+                    except Exception:
+                        pass
                     relaxed = score_candidates(
                         enriched_query,
                         rows,
                         texts,
                         candidate_embeddings=cand_embs,
                         query_embedding=query_emb if cand_embs is not None else None,
-                        filters={},  # relax
+                        filters=base_relaxed_filters,
                         list_type=parsed.get("type", "chat"),
-                        topk_reduce=1200,
+                        topk_reduce=topk_reduce_val,
                         user_id=user_id,
                         watch_history=watch_history,
                     )
-                # Prefer relaxed if it meaningfully increases pool
                 if len(relaxed) > len(scored):
                     try:
                         logger.info(f"[{ai_list_id}] Using relaxed scoring pool ({len(relaxed)} > {len(scored)})")
@@ -578,8 +774,10 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     scored = relaxed
             except Exception:
                 pass
-        # Embedding for MMR via TF-IDF vectors only as fallback
-        # Build a simple TF-IDF matrix for MMR vectors
+        
+        logger.info(f"[{ai_list_id}] Final scoring returned {len(scored)} candidates after all attempts")
+        
+        # Build MMR vectors for diversification
         try:
             with managed_memory("ai_mmr_vectors"):
                 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -587,9 +785,112 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                 mat = vec.fit_transform(texts)
                 mmr_vecs = mat.toarray().astype(np.float32)
         except Exception:
-            mmr_vecs = np.zeros((len(texts), 16), dtype=np.float32)
+            mmr_vecs = np.zeros((len(texts), 32), dtype=np.float32)
 
         diversified = maximal_marginal_relevance(scored, mmr_vecs, top_k=min(ai_list.item_limit or 50, 50))
+
+        # Cross-list de-duplication: for dynamic AI lists (mood/theme/fusion), avoid items
+        # that already appear in the user's other AI lists of these types to increase variety.
+        try:
+            desired_k = min(ai_list.item_limit or 50, 50)
+            if ai_list.type in ("mood", "theme", "fusion"):
+                # Gather items from other AI lists of the same user (excluding this list)
+                other_lists_q = db.query(AiList.id).filter(
+                    AiList.user_id == user_id,
+                    AiList.id != ai_list.id,
+                    AiList.type.in_(["mood", "theme", "fusion"]),
+                )
+                other_list_ids = [row[0] for row in other_lists_q.all()]
+                exclude_trakt: set[int] = set()
+                exclude_tmdb: set[int] = set()
+                if other_list_ids:
+                    other_items = db.query(AiListItem).filter(AiListItem.ai_list_id.in_(other_list_ids)).all()
+                    for it in other_items:
+                        try:
+                            if it.trakt_id:
+                                exclude_trakt.add(int(it.trakt_id))
+                            if it.tmdb_id:
+                                exclude_tmdb.add(int(it.tmdb_id))
+                        except Exception:
+                            continue
+                # Build a de-duplicated selection prioritizing non-overlapping items
+                deduped: list[dict] = []
+                seen_trakt: set[int] = set()
+                seen_tmdb: set[int] = set()
+                removed_for_dedup = 0
+                for cand in diversified:
+                    try:
+                        tid = cand.get("trakt_id")
+                        mid = cand.get("tmdb_id")
+                        if tid is not None:
+                            tid = int(tid)
+                            if tid in exclude_trakt:
+                                removed_for_dedup += 1
+                                continue
+                            if tid in seen_trakt:
+                                # Avoid duplicates within the same list
+                                removed_for_dedup += 1
+                                continue
+                        if mid is not None:
+                            mid = int(mid)
+                            if mid in exclude_tmdb:
+                                removed_for_dedup += 1
+                                continue
+                            if mid in seen_tmdb:
+                                removed_for_dedup += 1
+                                continue
+                        deduped.append(cand)
+                        if tid is not None:
+                            seen_trakt.add(tid)
+                        if mid is not None:
+                            seen_tmdb.add(mid)
+                        if len(deduped) >= desired_k:
+                            break
+                    except Exception:
+                        # If malformed IDs, keep candidate to avoid over-filtering
+                        deduped.append(cand)
+                        if len(deduped) >= desired_k:
+                            break
+
+                # If we removed many and have room, backfill from the remaining scored pool
+                if len(deduped) < desired_k:
+                    try:
+                        # Build a fast lookup of IDs already chosen
+                        chosen_trakt = set(seen_trakt)
+                        chosen_tmdb = set(seen_tmdb)
+                        for cand in scored:
+                            if len(deduped) >= desired_k:
+                                break
+                            try:
+                                tid = cand.get("trakt_id")
+                                mid = cand.get("tmdb_id")
+                                if tid is not None:
+                                    tid = int(tid)
+                                    if tid in chosen_trakt or tid in exclude_trakt:
+                                        continue
+                                if mid is not None:
+                                    mid = int(mid)
+                                    if mid in chosen_tmdb or mid in exclude_tmdb:
+                                        continue
+                                # Also avoid duplicating within the same filled list
+                                deduped.append(cand)
+                                if tid is not None:
+                                    chosen_trakt.add(tid)
+                                if mid is not None:
+                                    chosen_tmdb.add(mid)
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+
+                # Only replace diversified if dedup achieved some effect and we still have a list
+                if deduped and (removed_for_dedup > 0):
+                    logger.info(f"[{ai_list_id}] Cross-list de-dup removed {removed_for_dedup} items; filled {len(deduped)}/{desired_k} after backfill")
+                    diversified = deduped
+                # If deduped is too small (e.g., tiny pool), keep original diversified to avoid empty lists
+        except Exception as _dedup_err:
+            logger.debug(f"[{ai_list_id}] Cross-list de-dup skipped: {_dedup_err}")
+
         # Clear previous items for idempotent refresh
         db.query(AiListItem).filter_by(ai_list_id=ai_list.id).delete()
         for rank, cand in enumerate(diversified, start=1):
@@ -673,27 +974,71 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             # If we have a Trakt list ID, sync top items
             if ai_list.trakt_list_id:
                 try:
-                    # Build desired items with media_type for add/remove operations
-                    desired_items = []
-                    for cand in diversified[: ai_list.item_limit or 50]:
-                        tid = cand.get("trakt_id")
+                    # Prepare top candidates (limit)
+                    top_candidates = diversified[: ai_list.item_limit or 50]
+
+                    # Attempt batch resolution of missing trakt_ids for these candidates
+                    unresolved = [c for c in top_candidates if not c.get("trakt_id") and c.get("tmdb_id") and c.get("media_type") in ("movie", "show")]
+                    if unresolved:
+                        try:
+                            from app.services.trakt_id_resolver import TraktIdResolver
+                            resolver = TraktIdResolver(user_id=user_id)
+                            batch_pairs = [(c.get("tmdb_id"), c.get("media_type")) for c in unresolved if c.get("tmdb_id") and c.get("media_type")]
+                            mappings = await resolver.get_trakt_ids_batch(batch_pairs)
+                            resolved_count = 0
+                            for c in unresolved:
+                                key = (c.get("tmdb_id"), c.get("media_type"))
+                                tid_val = mappings.get(key)
+                                if tid_val:
+                                    c["trakt_id"] = tid_val
+                                    resolved_count += 1
+                            logger.info(f"AI list {ai_list.id}: batch-resolved {resolved_count}/{len(unresolved)} Trakt IDs for publish")
+                        except Exception as batch_err:
+                            logger.debug(f"AI list {ai_list.id}: batch Trakt ID resolve skipped: {batch_err}")
+
+                    # Build desired items (include tmdb_id fallback if trakt unresolved)
+                    desired_items: list[dict] = []
+                    trakt_present = 0
+                    for cand in top_candidates:
                         mtype = cand.get("media_type") or ("movie" if str(cand.get("type", "")).lower().startswith("movie") else None)
-                        if tid and mtype in ("movie", "show"):
+                        if mtype not in ("movie", "show"):
+                            continue
+                        tid = cand.get("trakt_id")
+                        tmdb_id = cand.get("tmdb_id") or (cand.get("ids", {}) if isinstance(cand.get("ids"), dict) else {}).get("tmdb")
+                        if tid:
+                            trakt_present += 1
+                            desired_items.append({"trakt_id": int(tid), "media_type": mtype})
+                        elif tmdb_id:
+                            # Provide tmdb fallback when trakt missing (will allow Trakt to map and return trakt id on next sync)
                             try:
-                                desired_items.append({"trakt_id": int(tid), "media_type": mtype})
+                                desired_items.append({"tmdb_id": int(tmdb_id), "media_type": mtype})
                             except Exception:
                                 pass
-                    if desired_items:
-                        # First attempt - we're in async context, just await
+
+                    if not desired_items:
+                        logger.info(f"AI list {ai_list.id}: no resolvable items for Trakt sync (missing IDs) - skipping")
+                    else:
+                        t = TraktClient(user_id=user_id)
+                        # Strategy: If we have at least 5 trakt IDs use full sync (add/remove). Otherwise additive push only.
+                        use_full_sync = trakt_present >= 5
                         try:
-                            t = TraktClient(user_id=user_id)
-                            stats = await t.sync_list_items(ai_list.trakt_list_id, desired_items)
-                            logger.info(f"Synced AI list {ai_list.id} to Trakt {ai_list.trakt_list_id}: {stats}")
+                            if use_full_sync:
+                                # Only include items with trakt IDs for sync diff logic
+                                diff_items = [d for d in desired_items if "trakt_id" in d]
+                                stats = await t.sync_list_items(ai_list.trakt_list_id, diff_items)
+                                logger.info(f"Synced AI list {ai_list.id} to Trakt {ai_list.trakt_list_id}: {stats}")
+                                # After sync, attempt additive push of any tmdb-only items
+                                tmdb_only = [d for d in desired_items if "tmdb_id" in d and "trakt_id" not in d]
+                                if tmdb_only:
+                                    add_stats = await t.add_items_to_list(ai_list.trakt_list_id, tmdb_only)
+                                    logger.info(f"Added {len(tmdb_only)} tmdb-only items to AI list {ai_list.trakt_list_id}: {add_stats}")
+                            else:
+                                # Low trakt coverage: push everything additively so Trakt assigns IDs
+                                add_stats = await t.add_items_to_list(ai_list.trakt_list_id, desired_items)
+                                logger.info(f"Added {len(desired_items)} items (mixed IDs) to AI list {ai_list.trakt_list_id}: {add_stats}")
                         except Exception as sync_err:
-                            logger.warning(f"AI Trakt sync failed, attempting recreate: {sync_err}")
+                            logger.warning(f"AI list {ai_list.id}: Trakt sync/add failed, attempting recreate: {sync_err}")
                             try:
-                                # Recreate Trakt list and retry once
-                                t = TraktClient(user_id=user_id)
                                 created = await t.create_list(
                                     name=ai_list.generated_title or (ai_list.prompt_text[:60] if ai_list.prompt_text else "AI Picks"),
                                     description="AI-powered list managed by WatchBuddy",
@@ -704,10 +1049,11 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                                     ai_list.trakt_list_id = str(tlid)
                                     db.commit()
                                     logger.info(f"Recreated Trakt list {tlid} for AI list {ai_list.id}")
-                                    stats = await t.sync_list_items(ai_list.trakt_list_id, desired_items)
-                                    logger.info(f"Synced AI list {ai_list.id} to Trakt {ai_list.trakt_list_id} after recreate: {stats}")
+                                    # Retry additive publish (safer when list recreated)
+                                    add_stats = await t.add_items_to_list(ai_list.trakt_list_id, desired_items)
+                                    logger.info(f"AI list {ai_list.id}: publish after recreate added {len(desired_items)} items: {add_stats}")
                             except Exception as recreate_err:
-                                logger.warning(f"AI Trakt recreate+sync failed: {recreate_err}")
+                                logger.warning(f"AI list {ai_list.id}: Trakt recreate+publish failed: {recreate_err}")
                 except TraktAuthError:
                     logger.info("Trakt not authorized; skipping AI list Trakt sync")
                 except Exception as e:
@@ -855,19 +1201,20 @@ def generate_dynamic_lists(self, user_id: int = 1):
                 logger.info(f"Using alternative: {proposed_title}")
             
             # Expand bare prompts with descriptive context for better semantic matching
-            # This helps TF-IDF and embedding similarity find relevant candidates
+            # CRITICAL: Wrap label in quotes so parser extracts it as a phrase for hard-inclusion
+            # This ensures "political satire" or "buddy cop action" are enforced as must-have cues
             label = p["label"].lower()
             if p["type"] == "mood":
                 # Add descriptive mood context
-                rich_prompt = f"{label} mood atmosphere tone vibe feeling emotional"
+                rich_prompt = f'"{label}" mood atmosphere tone vibe feeling emotional'
             elif p["type"] == "theme":
                 # Add thematic story context
-                rich_prompt = f"{label} theme story narrative about exploring dealing with"
+                rich_prompt = f'"{label}" theme story narrative about exploring dealing with'
             elif p["type"] == "fusion":
                 # Add genre fusion context
-                rich_prompt = f"{label} genre blend combination mix hybrid"
+                rich_prompt = f'"{label}" genre blend combination mix hybrid'
             else:
-                rich_prompt = label
+                rich_prompt = f'"{label}"'
             
             ai_list = AiList(
                 user_id=user_id,
@@ -1080,7 +1427,11 @@ def rebuild_faiss_index(self):
             DATA_DIR, INDEX_FILE, MAPPING_FILE
         )
         from app.services.ai_engine.metadata_processing import compose_text_for_embedding
-        import faiss
+        # Optional faiss import (wrapped) - environment may not have native module during lint/static analysis
+        try:
+            import faiss  # type: ignore
+        except Exception:
+            faiss = None
         
         embedder = EmbeddingService()
 

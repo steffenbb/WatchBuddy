@@ -115,15 +115,16 @@ async def create_list(payload: ListCreate):
                 if trakt_list_id and trakt_list_id != "None":
                     logger.info(f"Created Trakt list {trakt_list_id} for custom list {l.id}")
                     # Update the list with the Trakt ID
-                    db = SessionLocal()
+                    from ..core.database import SessionLocal as DBSession
+                    db_session = DBSession()
                     try:
-                        db.query(UserList).filter(UserList.id == l.id).update({"trakt_list_id": trakt_list_id})
-                        db.commit()
+                        db_session.query(UserList).filter(UserList.id == l.id).update({"trakt_list_id": trakt_list_id})
+                        db_session.commit()
                         logger.info(f"Updated list {l.id} with trakt_list_id: {trakt_list_id}")
                         # Notify success
                         await send_notification(user_id, f"Created Trakt list for '{l.title}'", "success")
                     finally:
-                        db.close()
+                        db_session.close()
             except Exception as trakt_err:
                 logger.warning(f"Failed to create Trakt list for custom list {l.id}: {trakt_err}")
                 # Non-fatal - list still created locally, just won't sync to Trakt
@@ -134,7 +135,13 @@ async def create_list(payload: ListCreate):
 
             # Always queue population task for custom/manual lists
             try:
-                from ..tasks import populate_new_list_async
+                # Import the correct tasks module
+                try:
+                    from app.tasks_ai import populate_new_list_async
+                except ImportError:
+                    # Fallback to smartlist tasks if available
+                    from app.tasks_smartlist import populate_new_list_async
+                
                 # Use default discovery and media_types for custom lists
                 populate_new_list_async.delay(
                     list_id=l.id,
@@ -146,6 +153,8 @@ async def create_list(payload: ListCreate):
                     list_type=l.list_type
                 )
                 logger.info(f"Queued populate_new_list_async for custom list {l.id}")
+            except ImportError as import_err:
+                logger.warning(f"Task module not found for custom list {l.id}: {import_err}. List created but not auto-populated.")
             except Exception as pop_err:
                 logger.error(f"Failed to queue population task for custom list {l.id}: {pop_err}")
         else:

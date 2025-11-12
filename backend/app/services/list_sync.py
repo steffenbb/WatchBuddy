@@ -32,6 +32,19 @@ class ListSyncService:
         # Readiness flags to bypass external calls when not configured
         self._trakt_ready = False
         self._tmdb_ready = False
+        # Persistent session for lightweight lookups (e.g. TraktWatchHistory). Heavy write ops use scoped sessions.
+        try:
+            self.db = SessionLocal()
+        except Exception:
+            self.db = None
+
+    def close(self):
+        """Release internal session resources."""
+        try:
+            if getattr(self, "db", None):
+                self.db.close()
+        except Exception:
+            pass
 
     async def _update_readiness(self) -> None:
         """Compute and cache readiness flags for Trakt/TMDB to avoid timeouts when not configured."""
@@ -762,21 +775,18 @@ class ListSyncService:
                 logger.info(f"[DISCOVERY] Using discovery mode: '{enhanced_discovery}'")
             
             # Determine genre_mode
-            # Chat lists: default to 'any' to avoid over-restricting (e.g., Action + Comedy should allow pure Comedy)
+            # Default to 'any' to avoid over-restricting (e.g., Action + Comedy should allow pure Comedy)
             # Allow explicit override via filters.genre_mode == 'all'
             genre_mode = "any"
             if isinstance(filters.get("genre_mode"), str) and filters.get("genre_mode").lower() == "all":
                 genre_mode = "all"
                 logger.info(f"[GENRE_MODE] Using explicit 'all' mode from filters: {genres}")
             else:
-                if user_list.list_type == "chat":
-                    logger.info(f"[GENRE_MODE] Chat default 'any' for genres={genres}")
-                elif genres and len(genres) >= 2:
-                    # Non-chat lists with multiple genres can be stricter by default
-                    genre_mode = "all"
-                    logger.info(f"[GENRE_MODE] Non-chat list using 'all' for multiple genres: {genres}")
+                logger.info(f"[GENRE_MODE] Using default 'any' mode for genres={genres}")
             
             # Always use persistent DB for all list types (custom, suggested, smart, etc.)
+            # strict_mode: enable for non-AI legacy/custom lists to prevent lenient fallbacks
+            strict_mode = user_list.list_type not in ("chat", "mood", "theme", "fusion")
             candidates = await self.candidate_provider.get_candidates(
                 search_keywords=search_keywords_list,
                 discovery=enhanced_discovery,
@@ -791,7 +801,8 @@ class ListSyncService:
                 list_title=user_list.title,
                 fusion_mode=filters.get("fusion_mode", False),
                 exclude_ids=exclude_ids,  # Exclude items from other lists for diversity
-                persistent_only=True  # ENFORCED: Only use persistent DB for all list syncs
+                persistent_only=True,  # ENFORCED: Only use persistent DB for all list syncs
+                strict_mode=strict_mode
             )
             
             logger.warning(f"[DEBUG] Candidates from provider for {media_type} - sample titles: {[c.get('title', 'NO_TITLE') for c in candidates[:5]]}")
@@ -843,72 +854,91 @@ class ListSyncService:
         return filtered
 
     async def _enrich_with_watched_status(self, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Add watched status information to candidates from database (TraktWatchHistory)."""
-        # Check if any candidates have Trakt IDs - no point querying if none do
-        has_trakt_ids = any(candidate.get("trakt_id") for candidate in candidates)
+        """Add watched status information to candidates from TraktWatchHistory table with fuzzy title/year fallback."""
+        from app.models import TraktWatchHistory
         
-        if not has_trakt_ids:
-            logger.debug("Skipping watched status enrichment - no candidates have Trakt IDs")
-            # Mark all as not watched and return
+        try:
+            # Fetch all watched items for this user from TraktWatchHistory table
+            watched_items = self.db.query(TraktWatchHistory).filter(
+                TraktWatchHistory.user_id == self.user_id
+            ).all()
+            
+            # Build lookup dictionaries for fast matching
+            # 1. By Trakt ID
+            trakt_id_lookup = {}
+            # 2. By TMDB ID
+            tmdb_id_lookup = {}
+            # 3. By normalized title/year (fuzzy fallback)
+            title_year_lookup = {}
+            
+            for item in watched_items:
+                watched_info = {
+                    "watched_at": item.watched_at,
+                    "title": item.title,
+                    "year": item.year
+                }
+                
+                if item.trakt_id:
+                    key = (item.trakt_id, item.media_type)
+                    trakt_id_lookup[key] = watched_info
+                
+                if item.tmdb_id:
+                    key = (item.tmdb_id, item.media_type)
+                    tmdb_id_lookup[key] = watched_info
+                
+                if item.title:
+                    normalized_title = item.title.lower().strip()
+                    key = (normalized_title, item.year, item.media_type)
+                    title_year_lookup[key] = watched_info
+            
+            # Enrich each candidate with watched status using multi-level matching
+            enriched = []
+            fuzzy_matched_count = 0
+            
+            for candidate in candidates:
+                trakt_id = candidate.get("trakt_id")
+                tmdb_id = candidate.get("tmdb_id")
+                media_type = candidate.get("media_type", "movie")
+                title = candidate.get("title")
+                year = candidate.get("year")
+                
+                watched_info = None
+                
+                # 1. Try Trakt ID match (most reliable)
+                if trakt_id:
+                    watched_info = trakt_id_lookup.get((trakt_id, media_type))
+                
+                # 2. Try TMDB ID match
+                if not watched_info and tmdb_id:
+                    watched_info = tmdb_id_lookup.get((tmdb_id, media_type))
+                
+                # 3. Fuzzy match by normalized title and year
+                if not watched_info and title:
+                    normalized_title = title.lower().strip()
+                    watched_info = title_year_lookup.get((normalized_title, year, media_type))
+                    if watched_info:
+                        fuzzy_matched_count += 1
+                
+                # Set watched status
+                candidate["is_watched"] = bool(watched_info)
+                candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
+                
+                enriched.append(candidate)
+            
+            if fuzzy_matched_count > 0:
+                logger.info(f"Enriched {len(enriched)} candidates with watched status: {fuzzy_matched_count} matched via title/year fuzzy matching")
+            else:
+                logger.debug(f"Enriched {len(enriched)} candidates with watched status from TraktWatchHistory table")
+            
+            return enriched
+            
+        except Exception as e:
+            logger.error(f"Failed to enrich with TraktWatchHistory table: {e}")
+            # Mark all as not watched on error
             for candidate in candidates:
                 candidate["is_watched"] = False
                 candidate["watched_at"] = None
             return candidates
-        
-        # Use database-backed watch history (much faster than API calls)
-        from app.services.watch_history_helper import WatchHistoryHelper
-        
-        try:
-            helper = WatchHistoryHelper(self.user_id, self.db)
-            
-            # Get watched status in bulk for both types
-            watched_movies = helper.get_watched_status_dict("movie")
-            watched_shows = helper.get_watched_status_dict("show")
-            
-            enriched = []
-            for candidate in candidates:
-                trakt_id = candidate.get("trakt_id")
-                media_type = candidate.get("media_type", "movie")
-                
-                if trakt_id:
-                    watched_dict = watched_movies if media_type == "movie" else watched_shows
-                    watched_info = watched_dict.get(trakt_id)
-                    
-                    candidate["is_watched"] = bool(watched_info)
-                    candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
-                else:
-                    candidate["is_watched"] = False
-                    candidate["watched_at"] = None
-                
-                enriched.append(candidate)
-            
-            logger.debug(f"Enriched {len(enriched)} candidates with watched status from database")
-            return enriched
-            
-        except Exception as e:
-            logger.warning(f"Failed to enrich with DB watched status, falling back to API: {e}")
-            # Fallback to original API-based method if DB fails
-            watched_movies = await self.trakt_client.get_watched_status("movies")
-            watched_shows = await self.trakt_client.get_watched_status("shows")
-            
-            enriched = []
-            for candidate in candidates:
-                trakt_id = candidate.get("trakt_id")
-                media_type = candidate.get("media_type", "movie")
-                
-                if trakt_id:
-                    watched_dict = watched_movies if media_type == "movie" else watched_shows
-                    watched_info = watched_dict.get(trakt_id)
-                    
-                    candidate["is_watched"] = bool(watched_info)
-                    candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
-                else:
-                    candidate["is_watched"] = False
-                    candidate["watched_at"] = None
-                
-                enriched.append(candidate)
-            
-            return enriched
 
     async def _score_candidates(self, candidates: List[Dict[str, Any]], user_list: UserList) -> List[Dict[str, Any]]:
         logger.warning(f"[DEBUG][SCORING] Scoring {len(candidates)} candidates for list {user_list.id}")

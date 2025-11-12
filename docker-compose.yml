@@ -63,7 +63,6 @@ services:
     volumes:
       - ai_data:/data/ai
       - poster_data:/app/data/posters
-      - ./backend/data/watchbuddy_bootstrap.tar.gz:/app/data/watchbuddy_bootstrap.tar.gz:ro  # Mount bootstrap bundle (read-only)
     healthcheck:
       test: ["CMD-SHELL", "python3 - << 'PY'\nimport http.client\nconn = http.client.HTTPConnection('127.0.0.1', 8000, timeout=2)\ntry:\n    conn.request('GET', '/health')\n    resp = conn.getresponse()\n    print(resp.status)\n    exit(0 if resp.status == 200 else 1)\nexcept Exception as e:\n    print(e)\n    exit(1)\nPY"]
       interval: 5s
@@ -74,7 +73,7 @@ services:
   # Worker 1: Maintenance + Ingestion (long-running tasks)
   celery-maintenance:
     image: lsdking101/watchbuddy:latest
-    command: celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=maintenance,ingestion --concurrency=2 --hostname=maintenance@%h
+    command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=maintenance,ingestion --concurrency=2 --hostname=maintenance@%h"
     depends_on:
       backend:
         condition: service_started
@@ -88,14 +87,13 @@ services:
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
     volumes:
-      - ./backend/app:/app/app
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
   # Worker 2: List Creation + Scoring (AI + SmartList generation)
   celery-creation:
     image: lsdking101/watchbuddy:latest
-    command: celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=creation,celery --concurrency=2 --hostname=creation@%h
+    command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=creation,celery --concurrency=2 --hostname=creation@%h"
     depends_on:
       backend:
         condition: service_started
@@ -109,14 +107,13 @@ services:
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
     volumes:
-      - ./backend/app:/app/app
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
   # Worker 3: List Updates + Sync (refreshes, watched status)
   celery-sync:
     image: lsdking101/watchbuddy:latest
-    command: celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=sync --concurrency=2 --hostname=sync@%h
+    command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=sync --concurrency=2 --hostname=sync@%h"
     depends_on:
       backend:
         condition: service_started
@@ -130,13 +127,12 @@ services:
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
     volumes:
-      - ./backend/app:/app/app
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
   celery-beat:
     image: lsdking101/watchbuddy:latest
-    command: celery -A app.core.celery_app.celery_app beat --loglevel=info
+    command: sh -c "cd /app && celery -A app.core.celery_app.celery_app beat --loglevel=info"
     depends_on:
       backend:
         condition: service_started
@@ -149,8 +145,6 @@ services:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
-    volumes:
-      - ./backend/app:/app/app
 
 
   frontend:

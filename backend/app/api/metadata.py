@@ -26,22 +26,18 @@ async def get_metadata_status(db: Session = Depends(get_db)) -> Dict[str, Any]:
     """
     Get metadata build status and readiness.
     
-    Returns:
-        status: Build status (not_started, running, complete, error)
-        ready: Whether metadata is ready for use
-        build_progress: Current build progress if running
+    METADATA BUILDER PERMANENTLY DISABLED - always return ready=true.
+    Bootstrap import provides complete candidate pool with TMDB IDs.
     """
-    builder = MetadataBuilder()
-    
-    # Get build status from Redis
-    build_status = await builder.get_build_status()
-    
-    # Check if metadata is ready
-    is_ready = await builder.check_metadata_ready(db)
-    
     return {
-        "ready": is_ready,
-        "build_status": build_status
+        "ready": True,
+        "build_status": {
+            "status": "disabled",
+            "message": "Metadata builder disabled - bootstrap import active",
+            "total": 0,
+            "processed": 0,
+            "progress_percent": 100
+        }
     }
 
 class BuildRequest(BaseModel):
@@ -55,47 +51,16 @@ async def start_metadata_build(
     db: Session = Depends(get_db)
 ) -> Dict[str, Any]:
     """
-    Start metadata building process using Celery task.
+    METADATA BUILDER PERMANENTLY DISABLED.
     
-    Args:
-        force: Force rebuild even if already complete
-        user_id: User ID for Trakt authentication
-        
-    Returns:
-        message: Status message
+    Bootstrap import provides complete candidate pool.
+    This endpoint now returns a disabled message to prevent UI triggering.
     """
-    builder = MetadataBuilder()
-    
-    # Check current status
-    current_status = await builder.get_build_status()
-    
-    if current_status["status"] == "running" and not req.force:
-        # Stale detection: if no update for > 120s, allow restart
-        updated_at = current_status.get("updated_at")
-        is_stale = False
-        if updated_at:
-            try:
-                last = datetime.fromisoformat(updated_at)
-                age = (datetime.utcnow() - last).total_seconds()
-                if age > 120:
-                    is_stale = True
-            except Exception:
-                is_stale = True
-        if not is_stale:
-            return {
-                "message": "Metadata build already in progress",
-                "progress_percent": current_status.get("progress_percent", 0)
-            }
-    
-    # Start build via Celery using the configured app (Redis broker)
-    celery_app.send_task(
-        "app.services.tasks.build_metadata",
-        kwargs={"user_id": req.user_id, "force": req.force}
-    )
+    logger.warning("Metadata build endpoint called but builder is DISABLED (bootstrap active)")
     
     return {
-        "message": "Metadata build started",
-        "status": "running"
+        "message": "Metadata builder is disabled - bootstrap import provides complete data",
+        "status": "disabled"
     }
 
 @router.get("/build/status")

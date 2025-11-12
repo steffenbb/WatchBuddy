@@ -96,6 +96,20 @@ class PhaseDetector:
         Also creates a "future" phase prediction based on recent trends.
         """
         logger.info(f"[PhaseDetector] Starting full phase detection for user {self.user_id}")
+        # Acquire Redis lock to prevent concurrent phase detection runs for same user
+        lock_key = f"phase_detect_lock:{self.user_id}"
+        lock_acquired = False
+        try:
+            from app.core.redis_client import get_redis_sync
+            r_lock = get_redis_sync()
+            # Set lock with short expiry (10 minutes) if not exists
+            if r_lock.set(lock_key, "1", nx=True, ex=600):
+                lock_acquired = True
+            else:
+                logger.warning(f"[PhaseDetector] Another phase detection is in progress for user {self.user_id}; aborting duplicate run.")
+                return []
+        except Exception as e:
+            logger.warning(f"[PhaseDetector] Redis lock unavailable ({e}); proceeding without lock (risk of duplicate runs)")
         
         try:
             # Get watch history date range
@@ -134,6 +148,14 @@ class PhaseDetector:
         except Exception as e:
             logger.error(f"[PhaseDetector] Phase detection failed for user {self.user_id}: {e}", exc_info=True)
             raise
+        finally:
+            # Release lock if acquired
+            if lock_acquired:
+                try:
+                    from app.core.redis_client import get_redis_sync
+                    get_redis_sync().delete(lock_key)
+                except Exception:
+                    pass
     
     def _get_history_date_range(self) -> Tuple[Optional[datetime], Optional[datetime]]:
         """Get earliest and latest watch dates for user."""
@@ -290,10 +312,11 @@ class PhaseDetector:
         
         return phases
     
-    def _load_embeddings_for_watches(self, watches: List[TraktWatchHistory]) -> Tuple[np.ndarray, List[Dict]]:
+    def _load_embeddings_for_watches(self, watches: List[Dict]) -> Tuple[np.ndarray, List[Dict]]:
         """
         Load embeddings for watched items from database.
         Returns (embeddings_array, watch_data_list) where watch_data contains watch + metadata.
+        Param watches is now a list of dicts (not model objects).
         """
         embeddings_list = []
         watch_data = []
@@ -301,14 +324,17 @@ class PhaseDetector:
         for watch in watches:
             # Try to get embedding from PersistentCandidate
             candidate = None
-            if watch.tmdb_id:
+            tmdb_id = watch.get('tmdb_id')
+            media_type = watch.get('media_type')
+            
+            if tmdb_id:
                 candidate = self.db.query(PersistentCandidate).filter(
-                    PersistentCandidate.tmdb_id == watch.tmdb_id,
-                    PersistentCandidate.media_type == watch.media_type
+                    PersistentCandidate.tmdb_id == tmdb_id,
+                    PersistentCandidate.media_type == media_type
                 ).first()
             
             if not candidate or not candidate.embedding:
-                logger.debug(f"[PhaseDetector] No embedding for {watch.title} (tmdb_id={watch.tmdb_id})")
+                logger.debug(f"[PhaseDetector] No embedding for {watch.get('title')} (tmdb_id={tmdb_id})")
                 continue
             
             # Deserialize embedding
@@ -320,20 +346,20 @@ class PhaseDetector:
                 watch_data.append({
                     "watch": watch,
                     "candidate": candidate,
-                    "tmdb_id": watch.tmdb_id,
-                    "trakt_id": watch.trakt_id,
-                    "title": watch.title,
-                    "genres": self._parse_json(watch.genres or candidate.genres),
-                    "keywords": self._parse_json(watch.keywords or candidate.keywords),
-                    "collection_id": watch.collection_id,
-                    "collection_name": watch.collection_name,
-                    "poster_path": watch.poster_path or candidate.poster_path,
-                    "overview": watch.overview or candidate.overview,
-                    "runtime": watch.runtime or candidate.runtime,
-                    "language": watch.language or candidate.language,
+                    "tmdb_id": tmdb_id,
+                    "trakt_id": watch.get('trakt_id'),
+                    "title": watch.get('title'),
+                    "genres": self._parse_json(watch.get('genres') or candidate.genres),
+                    "keywords": self._parse_json(candidate.keywords),
+                    "collection_id": watch.get('collection_name'),  # Note: collection_id stored as collection_name in dict
+                    "collection_name": watch.get('collection_name'),
+                    "poster_path": candidate.poster_path,
+                    "overview": candidate.overview,
+                    "runtime": candidate.runtime,
+                    "language": candidate.language,
                     # Ensure timezone-aware UTC to avoid comparison errors later
-                    "watched_at": ensure_utc(watch.watched_at),
-                    "media_type": watch.media_type
+                    "watched_at": ensure_utc(watch.get('watched_at')),
+                    "media_type": media_type
                 })
             except Exception as e:
                 logger.warning(f"[PhaseDetector] Failed to load embedding for {watch.title}: {e}")
@@ -522,8 +548,16 @@ class PhaseDetector:
             icon = "🎬"  # Generic franchise icon
             return label, icon
 
-        # Use dynamic naming for non-franchise phases
-        label = self._generate_dynamic_phase_name(cluster_watches, metrics)
+        # Use dynamic naming for non-franchise phases (gracefully handle absence)
+        try:
+            label = self._generate_dynamic_phase_name(cluster_watches, metrics)
+        except Exception:
+            # Fallback: genre-based label
+            genres = metrics.get("dominant_genres") or []
+            if genres:
+                label = f"{genres[0].title()} Phase"
+            else:
+                label = "Mixed Viewing Phase"
 
         # Select icon based on dominant genre
         genres = metrics["dominant_genres"]
@@ -561,7 +595,7 @@ class PhaseDetector:
         
         return explanation
     
-        def _generate_dynamic_phase_name(self, cluster_watches: List[Dict], metrics: Dict) -> str:
+    def _generate_dynamic_phase_name(self, cluster_watches: List[Dict], metrics: Dict) -> str:
             """
             Generate intelligent phase name based on content analysis.
             Uses similar logic to AI list title generation for consistency.
@@ -856,8 +890,21 @@ class PhaseDetector:
             logger.debug(f"[PhaseDetector] Insufficient recent watches for prediction ({len(recent_watches)})")
             return None
         
+        # Convert model objects to dicts for embedding loader
+        watch_data_raw = [
+            {
+                'trakt_id': w.trakt_id,
+                'tmdb_id': w.tmdb_id,
+                'title': w.title,
+                'media_type': w.media_type,
+                'watched_at': w.watched_at,
+                'genres': w.genres
+            }
+            for w in recent_watches
+        ]
+        
         # Load embeddings for recent watches
-        embeddings, watch_data = self._load_embeddings_for_watches(recent_watches)
+        embeddings, watch_data = self._load_embeddings_for_watches(watch_data_raw)
         
         if len(embeddings) < 5:
             logger.debug(f"[PhaseDetector] Insufficient embeddings for prediction")

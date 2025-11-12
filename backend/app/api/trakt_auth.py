@@ -19,7 +19,7 @@ async def get_trakt_redirect_uri():
     
     # Default to localhost if not set or empty
     if not redirect_base or not redirect_base.strip():
-        redirect_base = "localhost"
+        redirect_base = "http://localhost:5173"
     
     # Ensure proper format - add http:// if no protocol specified
     if not redirect_base.startswith(("http://", "https://")):
@@ -28,8 +28,8 @@ async def get_trakt_redirect_uri():
     # Remove trailing slash if present
     redirect_base = redirect_base.rstrip("/")
     
-    # Append the callback path
-    return f"{redirect_base}:5173/auth/trakt/callback"
+    # Append the callback path (no port - assume it's already in redirect_base if needed)
+    return f"{redirect_base}/auth/trakt/callback"
 
 async def get_trakt_credentials():
     """Get Trakt credentials from Redis settings."""
@@ -239,7 +239,7 @@ async def get_redirect_uri_setting():
     
     # Return the raw value (or default)
     if not redirect_base or not redirect_base.strip():
-        redirect_base = "localhost"
+        redirect_base = "http://localhost:5173"
     
     # Also return the full computed URI for display
     full_uri = await get_trakt_redirect_uri()
@@ -251,25 +251,23 @@ async def get_redirect_uri_setting():
 
 @router.post("/redirect-uri")
 async def set_redirect_uri_setting(data: Dict[str, Any]):
-    """Set the Trakt redirect URI (base domain/IP)."""
+    """Set the Trakt redirect URI (full URL including protocol and port if needed)."""
     redis = get_redis()
     redirect_base = data.get("redirect_uri", "").strip()
     
     # Validate input
     if not redirect_base:
         # Allow empty to reset to default
-        redirect_base = "localhost"
+        redirect_base = "http://localhost:5173"
     
-    # Remove protocol if user included it (we'll add it back when building the full URI)
-    if redirect_base.startswith("http://"):
-        redirect_base = redirect_base[7:]
-    elif redirect_base.startswith("https://"):
-        redirect_base = redirect_base[8:]
+    # Ensure protocol is included
+    if not redirect_base.startswith(("http://", "https://")):
+        redirect_base = f"http://{redirect_base}"
     
-    # Remove trailing slashes and port if included in the base
-    redirect_base = redirect_base.rstrip("/").split(":")[0]
+    # Remove trailing slashes
+    redirect_base = redirect_base.rstrip("/")
     
-    # Store in Redis
+    # Store in Redis (now storing the full base URL with port)
     await redis.set("settings:global:trakt_redirect_uri", redirect_base)
     
     # Return the computed full URI

@@ -69,6 +69,7 @@ watchbuddy_bootstrap.tar.gz
 backend/data/watchbuddy_bootstrap.tar.gz
 **/watchbuddy_bootstrap/
 **/watchbuddy_bootstrap.tar.gz
+**/watchbuddy_bootstrap.part.*
 
 # Model cache directories
 models/
@@ -155,3 +156,15 @@ docs/
 !backend/data/README.md
 !frontend/src/help.md
 !tests/README.md
+
+# Patterns for internal API and genre filtering docs
+api_and_*.md
+API_AND_*.md
+genre_filtering_*.md
+GENRE_FILTERING_*.md
+
+# Copilot instruction docs (explicit)
+.github/copilot-instructions.md
+
+# Bootstrap helper scripts
+split_bootstrap.ps1

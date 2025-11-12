@@ -23,8 +23,8 @@ from app.models import PersistentCandidate, IndividualListItem
 logger = logging.getLogger(__name__)
 
 SUGGESTIONS_LIMIT = 20
-NEIGHBORS_PER_ITEM = 10  # Get 10 neighbors per list item
-MIN_SIMILARITY = 0.6  # Minimum cosine similarity for suggestions
+NEIGHBORS_PER_ITEM = 25  # Increase neighbor breadth to provide suggestions even for dense/genre-specific lists
+MIN_SIMILARITY = 0.45  # Lower threshold to prevent empty suggestions when embeddings cluster tightly
 
 
 class IndividualListSuggestionsService:
@@ -96,14 +96,14 @@ class IndividualListSuggestionsService:
             candidates = self._get_faiss_neighbors(list_items, existing_tmdb_ids)
             
             if not candidates:
-                logger.warning(f"No FAISS neighbors found for list {list_id}")
-                return []
+                logger.warning(f"No FAISS neighbors found for list {list_id}; falling back to hybrid popularity + mild diversity suggestions")
+                return self._fallback_diverse_recommendations(db, existing_tmdb_ids)
             
             # Score candidates with diversity boost
             scored = self._score_candidates(candidates, list_genres)
             
             # Enrich with full metadata
-            enriched = self._enrich_with_metadata(scored, db)
+            enriched = self._enrich_with_metadata(scored, db, list_genres=list_genres)
             
             # Apply fit scoring (use cached profile first)
             final = self.fit_scorer.score_candidates(enriched, use_cached_profile=True)
@@ -142,7 +142,7 @@ class IndividualListSuggestionsService:
                 item['_final_score'] = (
                     suggestion_score * 0.5 + 
                     fit_score * 0.3 + 
-                    item.get('_diversity_boost', 0.0) * 0.2 + 
+                    item.get('_diversity_boost', 0.0) * 0.25 + 
                     genre_boost
                 )
                 # Expose similarity for UI badges if available
@@ -334,7 +334,8 @@ class IndividualListSuggestionsService:
     def _enrich_with_metadata(
         self,
         candidates: List[Dict[str, Any]],
-        db
+        db,
+        list_genres: Dict[str, int] = None
     ) -> List[Dict[str, Any]]:
         """
         Enrich candidates with full metadata from DB.
@@ -360,6 +361,19 @@ class IndividualListSuggestionsService:
         
         # Enrich
         enriched = []
+        # Pre-compute rarity metrics from list_genres (genre frequency within existing list)
+        list_genres = list_genres or {}
+        # Compute median frequency to define underrepresentation threshold
+        try:
+            counts = [c for c in list_genres.values() if isinstance(c, int)]
+            median_count = 0
+            if counts:
+                counts_sorted = sorted(counts)
+                mid = len(counts_sorted) // 2
+                median_count = counts_sorted[mid] if counts_sorted else 0
+        except Exception:
+            median_count = 0
+
         for candidate in candidates:
             key = (candidate['tmdb_id'], candidate['media_type'])
             db_candidate = candidate_map.get(key)
@@ -373,6 +387,24 @@ class IndividualListSuggestionsService:
                 genres = json.loads(db_candidate.genres) if db_candidate.genres else []
             except:
                 pass
+
+            # Compute diversity boost: promote genres that are underrepresented in the user's current list
+            diversity_boost = 0.0
+            try:
+                rarity_scores = []
+                for g in genres:
+                    g_norm = g.lower()
+                    count = list_genres.get(g_norm, 0)
+                    # If genre absent or below median, treat as rare
+                    if count <= median_count:
+                        # Rarity score inversely proportional to (1 + count)
+                        rarity = 1.0 / (1 + count)
+                        rarity_scores.append(rarity)
+                if rarity_scores:
+                    # Average rarity scaled; cap to avoid overpowering similarity/fit
+                    diversity_boost = min(0.15, (sum(rarity_scores) / len(rarity_scores)) * 0.12)
+            except Exception:
+                diversity_boost = 0.0
             
             enriched_item = {
                 'tmdb_id': db_candidate.tmdb_id,
@@ -389,7 +421,8 @@ class IndividualListSuggestionsService:
                 'vote_average': db_candidate.vote_average,
                 '_suggestion_score': candidate['_suggestion_score'],
                 '_frequency': candidate['frequency'],
-                '_avg_similarity': candidate['avg_similarity']
+                '_avg_similarity': candidate['avg_similarity'],
+                '_diversity_boost': diversity_boost
             }
             
             enriched.append(enriched_item)
@@ -403,25 +436,23 @@ class IndividualListSuggestionsService:
         Used to bootstrap suggestions for empty lists.
         """
         try:
-            # Get top rated popular items
+            # Get top rated popular items (slightly relaxed thresholds to improve diversity)
             candidates = db.query(PersistentCandidate).filter(
                 PersistentCandidate.active == True,
                 PersistentCandidate.vote_average >= 7.0,
-                PersistentCandidate.vote_count >= 1000,
-                PersistentCandidate.popularity >= 20
+                PersistentCandidate.vote_count >= 250,
+                PersistentCandidate.popularity >= 12
             ).order_by(
+                PersistentCandidate.popularity.desc(),
                 PersistentCandidate.vote_average.desc()
-            ).limit(SUGGESTIONS_LIMIT * 2).all()  # Get 2x to allow for diversity
-            
-            # Convert to dict format
-            enriched = []
+            ).limit(SUGGESTIONS_LIMIT * 5).all()  # Fetch more for better diversity sampling
+
+            enriched: List[Dict[str, Any]] = []
             for c in candidates:
-                genres = []
                 try:
                     genres = json.loads(c.genres) if c.genres else []
-                except:
-                    pass
-                
+                except Exception:
+                    genres = []
                 enriched.append({
                     'tmdb_id': c.tmdb_id,
                     'trakt_id': c.trakt_id,
@@ -436,19 +467,99 @@ class IndividualListSuggestionsService:
                     'popularity': c.popularity,
                     'vote_average': c.vote_average
                 })
-            
+
             # Apply fit scoring
-            scored = self.fit_scorer.score_candidates(enriched)
-            
-            # Sort by fit score
-            scored.sort(key=lambda x: x.get('fit_score', 0.5), reverse=True)
-            
-            # Mark high-fit items
+            try:
+                scored = self.fit_scorer.score_candidates(enriched, use_cached_profile=True)
+            except Exception:
+                scored = enriched
+                for it in scored:
+                    it['fit_score'] = 0.5
+
+            # Sort by fit score then popularity
+            scored.sort(key=lambda x: (x.get('fit_score', 0.5), x.get('popularity', 0)), reverse=True)
             for item in scored:
                 item['is_high_fit'] = item.get('fit_score', 0.0) > 0.7
-            
             return scored[:SUGGESTIONS_LIMIT]
-            
         except Exception as e:
             logger.error(f"Failed to get popular recommendations: {e}")
+            return []
+
+    def _fallback_diverse_recommendations(self, db, existing_tmdb_ids) -> List[Dict[str, Any]]:
+        """Return a diversified set when FAISS cannot provide neighbors (e.g., all niche items without embeddings).
+        Excludes existing items.
+        """
+        try:
+            base = db.query(PersistentCandidate).filter(
+                PersistentCandidate.active == True,
+                PersistentCandidate.vote_average >= 6.2,
+                PersistentCandidate.vote_count >= 80,
+                PersistentCandidate.popularity >= 10
+            ).order_by(
+                PersistentCandidate.freshness_score.desc(),
+                PersistentCandidate.popularity.desc()
+            ).limit(300).all()
+
+            # Genre balancing buckets
+            import json as _json
+            genre_buckets: Dict[str, List[PersistentCandidate]] = {}
+            for c in base:
+                if (c.tmdb_id, c.media_type) in existing_tmdb_ids:
+                    continue
+                try:
+                    genres = _json.loads(c.genres) if c.genres else []
+                except Exception:
+                    genres = []
+                first_genre = genres[0].lower() if genres else 'unknown'
+                genre_buckets.setdefault(first_genre, []).append(c)
+
+            # Round-robin selection for diversity
+            selected: List[PersistentCandidate] = []
+            while len(selected) < SUGGESTIONS_LIMIT and any(genre_buckets.values()):
+                for g, items in list(genre_buckets.items()):
+                    if not items:
+                        genre_buckets.pop(g, None)
+                        continue
+                    selected.append(items.pop(0))
+                    if len(selected) >= SUGGESTIONS_LIMIT:
+                        break
+
+            out: List[Dict[str, Any]] = []
+            for c in selected:
+                try:
+                    genres = _json.loads(c.genres) if c.genres else []
+                except Exception:
+                    genres = []
+                out.append({
+                    'tmdb_id': c.tmdb_id,
+                    'trakt_id': c.trakt_id,
+                    'media_type': c.media_type,
+                    'title': c.title,
+                    'original_title': c.original_title,
+                    'year': c.year,
+                    'overview': c.overview,
+                    'poster_path': c.poster_path,
+                    'backdrop_path': c.backdrop_path,
+                    'genres': genres,
+                    'popularity': c.popularity,
+                    'vote_average': c.vote_average,
+                    '_suggestion_score': 0.55,
+                    '_frequency': 0,
+                    '_avg_similarity': None
+                })
+
+            # Fit scoring
+            try:
+                scored = self.fit_scorer.score_candidates(out, use_cached_profile=True)
+            except Exception:
+                scored = out
+                for it in scored:
+                    it['fit_score'] = 0.5
+
+            scored.sort(key=lambda x: (x.get('fit_score', 0.5), x.get('popularity', 0)), reverse=True)
+            for item in scored:
+                item['is_high_fit'] = item.get('fit_score', 0.0) > 0.7
+            return scored[:SUGGESTIONS_LIMIT]
+        except Exception as e:
+            logger.warning(f"Fallback diverse recommendations failed: {e}")
             return []

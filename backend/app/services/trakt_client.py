@@ -174,7 +174,12 @@ class TraktClient:
                             logger.error("Trakt access token expired and no refresh token available.")
                             raise TraktAuthError("Trakt access token expired and no refresh token available. Please reauthorize your Trakt account.")
                     resp.raise_for_status()
-                    result = resp.json()
+                    # Some Trakt endpoints (e.g., DELETE list) return 204 No Content.
+                    # Avoid JSON parsing when there is no body.
+                    if resp.status_code == 204 or (resp.content is None or len(resp.content) == 0):
+                        result = {}
+                    else:
+                        result = resp.json()
                     # Only cache GET responses
                     if method.upper() == "GET":
                         await self._r().set(cache_key, json.dumps(result), ex=300)
@@ -645,17 +650,35 @@ class TraktClient:
         """
         endpoint = f"/users/me/lists/{trakt_list_id}/items"
         
-        # Organize items by type
+        # Organize items by type. Accept either Trakt ID or TMDB ID (or both) for robustness.
         payload = {"movies": [], "shows": []}
         for item in items:
             media_type = item.get("media_type", "movie")
             trakt_id = item.get("trakt_id")
-            
-            if not trakt_id:
+            tmdb_id = item.get("tmdb_id")
+
+            # Skip if we have no usable identifier
+            if not trakt_id and not tmdb_id:
                 continue
-            
-            item_data = {"ids": {"trakt": int(trakt_id)}}
-            
+
+            ids: Dict[str, Any] = {}
+            try:
+                if trakt_id is not None:
+                    ids["trakt"] = int(trakt_id)
+            except Exception:
+                # Ignore bad casts
+                pass
+            try:
+                if tmdb_id is not None:
+                    ids["tmdb"] = int(tmdb_id)
+            except Exception:
+                pass
+
+            if not ids:
+                continue
+
+            item_data = {"ids": ids}
+
             if media_type == "movie":
                 payload["movies"].append(item_data)
             elif media_type == "show":
@@ -675,17 +698,33 @@ class TraktClient:
         """
         endpoint = f"/users/me/lists/{trakt_list_id}/items/remove"
         
-        # Organize items by type
+        # Organize items by type. Allow removal via either Trakt or TMDB ID (prefer Trakt when present).
         payload = {"movies": [], "shows": []}
         for item in items:
             media_type = item.get("media_type", "movie")
             trakt_id = item.get("trakt_id")
-            
-            if not trakt_id:
+            tmdb_id = item.get("tmdb_id")
+
+            if not trakt_id and not tmdb_id:
                 continue
-            
-            item_data = {"ids": {"trakt": int(trakt_id)}}
-            
+
+            ids: Dict[str, Any] = {}
+            try:
+                if trakt_id is not None:
+                    ids["trakt"] = int(trakt_id)
+            except Exception:
+                pass
+            try:
+                if tmdb_id is not None:
+                    ids["tmdb"] = int(tmdb_id)
+            except Exception:
+                pass
+
+            if not ids:
+                continue
+
+            item_data = {"ids": ids}
+
             if media_type == "movie":
                 payload["movies"].append(item_data)
             elif media_type == "show":

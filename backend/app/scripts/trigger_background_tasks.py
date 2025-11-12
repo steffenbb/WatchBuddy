@@ -12,9 +12,8 @@ print("\n2. Ingesting new shows...")
 result2 = celery_app.send_task("app.services.tasks.ingest_new_shows")
 print(f"   Task ID: {result2.id}")
 
-print("\n3. Building Trakt metadata...")
-result3 = celery_app.send_task("app.services.tasks.build_metadata", kwargs={"user_id": 1, "force": False})
-print(f"   Task ID: {result3.id}")
+print("\n3. Metadata builder DISABLED (bootstrap import active)")
+print("   Trakt ID mapping now handled on-demand by TraktIdResolver")
 
 print("\nTasks queued. Check worker logs with:")
 print("  docker logs -f watchbuddy-celery-1")

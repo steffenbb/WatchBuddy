@@ -199,31 +199,79 @@ class WatchHistoryHelper:
         media_type_field: str = "media_type"
     ) -> List[Dict[str, Any]]:
         """
-        Enrich list of candidates with watched status from database.
+        Enrich list of candidates with watched status from TraktWatchHistory table with fuzzy title/year fallback.
         Adds 'is_watched' and 'watched_at' fields to each candidate.
         
         Args:
-            candidates: List of candidate dicts with 'trakt_id' field
+            candidates: List of candidate dicts with 'trakt_id' or 'tmdb_id' field
             media_type_field: Field name for media type (default "media_type")
         
         Returns:
             Enriched candidates with watched status
         """
-        # Get watched status for both types in bulk
-        watched_movies = self.get_watched_status_dict("movie")
-        watched_shows = self.get_watched_status_dict("show")
+        from app.models import TraktWatchHistory
         
-        for candidate in candidates:
-            trakt_id = candidate.get("trakt_id")
-            media_type = candidate.get(media_type_field, "movie")
+        try:
+            # Fetch all watched items for this user from TraktWatchHistory table
+            watched_items = self.db.query(TraktWatchHistory).filter(
+                TraktWatchHistory.user_id == self.user_id
+            ).all()
             
-            if trakt_id:
-                watched_dict = watched_movies if media_type == "movie" else watched_shows
-                watched_info = watched_dict.get(trakt_id)
+            # Build lookup dictionaries for fast matching
+            trakt_id_lookup = {}
+            tmdb_id_lookup = {}
+            title_year_lookup = {}
+            
+            for item in watched_items:
+                watched_info = {
+                    "watched_at": item.watched_at,
+                    "title": item.title,
+                    "year": item.year
+                }
+                
+                if item.trakt_id:
+                    key = (item.trakt_id, item.media_type)
+                    trakt_id_lookup[key] = watched_info
+                
+                if item.tmdb_id:
+                    key = (item.tmdb_id, item.media_type)
+                    tmdb_id_lookup[key] = watched_info
+                
+                if item.title:
+                    normalized_title = item.title.lower().strip()
+                    key = (normalized_title, item.year, item.media_type)
+                    title_year_lookup[key] = watched_info
+            
+            # Enrich each candidate
+            for candidate in candidates:
+                trakt_id = candidate.get("trakt_id")
+                tmdb_id = candidate.get("tmdb_id")
+                media_type = candidate.get(media_type_field, "movie")
+                title = candidate.get("title")
+                year = candidate.get("year")
+                
+                watched_info = None
+                
+                # Try Trakt ID match
+                if trakt_id:
+                    watched_info = trakt_id_lookup.get((trakt_id, media_type))
+                
+                # Try TMDB ID match
+                if not watched_info and tmdb_id:
+                    watched_info = tmdb_id_lookup.get((tmdb_id, media_type))
+                
+                # Fuzzy match by title/year
+                if not watched_info and title:
+                    normalized_title = title.lower().strip()
+                    watched_info = title_year_lookup.get((normalized_title, year, media_type))
                 
                 candidate["is_watched"] = bool(watched_info)
                 candidate["watched_at"] = watched_info.get("watched_at") if watched_info else None
-            else:
+            
+        except Exception as e:
+            logger.warning(f"Failed to enrich with TraktWatchHistory: {e}")
+            # Mark all as not watched on error
+            for candidate in candidates:
                 candidate["is_watched"] = False
                 candidate["watched_at"] = None
         

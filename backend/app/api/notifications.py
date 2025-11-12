@@ -180,7 +180,7 @@ async def stream_notifications(user_id: int):
     )
 
 @router.post("/send")
-async def send_notification_api(user_id: int, notification: NotificationCreate):
+async def send_notification_api(notification: NotificationCreate, user_id: int = 1):
     """Send notification to user (for testing or admin use)."""
     await send_notification(user_id, notification.message, notification.type, 
                           notification.link, notification.source)

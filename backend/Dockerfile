@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.4
+
 # Multi-stage build for smaller image
 
 FROM python:3.11-slim AS builder
@@ -21,19 +23,24 @@ ARG GIT_SHA="unknown"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN apt-get update && apt-get install -y libgomp1 && rm -rf /var/lib/apt/lists/*
+
+# Install runtime dependencies and setup in one layer
+RUN apt-get update && apt-get install -y libgomp1 && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /app/data /app/data/ai /app/app/models_cache/all-MiniLM-L6-v2 /app/data/parts
+
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 COPY backend/app /app/app
+COPY backend/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
+# Copy bootstrap parts individually to create separate layers (each ~700MB for Docker Hub limit)
+COPY backend/data/watchbuddy_bootstrap.part.00 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.01 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.02 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.03 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.04 /app/data/parts/
 
-# Create data directories for CSV datasets, AI engine files, and model cache
-RUN mkdir -p /app/data /app/data/ai /app/app/models_cache/all-MiniLM-L6-v2
-# Bootstrap bundle will be mounted via docker-compose volume
-# Legacy CSV files removed - using bootstrap bundle for faster initialization
-# COPY TMDB_movie_dataset_v11.csv /app/data/
-# COPY TMDB_tv_dataset_v3.csv /app/data/
-# COPY backend/data/trakt_mappings_export.csv /app/data/
 # Copy local sentence-transformers model files
 COPY backend/app/models_cache/all-MiniLM-L6-v2 /app/app/models_cache/all-MiniLM-L6-v2
 
@@ -46,4 +53,4 @@ LABEL org.opencontainers.image.title="WatchBuddy Backend" \
 ENV APP_VERSION=$APP_VERSION \
     GIT_SHA=$GIT_SHA
 
-CMD export POSTGRES_PASSWORD=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $POSTGRES_PASSWORD) && export APP_KEY=$(cat ${POSTGRES_PASSWORD_FILE:-/dev/null} 2>/dev/null || echo $APP_KEY) && exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --timeout-keep-alive 75 --timeout-graceful-shutdown 30 --workers 2
+CMD ["/app/entrypoint.sh"]
