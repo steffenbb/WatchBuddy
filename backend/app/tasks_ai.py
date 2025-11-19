@@ -386,7 +386,53 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             except Exception as e:
                 logger.debug(f"Negative cue embedding adjustment skipped: {e}")
 
-        # Try up to 3 FAISS attempts with increasing top_k
+        # === BGE + FAISS HYBRID SEARCH ===
+        # Try BGE index first if enabled, then supplement with FAISS
+        bge_ids = []
+        bge_scores_dict = {}
+        _bge_enabled = False
+        try:
+            from app.core.config import settings
+            _bge_enabled = bool(getattr(settings, 'ai_bge_index_enabled', False))
+            if not _bge_enabled:
+                _val = r.get('settings:global:ai_bge_index_enabled')
+                _bge_enabled = (_val == b'true' or _val == 'true')
+        except Exception:
+            pass
+        
+        if _bge_enabled:
+            try:
+                from app.services.ai_engine.bge_index import BGEIndex, BGEEmbedder
+                logger.info(f"[{ai_list_id}] BGE index enabled, attempting BGE search first")
+                
+                # Encode query with BGE embedder
+                bge_embedder = BGEEmbedder()
+                bge_query_emb = bge_embedder.embed([enriched_query])
+                
+                # Search BGE index
+                bge_idx = BGEIndex(settings.ai_bge_index_dir)
+                indices_list, scores_list = bge_idx.search(bge_query_emb, top_k=60000)  # Get more candidates from BGE
+                
+                # Extract IDs and scores (first query only since we passed single query)
+                if indices_list and scores_list:
+                    indices = indices_list[0]  # First (and only) query results
+                    scores = scores_list[0]
+                    for item_id, score in zip(indices, scores):
+                        try:
+                            if item_id >= 0:  # FAISS uses -1 for empty slots
+                                bge_ids.append(int(item_id))
+                                bge_scores_dict[int(item_id)] = float(score)
+                        except Exception:
+                            continue
+                
+                logger.info(f"[{ai_list_id}] BGE index returned {len(bge_ids)} candidates")
+                del bge_embedder, bge_idx, bge_query_emb
+                gc.collect()
+            except Exception as bge_err:
+                logger.warning(f"[{ai_list_id}] BGE search failed: {bge_err}, falling back to FAISS only")
+                _bge_enabled = False
+
+        # Try up to 3 FAISS attempts with increasing top_k (always run as backup/supplement)
         faiss_attempts = [40000, 80000, 120000]
         topk_ids = []
         faiss_scores_dict = {}
@@ -395,7 +441,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
         # Iterate FAISS attempts
         for attempt, top_k in enumerate(faiss_attempts, 1):
             ids, faiss_scores = search_index(index, query_emb, top_k=top_k)
-            topk_ids = []
+            faiss_ids = []
             for idx, internal_id in enumerate(ids):
                 if int(internal_id) in mapping:
                     mapped_id = mapping.get(int(internal_id))
@@ -405,12 +451,49 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                         mapped_id_int = int(mapped_id)
                     except Exception:
                         continue
-                    topk_ids.append(mapped_id_int)
+                    faiss_ids.append(mapped_id_int)
                     try:
                         faiss_scores_dict[mapped_id_int] = float(faiss_scores[idx])
                     except Exception:
                         faiss_scores_dict[mapped_id_int] = 0.0
-            logger.info(f"[{ai_list_id}] FAISS attempt {attempt} (top_k={top_k}) returned {len(topk_ids)} candidate IDs")
+            logger.info(f"[{ai_list_id}] FAISS attempt {attempt} (top_k={top_k}) returned {len(faiss_ids)} candidate IDs")
+            
+            # === MERGE BGE + FAISS RESULTS ===
+            # Blend scores with BGE primary (70%), FAISS secondary (30%)
+            # This ensures we get the best of both: BGE's multi-vector sophistication + FAISS's broad coverage
+            merged_scores = {}
+            topk_ids = []
+            
+            if _bge_enabled and bge_ids:
+                # Normalize scores to 0-1 range
+                max_bge = max(bge_scores_dict.values()) if bge_scores_dict else 1.0
+                max_faiss = max(faiss_scores_dict.values()) if faiss_scores_dict else 1.0
+                
+                # Add BGE candidates with primary weight
+                for item_id in bge_ids:
+                    bge_score = bge_scores_dict.get(item_id, 0.0) / max_bge if max_bge > 0 else 0.0
+                    faiss_score = faiss_scores_dict.get(item_id, 0.0) / max_faiss if max_faiss > 0 else 0.0
+                    
+                    # Blended score: BGE 70%, FAISS 30%
+                    if faiss_score > 0:
+                        merged_scores[item_id] = 0.7 * bge_score + 0.3 * faiss_score
+                    else:
+                        merged_scores[item_id] = 0.7 * bge_score  # Pure BGE if not in FAISS
+                
+                # Add FAISS-only candidates with lower weight
+                for item_id in faiss_ids:
+                    if item_id not in merged_scores:
+                        faiss_score = faiss_scores_dict.get(item_id, 0.0) / max_faiss if max_faiss > 0 else 0.0
+                        merged_scores[item_id] = 0.3 * faiss_score  # FAISS-only gets 30% weight
+                
+                # Sort by merged score and take top candidates
+                topk_ids = sorted(merged_scores.keys(), key=lambda x: merged_scores[x], reverse=True)
+                logger.info(f"[{ai_list_id}] Merged BGE+FAISS: {len(topk_ids)} total candidates (BGE: {len(bge_ids)}, FAISS: {len(faiss_ids)})")
+            else:
+                # Pure FAISS fallback
+                topk_ids = faiss_ids
+                merged_scores = faiss_scores_dict
+                logger.info(f"[{ai_list_id}] Using FAISS-only: {len(topk_ids)} candidates")
             # DB fetch as before
             filters = parsed.get("filters", {}) or {}
             genres = [g.lower() for g in (filters.get("genres") or [])]
@@ -437,7 +520,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                 where_clauses.append("media_type = ANY(:media_types)")
                 params["media_types"] = media_types
             if languages:
-                where_clauses.append("(LOWER(COALESCE(original_language, '')) = ANY(:languages) OR LOWER(COALESCE(language, '')) = ANY(:languages))")
+                where_clauses.append("LOWER(COALESCE(language, '')) = ANY(:languages)")
                 params["languages"] = languages
             if isinstance(year_from, int):
                 where_clauses.append("COALESCE(year, 0) >= :year_from")
@@ -513,12 +596,21 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                         rid_trakt = row_dict.get("trakt_id")
                         rid_tmdb = row_dict.get("tmdb_id")
                         score = None
-                        if rid_trakt is not None and int(rid_trakt) in faiss_scores_dict:
+                        # Try merged scores first (BGE+FAISS blend), then individual scores
+                        if rid_trakt is not None and int(rid_trakt) in merged_scores:
+                            score = merged_scores.get(int(rid_trakt))
+                        elif rid_tmdb is not None and int(rid_tmdb) in merged_scores:
+                            score = merged_scores.get(int(rid_tmdb))
+                        elif rid_trakt is not None and int(rid_trakt) in faiss_scores_dict:
                             score = faiss_scores_dict.get(int(rid_trakt))
                         elif rid_tmdb is not None and int(rid_tmdb) in faiss_scores_dict:
                             score = faiss_scores_dict.get(int(rid_tmdb))
+                        
                         if score is not None:
                             row_dict["_faiss_score"] = float(score)
+                            # Mark if from BGE for transparency
+                            if _bge_enabled and (rid_trakt in bge_scores_dict or rid_tmdb in bge_scores_dict):
+                                row_dict["_from_bge"] = True
                             row_dict["_from_faiss"] = True
                     except Exception:
                         pass
@@ -548,12 +640,19 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                             rid_trakt = d2.get("trakt_id")
                             rid_tmdb = d2.get("tmdb_id")
                             s = None
-                            if rid_trakt is not None and int(rid_trakt) in faiss_scores_dict:
+                            # Try merged scores first, then individual
+                            if rid_trakt is not None and int(rid_trakt) in merged_scores:
+                                s = merged_scores.get(int(rid_trakt))
+                            elif rid_tmdb is not None and int(rid_tmdb) in merged_scores:
+                                s = merged_scores.get(int(rid_tmdb))
+                            elif rid_trakt is not None and int(rid_trakt) in faiss_scores_dict:
                                 s = faiss_scores_dict.get(int(rid_trakt))
                             elif rid_tmdb is not None and int(rid_tmdb) in faiss_scores_dict:
                                 s = faiss_scores_dict.get(int(rid_tmdb))
                             if s is not None:
                                 d2["_faiss_score"] = float(s)
+                                if _bge_enabled and (rid_trakt in bge_scores_dict or rid_tmdb in bge_scores_dict):
+                                    d2["_from_bge"] = True
                                 d2["_from_faiss"] = True
                         except Exception:
                             pass
@@ -676,7 +775,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                         p2["mt"] = str(media_type_filter)
                     # Languages
                     if extracted_languages:
-                        where2.append("(LOWER(COALESCE(original_language, '')) = ANY(:languages) OR LOWER(COALESCE(language, '')) = ANY(:languages))")
+                        where2.append("LOWER(COALESCE(language, '')) = ANY(:languages)")
                         p2["languages"] = [l.lower() for l in extracted_languages]
                     # Years
                     if extracted_year_range and len(extracted_year_range) == 2:
@@ -1722,3 +1821,43 @@ def generate_embeddings_for_new_items(self):
     finally:
         db.close()
         gc.collect()
+
+
+@celery_app.task(name="compress_user_history", bind=True, max_retries=3)
+def compress_user_history_task(self, user_id: int = 1, force_rebuild: bool = False):
+    """Celery task to compress user watch history into persona vectors.
+    
+    Generates:
+    - Persona text summary (2-5 sentences via phi3:mini)
+    - Watch vector (genre/keyword weights with recency decay)
+    - Version hash for cache invalidation
+    
+    Args:
+        user_id: User ID to process
+        force_rebuild: Force rebuild even if recent cache exists
+        
+    Returns:
+        Dict with compression results
+    """
+    try:
+        from app.services.history_compression import compress_user_history_task as compress_func
+        
+        logger.info(f"[HISTORY_COMPRESSION] Starting history compression for user {user_id}")
+        
+        # Run async function in sync context
+        result = asyncio.run(compress_func(user_id=user_id, force_rebuild=force_rebuild))
+        
+        logger.info(f"[HISTORY_COMPRESSION] Completed for user {user_id}: {result.get('item_count', 0)} items compressed")
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "item_count": result.get("item_count", 0),
+            "persona_length": len(result.get("persona_text", "")),
+            "vector_size": len(result.get("watch_vector", {})),
+            "version": result.get("version")
+        }
+        
+    except Exception as e:
+        logger.exception(f"[HISTORY_COMPRESSION] Failed for user {user_id}: {e}")
+        raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))

@@ -67,8 +67,8 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
   }
 
   return (
-    <div className="grid lg:grid-cols-3 gap-4 p-2 md:p-0 overflow-hidden">
-      <div className="lg:col-span-2 space-y-3 min-w-0">
+    <div className="grid lg:grid-cols-3 gap-4 p-2 md:p-0 max-w-full overflow-x-hidden">
+      <div className="lg:col-span-2 space-y-3 min-w-0 max-w-full">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
             <button onClick={onBack} className="px-3 py-2 rounded-lg bg-white/15 text-white hover:bg-white/25 text-sm md:text-base flex-shrink-0">← Back</button>
@@ -91,7 +91,7 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
         ) : list.items?.length === 0 ? (
           <div className="text-white/60 text-center py-8">This list is empty. Click "Add" to search for movies and shows!</div>
         ) : (
-          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 max-w-full">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3 max-w-full">
             {list.items?.map((item: any) => (
               <HoverInfoCard
                 key={item.id}
@@ -103,7 +103,7 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
                   release_date: item.year ? `${item.year}-01-01` : null
                 }}
               >
-                <div className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 overflow-hidden">
+                <div className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 max-w-full overflow-hidden">
                   <div className="shrink-0 w-16">
                     {item.poster_path ? (
                       <img

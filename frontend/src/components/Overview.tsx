@@ -364,7 +364,7 @@ function InvestmentTrackerModule({ data }: { data: any }) {
                       </div>
                     )}
                     {item.poster_path ? (
-                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-40 object-cover rounded mb-2" />
+                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-40 object-cover rounded mb-2" loading="lazy" />
                     ) : (
                       <div className="w-full h-40 mb-2 rounded bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center text-gray-400 text-xs">No poster</div>
                     )}
@@ -511,6 +511,12 @@ function RecommendationsModule({ data, type }: { data: any; type: string }) {
                 <span className="text-xs font-semibold text-purple-400">{Math.round(item.score * 100)}%</span>
               </div>
             )}
+            
+            {item.rationale && (
+              <div className="mt-2 text-xs text-purple-300/80 italic leading-relaxed">
+                {item.rationale}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -594,7 +600,7 @@ function SeeAllContinuations({
                 {sorted.map((item, idx) => (
                   <div key={`all-${item.trakt_id || idx}`} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
                     {item.poster_path ? (
-                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-44 object-cover rounded mb-2" />
+                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-44 object-cover rounded mb-2" loading="lazy" />
                     ) : (
                       <div className="w-full h-44 mb-2 rounded bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center text-gray-400 text-xs">No poster</div>
                     )}

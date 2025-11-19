@@ -345,15 +345,39 @@ async def chat_generate_list(
     logger.info(f"Generating chat list for prompt: {prompt}")
     db = SessionLocal()
     try:
+        # Use intent extractor for chat lists
+        from app.services.ai_engine.intent_extractor import IntentExtractor
+        from app.services.persona_helper import PersonaHelper
+        
+        # Get compressed persona/history for intent extraction
+        try:
+            persona_data = PersonaHelper.format_for_prompt(
+                user_id=user_id,
+                db=db,
+                include_history=True,
+                include_pairwise=True
+            )
+            persona = persona_data.get("persona", "")
+            history_summary = persona_data.get("history", "")
+        except Exception as e:
+            logger.debug(f"Failed to get persona/history: {e}")
+            persona = ""
+            history_summary = ""
+        
+        intent = IntentExtractor.extract_intent(prompt, persona, history_summary)
         filters = parse_chat_prompt(prompt)
+        if intent:
+            filters = {**filters, **intent}
         logger.debug(f"Parsed filters for chat list: {filters}")
         
         # Query persistent candidates only
+        logger.debug(f"[ChatPrompt] Building candidate pool with filters: {list(filters.keys())}")
         q = db.query(PersistentCandidate).filter(PersistentCandidate.trakt_id.isnot(None))
         
         # Apply media type filter if specified
         if "media_types" in filters and filters["media_types"]:
             q = q.filter(PersistentCandidate.media_type.in_(filters["media_types"]))
+            logger.debug(f"[ChatPrompt] Filtered by media_types: {filters['media_types']}")
         
         if "genres" in filters and filters["genres"]:
             for g in filters["genres"]:
@@ -436,16 +460,22 @@ async def chat_generate_list(
                 logger.info(f"Using prompt-provided anchor: {anchor_title}")
         
         # Score candidates (now with actors/studios in filters)
+        logger.debug(f"[ChatPrompt] Starting scoring with item_limit={item_limit}, filter keys: {list(filters.keys())}")
         scoring_engine = ScoringEngine()
         user_ctx = {"id": user_id}
-        scored = scoring_engine.score_candidates(
-            user_ctx,
-            candidate_dicts,
-            list_type="chat",
-            item_limit=item_limit,
-            filters=filters,
-            semantic_anchor=anchor_text
-        )
+        try:
+            scored = scoring_engine.score_candidates(
+                user_ctx,
+                candidate_dicts,
+                list_type="chat",
+                item_limit=item_limit,
+                filters=filters,
+                semantic_anchor=anchor_text
+            )
+            logger.info(f"[ChatPrompt] Scoring complete, returned {len(scored)} items")
+        except Exception as e:
+            logger.error(f"[ChatPrompt] Scoring failed: {e}", exc_info=True)
+            raise HTTPException(status_code=500, detail=f"Scoring failed: {str(e)}")
         logger.info(f"Scored {len(scored)} candidates for chat list")
         
         # Build top items

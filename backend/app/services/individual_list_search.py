@@ -2,10 +2,11 @@
 individual_list_search.py
 
 Hybrid search service for Individual Lists combining:
-1. FAISS semantic search (embeddings)
-2. ElasticSearch literal fuzzy search (title, cast, keywords, etc.)
+1. BGE Multi-Vector + FAISS semantic search (dual-index)
+2. ElasticSearch literal fuzzy search with query enhancement (mood/tone/theme)
 
 Results are merged, deduplicated, and enriched with metadata.
+Enhanced with natural language understanding and intelligent boosting.
 """
 import json
 import logging
@@ -15,6 +16,8 @@ import numpy as np
 from app.services.elasticsearch_client import get_elasticsearch_client
 from app.services.ai_engine.embeddings import EmbeddingService
 from app.services.ai_engine.faiss_index import load_index
+from app.services.ai_engine.dual_index_search import hybrid_search
+from app.services.ai_engine.query_enhancer import QueryEnhancer
 from app.services.fit_scoring import FitScorer
 from app.core.database import SessionLocal
 from app.models import PersistentCandidate
@@ -24,22 +27,23 @@ from app.core.redis_client import get_redis_sync
 logger = logging.getLogger(__name__)
 
 # Search configuration
-FAISS_TOP_K = 30  # Get top 30 from semantic search
+MULTIVEC_TOP_K = 30  # Get top 30 from multi-vector search
 ES_TOP_K = 12  # Get top 12 from ElasticSearch to reduce scoring work per query
 FINAL_LIMIT = 50  # Return top 50 after merging
 
 
 class IndividualListSearchService:
     """
-    Hybrid search combining semantic (FAISS) and literal (ElasticSearch) search.
+    Hybrid search combining semantic (BGE multi-vector + FAISS) and literal (ElasticSearch) search.
     
-    Workflow:
-    1. Run FAISS semantic search on query embedding
-    2. Run ElasticSearch fuzzy search on query text
-    3. Merge results with deduplication (FAISS score + ES score)
-    4. Enrich with full metadata from DB
-    5. Apply fit scoring for user
-    6. Return top N results sorted by combined relevance + fit score
+    Enhanced Workflow:
+    1. Run dual-index semantic search (BGE multi-vector → FAISS fallback)
+    2. Extract query features (mood, tone, theme, people) via QueryEnhancer
+    3. Run ElasticSearch with enhanced boosting
+    4. Merge results with deduplication and intelligent scoring
+    5. Enrich with full metadata from DB
+    6. Apply fit scoring for user
+    7. Return top N results with title matches prioritized
     """
     
     def __init__(self, user_id: int):
@@ -47,6 +51,7 @@ class IndividualListSearchService:
         self.embedding_service = EmbeddingService()
         self.fit_scorer = FitScorer(user_id)
         self.es_client = get_elasticsearch_client()
+        self.query_enhancer = QueryEnhancer()
     
     def search(
         self,
@@ -78,19 +83,23 @@ class IndividualListSearchService:
         if r:
             try:
                 qsig = (query or "").strip().lower()
-                cache_key = f"ilist:search:v2:user:{self.user_id}:mt:{media_type or 'any'}:q:{qsig[:80]}:n:{limit}:sf:{skip_fit_scoring}"
+                cache_key = f"ilist:search:v3:user:{self.user_id}:mt:{media_type or 'any'}:q:{qsig[:80]}:n:{limit}:sf:{skip_fit_scoring}"
                 cached = r.get(cache_key)
                 if cached:
                     return json.loads(cached)
             except Exception:
                 pass
         
-        # Run both searches in parallel conceptually
-        faiss_results = self._faiss_search(query, media_type)
-        es_results = self._elasticsearch_search(query, media_type)
+        # Enhance query to extract mood/tone/theme/people
+        enhanced = self.query_enhancer.enhance(query)
+        logger.debug(f"Enhanced query: {enhanced}")
+        
+        # Run both searches with enhancements
+        semantic_results = self._multivector_search(query, media_type, enhanced)
+        es_results = self._elasticsearch_search(enhanced['cleaned_query'], media_type, enhanced)
         
         # Merge and deduplicate
-        merged = self._merge_results(faiss_results, es_results)
+        merged = self._merge_results(semantic_results, es_results)
         
         # Limit early to avoid over-fetching from DB
         merged = merged[:limit * 2]  # Get 2x limit to ensure we have enough after filtering
@@ -152,89 +161,108 @@ class IndividualListSearchService:
                 pass
         return out
     
-    def _faiss_search(
+    def _multivector_search(
         self,
         query: str,
-        media_type: Optional[str] = None
+        media_type: Optional[str] = None,
+        enhanced: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Semantic search using FAISS embeddings.
+        Semantic search using dual-index (BGE multi-vector + FAISS fallback).
         
-        Returns list of {tmdb_id, media_type, score} from FAISS.
+        Returns list of {tmdb_id, media_type, score} from semantic search.
         """
         try:
-            # Load FAISS index first to fail fast if not available
-            index, mapping = load_index()
-            if index is None or mapping is None or index.ntotal == 0:
-                logger.debug("FAISS index not available or empty, skipping semantic search")
-                return []
+            # Use adaptive mode based on query length - quick for autocomplete
+            is_autocomplete = len(query.strip()) < 4
+            mode = 'auto' if is_autocomplete else 'full'
             
-            # Encode query
-            query_embedding = self.embedding_service.encode_text(query)
+            # Build basic filters from enhanced query
+            filters = {}
+            if media_type:
+                filters['media_type'] = media_type
             
-            # Search
-            query_embedding = query_embedding.astype(np.float32)
-            query_embedding = query_embedding / (np.linalg.norm(query_embedding) + 1e-8)  # Normalize
-            query_embedding = query_embedding.reshape(1, -1)
+            # Extract mood/theme focus for semantic boosting
+            # If query asks for "dark thriller", boost those aspects in semantic search
+            focus_aspects = []
+            if enhanced:
+                if enhanced.get('moods'):
+                    focus_aspects.append('keywords')  # Moods often in keywords
+                if enhanced.get('themes'):
+                    focus_aspects.append('keywords')  # Themes in keywords
+                if enhanced.get('people'):
+                    focus_aspects.extend(['people', 'brands'])  # Focus on people/studios
             
-            distances, indices = index.search(query_embedding, FAISS_TOP_K)
-            
-            # Collect all valid trakt_ids first
-            trakt_to_distance = {}
-            for i, idx in enumerate(indices[0]):
-                if idx == -1:  # No result
-                    continue
+            # Get candidate pool from database based on query text
+            # Use a broad search to get candidates, then let hybrid_search score them
+            db = SessionLocal()
+            try:
+                # Get candidates matching the query text (title, overview, keywords)
+                # This is a preliminary filter before semantic scoring
+                search_terms = query.lower().split()
                 
-                trakt_id = mapping.get(int(idx))
-                if trakt_id is None:
-                    continue
+                # Build query with broad matching
+                query_obj = db.query(PersistentCandidate)
                 
-                trakt_to_distance[trakt_id] = float(distances[0][i])
+                if media_type:
+                    query_obj = query_obj.filter(PersistentCandidate.media_type == media_type)
+                
+                # Match any search term in title or overview (broad retrieval)
+                if search_terms:
+                    conditions = []
+                    for term in search_terms[:3]:  # Limit to first 3 terms for performance
+                        conditions.append(PersistentCandidate.title.ilike(f'%{term}%'))
+                        conditions.append(PersistentCandidate.overview.ilike(f'%{term}%'))
+                    query_obj = query_obj.filter(or_(*conditions))
+                
+                # Get top 500 candidates for semantic scoring
+                candidates = query_obj.limit(500).all()
+                
+                if not candidates:
+                    logger.debug(f"No candidates found for query: {query}")
+                    return []
+                
+                logger.debug(f"Found {len(candidates)} candidates for semantic scoring")
+                
+                # Call dual-index hybrid search with candidate pool
+                results = hybrid_search(
+                    db=db,
+                    user_id=self.user_id,
+                    candidate_pool=candidates,
+                    top_k=MULTIVEC_TOP_K,
+                    bge_weight=0.7,
+                    faiss_weight=0.3
+                )
+            finally:
+                db.close()
             
-            # Batch lookup all candidates in one query
-            if trakt_to_distance:
-                db = SessionLocal()
-                try:
-                    candidates = db.query(PersistentCandidate).filter(
-                        PersistentCandidate.trakt_id.in_(list(trakt_to_distance.keys()))
-                    ).all()
-                    
-                    results = []
-                    for candidate in candidates:
-                        # Apply media_type filter if specified
-                        if media_type and candidate.media_type != media_type:
-                            continue
-                        # faiss returns a distance (lower is better). Convert to a similarity score in 0..1
-                        # using similarity = 1 / (1 + distance) so higher is better and comparable to ES normalized scores.
-                        raw_distance = trakt_to_distance[candidate.trakt_id]
-                        faiss_similarity = 1.0 / (1.0 + raw_distance) if raw_distance is not None else 0.0
-
-                        results.append({
-                            'tmdb_id': candidate.tmdb_id,
-                            'media_type': candidate.media_type,
-                            'faiss_score': faiss_similarity,
-                            'faiss_distance': raw_distance,
-                            'source': 'faiss'
-                        })
-                finally:
-                    db.close()
-            else:
-                results = []
+            # Convert to format expected by merge function
+            # hybrid_search returns: {'candidate': PersistentCandidate, 'score': float, ...}
+            formatted = []
+            for item in results:
+                candidate = item['candidate']
+                formatted.append({
+                    'tmdb_id': candidate.tmdb_id,
+                    'media_type': candidate.media_type,
+                    'faiss_score': item['score'],  # Use hybrid score
+                    'source': item.get('source', 'hybrid')
+                })
             
-            logger.debug(f"FAISS found {len(results)} results")
-            return results
+            logger.debug(f"Multi-vector search found {len(formatted)} results")
+            return formatted
             
         except Exception as e:
-            logger.error(f"FAISS search failed: {e}")
+            logger.error(f"Multi-vector search failed: {e}")
             return []
     
     def _elasticsearch_search(
         self,
         query: str,
-        media_type: Optional[str] = None
+        media_type: Optional[str] = None,
+        enhanced: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Literal fuzzy search using ElasticSearch.
+        Literal fuzzy search using ElasticSearch with query enhancement.
         
         Returns list of {tmdb_id, media_type, es_score} from ES.
         """
@@ -246,8 +274,19 @@ class IndividualListSearchService:
                 logger.warning("ElasticSearch not connected, skipping literal search")
                 return []
             
+            # Build enhanced filters for boosting
+            es_filters = {}
+            if enhanced:
+                es_filters = self.query_enhancer.build_es_filters(enhanced)
+            
             # Use the broader field set even for multi-word queries to avoid missing obvious matches
-            results = self.es_client.search(query, media_type, limit=ES_TOP_K, strict_titles_only=False)
+            results = self.es_client.search(
+                query, 
+                media_type, 
+                limit=ES_TOP_K, 
+                strict_titles_only=False,
+                enhanced_filters=es_filters
+            )
             
             # Normalize ES scores to 0-1 range
             if results:
@@ -256,7 +295,7 @@ class IndividualListSearchService:
                     r['es_score'] = r['es_score'] / max_score if max_score > 0 else 0.5
                     r['source'] = 'elasticsearch'
             
-            logger.debug(f"ElasticSearch found {len(results)} results")
+            logger.debug(f"ElasticSearch found {len(results)} results (enhanced={bool(es_filters)})")
             return results
             
         except Exception as e:

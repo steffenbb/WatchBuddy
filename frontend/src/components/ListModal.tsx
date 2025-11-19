@@ -11,6 +11,10 @@ interface ListModalProps {
 }
 
 export default function ListModal({ listId, title, onClose }: ListModalProps) {
+  // Log title to ensure it's passed correctly
+  React.useEffect(() => {
+    console.log('[ListModal] Opening with title:', title, 'listId:', listId);
+  }, [title, listId]);
   const [items, setItems] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [syncing, setSyncing] = React.useState(false);
@@ -127,6 +131,25 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
     return filtered;
   }, [items, hideWatched, sortBy]);
 
+  // Lock body scroll when modal is open
+  React.useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  // Handle escape key
+  React.useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
   return (
     <motion.div 
       initial={{ opacity: 0 }}
@@ -144,9 +167,9 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
         className="relative w-full h-full md:h-auto md:max-w-6xl md:max-h-[90vh] md:rounded-3xl overflow-hidden border-0 md:border md:border-white/20 bg-gradient-to-br from-slate-900 via-indigo-950 to-purple-950 shadow-2xl" 
         onClick={(e)=>e.stopPropagation()}
       >
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 p-3 md:p-4 border-b border-white/10 bg-black/30 backdrop-blur">
-          <h2 className="text-white font-semibold truncate pr-2 text-sm md:text-base">{title}</h2>
-          <div className="flex items-center gap-2">
+        <div className="sticky top-0 z-10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-3 p-3 md:p-4 border-b border-white/10 bg-black/30 backdrop-blur">
+          <h2 className="text-white font-semibold w-full sm:flex-1 sm:truncate text-sm md:text-base break-words line-clamp-2 sm:line-clamp-1">{title}</h2>
+          <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto justify-end">
             <button 
               onClick={() => setHideWatched(!hideWatched)} 
               className={`px-2 md:px-3 py-2 rounded-lg text-white text-xs md:text-sm border border-white/20 ${hideWatched ? "bg-indigo-500/30" : "bg-white/10 hover:bg-white/20"}`}
@@ -209,7 +232,7 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                     >
                       <div className="aspect-[2/3] w-full bg-slate-900">
                         {src ? (
-                          <img src={src} alt={it.title || "Item"} className="w-full h-full object-cover" />
+                          <img src={src} alt={it.title || "Item"} className="w-full h-full object-cover" loading="lazy" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-white/40 text-xs">No poster</div>
                         )}

@@ -3,12 +3,16 @@ elasticsearch_client.py
 
 ElasticSearch client for Individual Lists hybrid search.
 Provides literal fuzzy search across title, cast, crew, keywords, genres.
+Enhanced with mood/tone/theme extraction for intelligent matching.
 """
 import logging
 import time
 from typing import List, Dict, Any, Optional
 from elasticsearch import Elasticsearch, helpers
 from elasticsearch.exceptions import NotFoundError, ConnectionError as ESConnectionError
+from app.services.ai_engine.mood_extractor import get_mood_extractor
+from app.core.database import SessionLocal
+from app.models import ItemLLMProfile
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +161,10 @@ class ElasticSearchClient:
                     "year": {"type": "integer"},
                     "popularity": {"type": "float"},
                     "vote_average": {"type": "float"},
-                    "vote_count": {"type": "integer"}
+                    "vote_count": {"type": "integer"},
+                    "mood_tags": {"type": "keyword"},  # Extracted from ItemLLMProfile
+                    "tone_tags": {"type": "keyword"},  # Extracted from ItemLLMProfile
+                    "themes": {"type": "keyword"}      # Extracted from ItemLLMProfile
                 }
             }
         }
@@ -180,7 +187,7 @@ class ElasticSearchClient:
     def index_candidates(self, candidates: List[Dict[str, Any]]) -> int:
         """
         Bulk index candidates into ElasticSearch using a streaming generator
-        to minimize memory usage.
+        to minimize memory usage. Enriches with mood/tone/themes from ItemLLMProfile.
         """
         if not self.es:
             logger.error("Not connected to ElasticSearch")
@@ -188,9 +195,33 @@ class ElasticSearchClient:
 
         if not candidates:
             return 0
+        
+        # Fetch ItemLLMProfiles for candidates (batch lookup)
+        db = SessionLocal()
+        try:
+            tmdb_ids = [c['tmdb_id'] for c in candidates]
+            profiles = db.query(ItemLLMProfile).filter(
+                ItemLLMProfile.tmdb_id.in_(tmdb_ids)
+            ).all()
+            profile_map = {p.tmdb_id: p for p in profiles}
+        finally:
+            db.close()
+        
+        # Extract mood/tone/themes
+        extractor = get_mood_extractor()
 
         def action_generator():
             for c in candidates:
+                # Get mood/tone/themes from profile
+                profile = profile_map.get(c['tmdb_id'])
+                tags = {'mood_tags': [], 'tone_tags': [], 'themes': []}
+                if profile:
+                    tags = extractor.extract_from_profile(profile)
+                else:
+                    # Fallback: extract from overview + genres
+                    text = f"{c.get('overview', '')} {c.get('genres', '')}"
+                    tags = extractor.extract_from_text(text)
+                
                 yield {
                     "_index": INDEX_NAME,
                     "_id": f"{c['tmdb_id']}_{c['media_type']}",
@@ -212,7 +243,10 @@ class ElasticSearchClient:
                         "year": c.get('year'),
                         "popularity": c.get('popularity'),
                         "vote_average": c.get('vote_average'),
-                        "vote_count": c.get('vote_count')
+                        "vote_count": c.get('vote_count'),
+                        "mood_tags": tags.get('mood_tags', []),
+                        "tone_tags": tags.get('tone_tags', []),
+                        "themes": tags.get('themes', [])
                     }
                 }
 
@@ -235,21 +269,19 @@ class ElasticSearchClient:
         query: str,
         media_type: Optional[str] = None,
         limit: int = 50,
-        strict_titles_only: bool = False
+        strict_titles_only: bool = False,
+        enhanced_filters: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Fuzzy search across multiple fields.
-        
-                        if failed:
-                            logger.warning(f"Indexed {success} documents, {len(failed)} failures")
-                        else:
-                            logger.debug(f"Indexed {success} documents successfully")
-        with different boost weights for relevance.
+        Fuzzy search across multiple fields with optional query enhancement.
         
         Args:
             query: Search query
             media_type: Filter by 'movie' or 'show' (optional)
             limit: Max results to return
+            strict_titles_only: Use tight title-only matching
+            enhanced_filters: Optional mood/tone/theme/people boost filters
+                             from QueryEnhancer.build_es_filters()
         Returns:
             List of results with tmdb_id, media_type, title, score
         """
@@ -329,6 +361,10 @@ class ElasticSearchClient:
                     }
                 }
             ]
+            
+            # Add enhanced filter boosts if provided (mood/tone/theme)
+            if enhanced_filters and isinstance(enhanced_filters, list):
+                should_clauses.extend(enhanced_filters)
         
         must_clauses = [
             {

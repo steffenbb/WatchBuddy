@@ -1,5 +1,5 @@
 import React from "react";
-import { Home, ListChecks, Brain, Sparkles, Users, Activity, Settings, HelpCircle, BarChart3 } from "lucide-react";
+import { Home, ListChecks, Brain, Sparkles, Users, Activity, Settings, HelpCircle, BarChart3, Target } from "lucide-react";
 
 type NavItem = {
   key: string;
@@ -14,6 +14,7 @@ export const navItems: NavItem[] = [
   { key: "smart", label: "Lists", icon: <ListChecks size={18} />, onClick: () => { window.location.hash = "lists"; } },
   { key: "ai", label: "AI Lists", icon: <Brain size={18} />, onClick: () => { window.location.hash = "dynamic"; } },
   { key: "individual", label: "My Lists", icon: <Users size={18} />, onClick: () => { window.location.hash = "myLists"; } },
+  { key: "trainer", label: "Preference Trainer", icon: <Target size={18} />, onClick: () => { window.location.hash = "trainer"; } },
   { key: "status", label: "Status", icon: <Activity size={18} />, onClick: () => { window.location.hash = "status"; } },
   { key: "settings", label: "Settings", icon: <Settings size={18} />, onClick: () => { window.location.hash = "settings"; } },
   { key: "help", label: "Help", icon: <HelpCircle size={18} />, onClick: () => { window.location.hash = "help"; } },
@@ -37,6 +38,7 @@ export default function Sidebar() {
     if (hash === 'lists') return 'smart';
     if (hash === 'dynamic') return 'ai';
     if (hash === 'myLists') return 'individual';
+    if (hash === 'trainer') return 'trainer';
     if (hash === 'status') return 'status';
     if (hash === 'settings') return 'settings';
     if (hash === 'help') return 'help';

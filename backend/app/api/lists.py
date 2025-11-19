@@ -583,11 +583,46 @@ async def get_list_items(
             except Exception:
                 db.rollback()
 
+        # Fallback to PersistentCandidate for missing posters/titles (like AI lists do)
+        from ..models import PersistentCandidate
+        tmdb_ids_needed = set()
+        for item in items:
+            meta = meta_by_trakt.get(item.trakt_id) if item.trakt_id else None
+            # Check if we're missing poster or title
+            has_title = item.title or (meta and meta.title)
+            has_poster = meta and meta.poster_path
+            if (not has_title or not has_poster) and meta and meta.tmdb_id:
+                # Try to get TMDB ID from metadata
+                tmdb_ids_needed.add((meta.tmdb_id, item.media_type))
+        
+        # Fetch from PersistentCandidate
+        pc_by_tmdb = {}
+        if tmdb_ids_needed:
+            for media_type in set(mt for _, mt in tmdb_ids_needed):
+                tmdb_ids = [tid for tid, mt in tmdb_ids_needed if mt == media_type]
+                if tmdb_ids:
+                    pcs = db.query(
+                        PersistentCandidate.tmdb_id,
+                        PersistentCandidate.media_type,
+                        PersistentCandidate.title,
+                        PersistentCandidate.poster_path,
+                        PersistentCandidate.year
+                    ).filter(
+                        PersistentCandidate.tmdb_id.in_(tmdb_ids),
+                        PersistentCandidate.media_type == media_type
+                    ).all()
+                    for tmdb_id, mt, title, poster, year_val in pcs:
+                        pc_by_tmdb[(tmdb_id, mt)] = {
+                            "title": title,
+                            "poster_path": poster,
+                            "year": year_val
+                        }
+        
         # Convert to response format
         response_items = []
         for item in items:
             meta = meta_by_trakt.get(item.trakt_id) if item.trakt_id else None
-            # Prefer ListItem.title, fallback to MediaMetadata.title
+            # Prefer ListItem.title, fallback to MediaMetadata.title, then PersistentCandidate
             title = item.title or (meta.title if (meta and meta.title) else None)
             # Build poster URL for response
             poster_url = None
@@ -595,10 +630,27 @@ async def get_list_items(
                 poster_url = meta.poster_path
                 if isinstance(poster_url, str) and not poster_url.startswith('http'):
                     poster_url = f"https://image.tmdb.org/t/p/w342{poster_url}"
+            
+            # Fallback to PersistentCandidate if still missing poster or title
+            if (not title or not poster_url) and meta and meta.tmdb_id:
+                pc = pc_by_tmdb.get((meta.tmdb_id, item.media_type))
+                if pc:
+                    title = title or pc.get("title")
+                    if not poster_url and pc.get("poster_path"):
+                        p = pc.get("poster_path")
+                        if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://")):
+                            poster_url = p
+                        elif p:
+                            poster_url = f"https://image.tmdb.org/t/p/w342{p}"
+            
             # Include year if available from metadata for client-side sorting
             year = None
             try:
                 year = meta.year if meta else None
+                if not year and meta and meta.tmdb_id:
+                    pc = pc_by_tmdb.get((meta.tmdb_id, item.media_type))
+                    if pc:
+                        year = pc.get("year")
             except Exception:
                 year = None
             response_items.append({

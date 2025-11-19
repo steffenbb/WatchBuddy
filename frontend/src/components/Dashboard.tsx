@@ -18,6 +18,7 @@ import { toast } from "../utils/toast";
 import PageTransition from "./PageTransition";
 import PhaseTimeline from "./phases/PhaseTimeline";
 import Overview from "./Overview";
+import PairwiseTrainer from "./PairwiseTrainer";
 
 import { StatusWidgets } from "./StatusWidgets";
 import { useTraktAccount } from "../hooks/useTraktAccount";
@@ -28,6 +29,7 @@ const getViewFromUrl = (): { view: string; listId?: number } => {
   if (!hash) return { view: 'home' };
   if (hash === 'lists') return { view: 'lists' };
   if (hash === 'timeline') return { view: 'timeline' };
+  if (hash === 'trainer') return { view: 'trainer' };
   
   const [view, id] = hash.split('/');
   if (view === 'list' && id) {
@@ -52,7 +54,7 @@ const updateUrl = (view: string, listId?: number) => {
 export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNavigateHome?: (callback: () => void) => void }){
   const { account, loading: accountLoading } = useTraktAccount();
   const [lists, setLists] = useState<any[]>([]);
-  const [view, setView] = useState<"home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview">("home");
+  const [view, setView] = useState<"home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer">("home");
   const [selectedList, setSelectedList] = useState<{id:number; title:string}|null>(null);
   const [selectedIndividualListId, setSelectedIndividualListId] = useState<number|null>(null);
   const [editingId, setEditingId] = useState<number|null>(null);
@@ -82,6 +84,8 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
         return 'bg-gradient-to-br from-violet-900 via-indigo-900 to-blue-900';
       case 'overview':
         return 'bg-gradient-to-br from-purple-900 via-fuchsia-900 to-pink-900';
+      case 'trainer':
+        return 'bg-gradient-to-br from-indigo-900 via-purple-900 to-violet-900';
       case 'create':
         return 'bg-gradient-to-br from-emerald-900 via-teal-900 to-cyan-900';
       case 'suggested':
@@ -127,7 +131,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   }, [lists]);
 
   // Helper function to change view and update URL
-  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview", listId?: number, listTitle?: string) => {
+  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer", listId?: number, listTitle?: string) => {
     setView(newView);
     if (newView === 'listDetails' && listId && listTitle) {
       setSelectedList({ id: listId, title: listTitle });
@@ -351,6 +355,14 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                 </button>
               </div>
               <PhaseTimeline />
+            </div>
+          </PageTransition>
+        )}
+
+        {view === "trainer" && (
+          <PageTransition key="trainer">
+            <div className="px-4">
+              <PairwiseTrainer />
             </div>
           </PageTransition>
         )}

@@ -304,7 +304,8 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                 mediaType={it.media_type}
                 fallbackInfo={{
                   title: it.title,
-                  media_type: it.media_type
+                  media_type: it.media_type,
+                  overview: it.explanation
                 }}
               >
                 <div className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl transition-all duration-300 overflow-hidden">

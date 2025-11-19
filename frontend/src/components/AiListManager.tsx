@@ -246,7 +246,7 @@ export default function AiListManager() {
               {/* Poster */}
               <div className="aspect-[2/3] w-full bg-gradient-to-br from-slate-900 to-slate-800">
                 {posterPath ? (
-                  <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" />
+                  <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" loading="lazy" />
                 ) : (
                   <div className="w-full h-full flex items-center justify-center text-white/40 text-sm px-2 text-center">
                     {list.status === 'pending' || list.status === 'queued' || list.status === 'running' ? 'Generating...' : 'No poster yet'}

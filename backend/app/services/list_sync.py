@@ -1536,3 +1536,30 @@ class ListSyncService:
                 pass
 
         await _asyncio.gather(*[fetch_and_cache(tm, mt, tid) for (tm, mt, tid) in work])
+        
+        # After enrichment, populate poster_path in the candidates dicts for poster generation
+        # Query MediaMetadata for all tmdb_ids we just enriched
+        db_temp = SessionLocal()
+        try:
+            tmdb_ids = [tm for (tm, _, _) in work if tm is not None]
+            if tmdb_ids:
+                metadata_rows = db_temp.query(MediaMetadata).filter(
+                    MediaMetadata.tmdb_id.in_(tmdb_ids)
+                ).all()
+                
+                # Build lookup dict: tmdb_id -> poster_path
+                poster_lookup = {}
+                for row in metadata_rows:
+                    if row.poster_path:
+                        poster_lookup[row.tmdb_id] = row.poster_path
+                
+                # Update candidates dicts with poster_path
+                for c in candidates:
+                    try:
+                        tmdb_id = c.get('tmdb_id') or (c.get('ids') or {}).get('tmdb')
+                        if tmdb_id and int(tmdb_id) in poster_lookup:
+                            c['poster_path'] = poster_lookup[int(tmdb_id)]
+                    except Exception:
+                        continue
+        finally:
+            db_temp.close()

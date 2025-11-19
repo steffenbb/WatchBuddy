@@ -1,8 +1,4 @@
 services:
-
-
-
-
   db:
     image: postgres:15-alpine
     command: postgres -c max_connections=200 -c shared_buffers=256MB
@@ -21,8 +17,67 @@ services:
     restart: on-failure
 
   redis:
-    image: redis:alpine
+    image: redis:7-alpine
     restart: always
+    command: redis-server --appendonly yes --appendfsync everysec --save 900 1 --save 300 10 --save 60 10000
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+ 
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_LOAD_TIMEOUT=10m
+      - OLLAMA_CONTEXT_LENGTH=8192
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 30s
+      retries: 60
+      start_period: 30s
+    restart: unless-stopped
+
+  ollama-init:
+    image: curlimages/curl:8.9.1
+    depends_on:
+      ollama:
+        condition: service_healthy
+    command: [
+      "sh", "-c",
+      "echo 'Pulling phi3.5:3.8b-mini-instruct-q4_K_M...' && curl -sS -X POST http://ollama:11434/api/pull -d '{\"name\":\"phi3.5:3.8b-mini-instruct-q4_K_M\"}' && echo 'phi3.5:3.8b-mini-instruct-q4_K_M ready'"
+    ]
+    restart: "no"
+
+  ollama-warmup:
+    image: lsdking101/watchbuddy:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+      ollama-init:
+        condition: service_completed_successfully
+    environment:
+      - AI_LLM_API_BASE=http://ollama:11434
+      - AI_LLM_JUDGE_MODEL=phi3.5:3.8b-mini-instruct-q4_K_M
+    command: ["python", "-c", "import httpx; r = httpx.post('http://ollama:11434/api/generate', json={'model': 'phi3.5:3.8b-mini-instruct-q4_K_M', 'prompt': 'warmup', 'stream': False, 'keep_alive': '24h'}, timeout=120.0); print('Ollama warmed up with status:', r.status_code)"]
+    restart: "no"
+
+  hf-init:
+    image: lsdking101/watchbuddy:latest:latest
+    environment:
+      - HF_HOME=/data/ai/hf
+    volumes:
+      - ai_data:/data/ai
+    command: sh -c "python -c 'from sentence_transformers import SentenceTransformer, CrossEncoder; models = [\"BAAI/bge-small-en-v1.5\",\"cross-encoder/ms-marco-MiniLM-L-6-v2\"]; [print(\"Downloading\", m, flush=True) or (CrossEncoder(m) if \"reranker\" in m else SentenceTransformer(m)) or print(\"OK\", m, flush=True) for m in models]'"
+    restart: "no"
 
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
@@ -44,10 +99,8 @@ services:
       retries: 30
     restart: on-failure
 
-
-
   backend:
-    image: lsdking101/watchbuddy:latest
+    image: lsdking101/watchbuddy:latest:latest
     depends_on:
       db:
         condition: service_healthy
@@ -55,11 +108,26 @@ services:
         condition: service_started
       elasticsearch:
         condition: service_healthy
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      hf-init:
+        condition: service_completed_successfully
     restart: on-failure
+    ports:
+      - "8000:8000"
     environment:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
+      HF_HOME: "/data/ai/hf"
+      AI_LLM_JUDGE_ENABLED: "true"
+      AI_LLM_JUDGE_PROVIDER: "ollama"
+      AI_LLM_API_BASE: "http://ollama:11434"
+      AI_LLM_JUDGE_MODEL: "phi3.5:3.8b-mini-instruct-q4_K_M"
+      AI_LLM_TIMEOUT_SECONDS: "30"
+      AI_LLM_EXPLAIN_ENABLED: "true"
     volumes:
       - ai_data:/data/ai
       - poster_data:/app/data/posters
@@ -69,10 +137,8 @@ services:
       timeout: 3s
       retries: 20
 
-
-  # Worker 1: Maintenance + Ingestion (long-running tasks)
   celery-maintenance:
-    image: lsdking101/watchbuddy:latest
+    image: lsdking101/watchbuddy:latest:latest
     command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=maintenance,ingestion --concurrency=2 --hostname=maintenance@%h"
     depends_on:
       backend:
@@ -81,18 +147,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      ollama-warmup:
+        condition: service_completed_successfully
+      hf-init:
+        condition: service_completed_successfully
     restart: on-failure
     environment:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
+      HF_HOME: "/data/ai/hf"
+      AI_LLM_JUDGE_ENABLED: "true"
+      AI_LLM_JUDGE_PROVIDER: "ollama"
+      AI_LLM_API_BASE: "http://ollama:11434"
+      AI_LLM_JUDGE_MODEL: "phi3.5:3.8b-mini-instruct-q4_K_M"
+      AI_LLM_TIMEOUT_SECONDS: "30"
+      AI_LLM_EXPLAIN_ENABLED: "true"
     volumes:
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
-  # Worker 2: List Creation + Scoring (AI + SmartList generation)
   celery-creation:
-    image: lsdking101/watchbuddy:latest
+    image: lsdking101/watchbuddy:latest:latest
     command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=creation,celery --concurrency=2 --hostname=creation@%h"
     depends_on:
       backend:
@@ -101,18 +181,32 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      ollama-warmup:
+        condition: service_completed_successfully
+      hf-init:
+        condition: service_completed_successfully
     restart: on-failure
     environment:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
+      HF_HOME: "/data/ai/hf"
+      AI_LLM_JUDGE_ENABLED: "true"
+      AI_LLM_JUDGE_PROVIDER: "ollama"
+      AI_LLM_API_BASE: "http://ollama:11434"
+      AI_LLM_JUDGE_MODEL: "phi3.5:3.8b-mini-instruct-q4_K_M"
+      AI_LLM_TIMEOUT_SECONDS: "30"
+      AI_LLM_EXPLAIN_ENABLED: "true"
     volumes:
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
-  # Worker 3: List Updates + Sync (refreshes, watched status)
   celery-sync:
-    image: lsdking101/watchbuddy:latest
+    image: lsdking101/watchbuddy:latest:latest
     command: sh -c "cd /app && celery -A app.core.celery_app.celery_app worker --loglevel=info --queues=sync --concurrency=2 --hostname=sync@%h"
     depends_on:
       backend:
@@ -121,17 +215,30 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      hf-init:
+        condition: service_completed_successfully
     restart: on-failure
     environment:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
+      HF_HOME: "/data/ai/hf"
+      AI_LLM_JUDGE_ENABLED: "true"
+      AI_LLM_JUDGE_PROVIDER: "ollama"
+      AI_LLM_API_BASE: "http://ollama:11434"
+      AI_LLM_JUDGE_MODEL: "phi3.5:3.8b-mini-instruct-q4_K_M"
+      AI_LLM_TIMEOUT_SECONDS: "30"
+      AI_LLM_EXPLAIN_ENABLED: "true"
     volumes:
       - ai_data:/data/ai
       - poster_data:/app/data/posters
 
   celery-beat:
-    image: lsdking101/watchbuddy:latest
+    image: lsdking101/watchbuddy:latest:latest
     command: sh -c "cd /app && celery -A app.core.celery_app.celery_app beat --loglevel=info"
     depends_on:
       backend:
@@ -140,12 +247,27 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      ollama:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+      hf-init:
+        condition: service_completed_successfully
     restart: on-failure
     environment:
       POSTGRES_USER: watchbuddy
       POSTGRES_PASSWORD: watchbuddy
       POSTGRES_DB: watchbuddy
-
+      HF_HOME: "/data/ai/hf"
+      AI_LLM_JUDGE_ENABLED: "true"
+      AI_LLM_JUDGE_PROVIDER: "ollama"
+      AI_LLM_API_BASE: "http://ollama:11434"
+      AI_LLM_JUDGE_MODEL: "phi3.5:3.8b-mini-instruct-q4_K_M"
+      AI_LLM_TIMEOUT_SECONDS: "30"
+      AI_LLM_EXPLAIN_ENABLED: "true"
+    volumes:
+      - ai_data:/data/ai
+      - poster_data:/app/data/posters
 
   frontend:
     image: lsdking101/watchbuddy-frontend:latest
@@ -154,10 +276,12 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-
+    restart: on-failure
 
 volumes:
   db_data_v2:
   ai_data:
   es_data:
   poster_data:
+  ollama_data:
+  redis_data:

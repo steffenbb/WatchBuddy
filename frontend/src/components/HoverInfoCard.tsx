@@ -61,10 +61,18 @@ export default function HoverInfoCard({
           );
           if (response.ok) {
             const data = await response.json();
-            if (mounted) setInfo(data);
-          } else if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
-            // Use fallback if API fetch failed
-            if (mounted) setInfo(fallbackInfo);
+            if (mounted && data && Object.keys(data).length > 0) {
+              setInfo(data);
+            } else if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
+              // Use fallback if API returned empty data
+              if (mounted) setInfo(fallbackInfo);
+            }
+          } else {
+            console.debug(`TMDB API fetch failed for ${mediaType}/${tmdbId}:`, response.status);
+            if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
+              // Use fallback if API fetch failed
+              if (mounted) setInfo(fallbackInfo);
+            }
           }
         } else if (traktId) {
           // Fallback to Trakt
@@ -73,10 +81,18 @@ export default function HoverInfoCard({
           );
           if (response.ok) {
             const data = await response.json();
-            if (mounted) setInfo(data);
-          } else if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
-            // Use fallback if API fetch failed
-            if (mounted) setInfo(fallbackInfo);
+            if (mounted && data && Object.keys(data).length > 0) {
+              setInfo(data);
+            } else if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
+              // Use fallback if API returned empty data
+              if (mounted) setInfo(fallbackInfo);
+            }
+          } else {
+            console.debug(`Trakt API fetch failed for ${traktId}:`, response.status);
+            if (fallbackInfo && Object.keys(fallbackInfo).length > 0) {
+              // Use fallback if API fetch failed
+              if (mounted) setInfo(fallbackInfo);
+            }
           }
         }
       } catch (error) {
@@ -114,9 +130,38 @@ export default function HoverInfoCard({
 
   const updatePosition = (e: React.MouseEvent) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = rect.left + rect.width / 2;
-    // Position at bottom of the element instead of top
-    const y = rect.bottom;
+    
+    // Card dimensions (approximate)
+    const cardWidth = 384; // max-w-sm = 24rem = 384px
+    const cardHeight = 300; // approximate height
+    const padding = 16; // safety padding
+    
+    // Viewport dimensions
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
+    // Calculate initial position (centered below element)
+    let x = rect.left + rect.width / 2;
+    let y = rect.bottom + 10;
+    
+    // Adjust horizontal position to keep card in viewport
+    const cardLeft = x - cardWidth / 2;
+    const cardRight = x + cardWidth / 2;
+    
+    if (cardLeft < padding) {
+      // Too far left, align to left edge
+      x = cardWidth / 2 + padding;
+    } else if (cardRight > viewportWidth - padding) {
+      // Too far right, align to right edge
+      x = viewportWidth - cardWidth / 2 - padding;
+    }
+    
+    // Adjust vertical position if card extends below viewport
+    if (y + cardHeight > viewportHeight - padding) {
+      // Position above element instead
+      y = rect.top - 10;
+    }
+    
     setPosition({ x, y });
   };
 
@@ -158,11 +203,13 @@ export default function HoverInfoCard({
             className="fixed z-[100] pointer-events-none"
             style={{
               left: `${position.x}px`,
-              top: `${position.y + 10}px`,
-              transform: 'translate(-50%, 0)',
+              top: `${position.y}px`,
+              transform: position.y < (typeof window !== 'undefined' ? window.innerHeight / 2 : 400)
+                ? 'translate(-50%, 0)' 
+                : 'translate(-50%, -100%)',
             }}
           >
-            <div className="bg-black/95 backdrop-blur-xl border border-white/20 rounded-xl shadow-2xl p-4 max-w-sm">
+            <div className="bg-black/95 backdrop-blur-xl border border-white/20 rounded-xl shadow-2xl p-4 max-w-[calc(100vw-2rem)] sm:max-w-sm">
               {loading ? (
                 <div className="flex items-center gap-2 text-white/70">
                   <div className="animate-spin h-4 w-4 border-2 border-white/30 border-t-white rounded-full" />

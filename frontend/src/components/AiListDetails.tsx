@@ -145,13 +145,32 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
     return filtered;
   }, [items, hideWatched, sortBy]);
 
+  // Lock body scroll when modal is open
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  // Handle escape key
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div className="relative w-full max-w-5xl bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-4 md:p-6 overflow-hidden">
-        <div className="flex items-center justify-between mb-4 gap-3">
-          <h3 className="text-xl md:text-2xl font-bold text-white truncate overflow-hidden text-ellipsis whitespace-nowrap flex-shrink min-w-0">{title}</h3>
-          <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-3">
+          <h3 className="text-xl md:text-2xl font-bold text-white break-words w-full sm:w-auto">{title}</h3>
+          <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
             <button 
               onClick={() => setHideWatched(!hideWatched)} 
               className={`px-3 py-2 rounded-lg text-white text-sm border border-white/20 ${hideWatched ? "bg-indigo-500/30" : "bg-white/10 hover:bg-white/20"}`}
@@ -207,12 +226,15 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
                 mediaType={it.media_type}
                 fallbackInfo={{
                   title: it.title,
-                  media_type: it.media_type
+                  media_type: it.media_type,
+                  overview: it.explanation_text,
+                  release_date: it.year ? `${it.year}-01-01` : null,
+                  first_air_date: it.year ? `${it.year}-01-01` : null
                 }}
               >
                 <div className="relative group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:bg-white/10 transition">
                   {it.poster_url ? (
-                    <img src={it.poster_url} alt={it.title || ''} className="w-full h-48 object-cover" />
+                    <img src={it.poster_url} alt={it.title || ''} className="w-full h-48 object-cover" loading="lazy" />
                   ) : (
                     <div className="w-full h-48 bg-white/5 flex items-center justify-center text-white/50">No poster</div>
                   )}

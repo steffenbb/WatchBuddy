@@ -340,6 +340,99 @@ async def get_system_health():
     
     return health
 
+@router.get("/ai-health")
+async def get_ai_health():
+    """Check health of AI components: embeddings, FAISS, BGE, Cross-Encoder."""
+    result: Dict[str, Dict] = {
+        "minilm_embedding": {"ok": False},
+        "faiss_index": {"ok": False},
+        "bge_index": {"ok": False},
+        "cross_encoder": {"ok": False},
+    }
+
+    # MiniLM embedding model
+    try:
+        from app.services.ai_engine.embeddings import EmbeddingService, MODEL_NAME as MINILM_MODEL
+        svc = EmbeddingService()
+        vec = svc.encode_text("healthcheck")
+        ok = isinstance(vec, (list, tuple)) or getattr(vec, "shape", None) is not None
+        dim = int(vec.shape[0]) if getattr(vec, "shape", None) else (len(vec) if isinstance(vec, (list, tuple)) else 0)
+        result["minilm_embedding"] = {
+            "ok": bool(ok),
+            "model": MINILM_MODEL,
+            "dim": dim,
+        }
+    except Exception as e:
+        result["minilm_embedding"] = {
+            "ok": False,
+            "error": str(e),
+        }
+
+    # FAISS primary index
+    try:
+        from app.services.ai_engine import faiss_index as fi
+        index, mapping = fi.load_index()
+        count = int(getattr(index, "ntotal", 0))
+        ef_search = int(getattr(getattr(index, "hnsw", None), "efSearch", 0)) if hasattr(index, "hnsw") else None
+        result["faiss_index"] = {
+            "ok": True,
+            "vectors": count,
+            "mapping_entries": len(mapping or {}),
+            "efSearch": ef_search,
+            "index_path": str(getattr(fi, "INDEX_FILE", "")),
+            "map_path": str(getattr(fi, "MAPPING_FILE", "")),
+        }
+    except Exception as e:
+        result["faiss_index"] = {
+            "ok": False,
+            "error": str(e),
+            "index_path": str(getattr(fi, "INDEX_FILE", "")) if "fi" in locals() else "",
+            "map_path": str(getattr(fi, "MAPPING_FILE", "")) if "fi" in locals() else "",
+        }
+
+    # BGE secondary index (optional)
+    try:
+        import os
+        from app.services.ai_engine.bge_index import BGEIndex
+        base_dir = os.path.join("/data/ai", "bge_index")
+        bge = BGEIndex(base_dir)
+        available = bge.is_available
+        details: Dict[str, Optional[int]] = {}
+        if available:
+            if bge.load():
+                # If loaded, we can infer index size by attempting a search on a zero vector of correct dim
+                try:
+                    # Prefer reading size from internal FAISS index if exposed
+                    size = int(getattr(getattr(bge, "_index", None), "ntotal", 0))
+                except Exception:
+                    size = 0
+                details.update({"vectors": size})
+        result["bge_index"] = {
+            "ok": bool(available),
+            "base_dir": base_dir,
+            **details,
+        }
+    except Exception as e:
+        result["bge_index"] = {
+            "ok": False,
+            "error": str(e),
+        }
+
+    # Cross-Encoder reranker
+    try:
+        from app.services.ai_engine.cross_encoder_reranker import CrossEncoderReranker
+        reranker = CrossEncoderReranker()
+        reranker.ensure()
+        # Optional lightweight inference to ensure predict path works
+        _ = reranker.score("test", ["doc"], batch_size=1)
+        result["cross_encoder"] = {"ok": True, "model": reranker.model_name}
+    except Exception as e:
+        result["cross_encoder"] = {"ok": False, "error": str(e)}
+
+    # Overall
+    overall_ok = all(v.get("ok") for v in result.values())
+    return {"ok": overall_ok, **result}
+
 @router.get("/metrics")
 async def get_system_metrics():
     """Get detailed system metrics"""
