@@ -12,7 +12,7 @@ from elasticsearch import Elasticsearch, helpers
 from elasticsearch.exceptions import NotFoundError, ConnectionError as ESConnectionError
 from app.services.ai_engine.mood_extractor import get_mood_extractor
 from app.core.database import SessionLocal
-from app.models import ItemLLMProfile
+from app.models import ItemLLMProfile, PersistentCandidate
 
 logger = logging.getLogger(__name__)
 
@@ -200,10 +200,13 @@ class ElasticSearchClient:
         db = SessionLocal()
         try:
             tmdb_ids = [c['tmdb_id'] for c in candidates]
-            profiles = db.query(ItemLLMProfile).filter(
-                ItemLLMProfile.tmdb_id.in_(tmdb_ids)
+            # Join with persistent_candidates to get tmdb_id
+            profiles = db.query(ItemLLMProfile, PersistentCandidate.tmdb_id).join(
+                PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+            ).filter(
+                PersistentCandidate.tmdb_id.in_(tmdb_ids)
             ).all()
-            profile_map = {p.tmdb_id: p for p in profiles}
+            profile_map = {tmdb_id: profile for profile, tmdb_id in profiles}
         finally:
             db.close()
         

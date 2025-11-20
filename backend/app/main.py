@@ -7,7 +7,7 @@ from app.core.database import init_db
 from starlette.requests import Request
 from starlette.responses import Response
 
-from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists, individual_lists, maintenance, phases, overview
+from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists, individual_lists, maintenance, phases, overview, items, search
 from app.api.chat_prompt import router as chat_prompt_router
 from app.api.available_genres_languages import router as genres_languages_router
 from app.api.recommendations import router as recommendations_router
@@ -49,6 +49,8 @@ app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
 app.include_router(chatlists.router, prefix="/api/chatlists", tags=["Chat Lists"])
 app.include_router(ai_lists.router, prefix="/api/ai", tags=["AI Lists"])
 app.include_router(individual_lists.router, prefix="/api", tags=["Individual Lists"])
+app.include_router(items.router, prefix="/api/items", tags=["Items"])
+app.include_router(search.router, prefix="/api", tags=["Search"])
 
 # Optional: Recommendations and Notifications if present
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])

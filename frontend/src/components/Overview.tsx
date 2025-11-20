@@ -344,8 +344,14 @@ function InvestmentTrackerModule({ data }: { data: any }) {
           <div className="relative">
             <div ref={forgotScrollerRef} className="overflow-x-auto pb-2 -mx-1">
               <div className="flex gap-3 px-1 snap-x snap-mandatory">
-                {forgotList.map((item: any, idx: number) => (
-                  <div key={`forgot-${item.trakt_id || idx}`} className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative">
+                {forgotList.map((item: any, idx: number) => {
+                  const handleItemClick = () => {
+                    if (item.tmdb_id) {
+                      window.location.hash = `item/${item.media_type || 'show'}/${item.tmdb_id}`;
+                    }
+                  };
+                  return (
+                  <div key={`forgot-${item.trakt_id || idx}`} className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative cursor-pointer hover:ring-2 hover:ring-purple-500 transition" onClick={handleItemClick}>
                     {/* Add to Individual List */}
                     {item.tmdb_id && (
                       <div className="absolute top-2 left-2">
@@ -372,7 +378,8 @@ function InvestmentTrackerModule({ data }: { data: any }) {
                     <p className="text-xs text-gray-400 mt-0.5">{nextEpisodeLabel(item)}</p>
                     <p className="text-xs text-amber-300 mt-1">Paused {daysSince(item.last_watched_at)} days</p>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -395,10 +402,16 @@ function InvestmentTrackerModule({ data }: { data: any }) {
               <div className="flex gap-3 px-1 snap-x snap-mandatory">
                 {continueList.map((item: any, idx: number) => {
                   const since = daysSince(item.last_watched_at);
+                  const handleItemClick = () => {
+                    if (item.tmdb_id) {
+                      window.location.hash = `item/${item.media_type || 'show'}/${item.tmdb_id}`;
+                    }
+                  };
                   return (
                     <div
                       key={`${item.trakt_id || idx}`}
-                      className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative"
+                      className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative cursor-pointer hover:ring-2 hover:ring-purple-500 transition"
+                      onClick={handleItemClick}
                     >
                       {/* Add to Individual List */}
                       {item.tmdb_id && (

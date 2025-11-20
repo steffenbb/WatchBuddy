@@ -446,6 +446,8 @@ Task: Write ONE sentence explaining why this item fits the list. Focus on themat
 Example: "Shares the same dark Scandinavian noir atmosphere and explores moral ambiguity through complex characters."
 """
             
+            logger.info(f"Requesting Ollama rationale for list suggestion: item={title[:50]}, prompt_length={len(prompt)}")
+            
             # Make async request to Ollama
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -456,7 +458,6 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
                         "stream": False,
                         "options": {
                             "temperature": 0.7,
-                            "num_predict": 50,  # Short response
                             "num_ctx": 4096  # Large context window
                         },
                         "keep_alive": "24h"
@@ -466,6 +467,7 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
                 if response.status_code == 200:
                     result = response.json()
                     rationale = result.get('response', '').strip()
+                    logger.info(f"Ollama rationale generated for list suggestion: item={title[:50]}, length={len(rationale)}, preview={rationale[:80]}")
                     
                     # Clean up common prefixes
                     prefixes = [
@@ -479,16 +481,20 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
                         if rationale.startswith(prefix):
                             rationale = rationale[len(prefix):]
                     
-                    return rationale[:200]  # Cap length
+                    # No artificial length cap - let frontend handle display
+                    return rationale
                 else:
-                    logger.debug(f"LLM rationale failed: {response.status_code}")
+                    logger.warning(f"LLM rationale failed with status {response.status_code} for item={title[:50]}")
                     return ""
                     
         except asyncio.TimeoutError:
-            logger.debug("LLM rationale timeout")
+            logger.error(f"LLM rationale timeout (60s) for item={title[:50]}")
+            return ""
+        except httpx.TimeoutException:
+            logger.error(f"HTTP timeout (60s) for LLM rationale: item={title[:50]}")
             return ""
         except Exception as e:
-            logger.debug(f"LLM rationale error: {e}")
+            logger.error(f"LLM rationale error for item={title[:50]}: {type(e).__name__}: {e}")
             return ""
     
     def _get_faiss_neighbors_fallback(
@@ -669,34 +675,32 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
             try:
                 # Batch fetch ItemLLMProfiles for list items
                 list_tmdb_ids = [item.tmdb_id for item in list_items[:10]]  # Top 10 items
-                profiles = db.query(ItemLLMProfile).filter(
-                    ItemLLMProfile.tmdb_id.in_(list_tmdb_ids)
+                # Join with persistent_candidates to filter by tmdb_id
+                profiles = db.query(ItemLLMProfile).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id.in_(list_tmdb_ids)
                 ).all()
                 
                 for profile in profiles:
-                    # Extract people (cast/crew)
-                    if profile.key_people:
-                        try:
-                            people = json.loads(profile.key_people) if isinstance(profile.key_people, str) else profile.key_people
-                            list_people.update(p.lower() for p in people[:10])  # Top 10 people per item
-                        except:
-                            pass
-                    
-                    # Extract themes
-                    if profile.themes:
-                        try:
-                            themes = json.loads(profile.themes) if isinstance(profile.themes, str) else profile.themes
-                            list_themes.update(t.lower() for t in themes[:5])
-                        except:
-                            pass
-                    
-                    # Extract studios/brands
-                    if profile.notable_brands:
-                        try:
-                            brands = json.loads(profile.notable_brands) if isinstance(profile.notable_brands, str) else profile.notable_brands
-                            list_studios.update(b.lower() for b in brands[:3])
-                        except:
-                            pass
+                    try:
+                        # Parse profile_json to access fields
+                        prof_data = json.loads(profile.profile_json) if isinstance(profile.profile_json, str) else profile.profile_json
+                        
+                        # Extract people (cast/crew)
+                        if prof_data.get('people'):
+                            list_people.update(p.lower() for p in prof_data['people'][:10])  # Top 10 people per item
+                        
+                        # Extract keywords as themes
+                        if prof_data.get('keywords'):
+                            list_themes.update(k.lower() for k in prof_data['keywords'][:5])
+                        
+                        # Extract studio/brands
+                        if prof_data.get('studio'):
+                            list_studios.add(prof_data['studio'].lower())
+                    except Exception as e:
+                        logger.debug(f"Failed to parse profile_json: {e}")
+                        pass
                 
                 logger.debug(f"Extracted {len(list_people)} people, {len(list_themes)} themes, {len(list_studios)} studios from list")
             except Exception as e:
@@ -707,13 +711,16 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
         if list_people or list_themes or list_studios:
             try:
                 candidate_tmdb_ids = [c['tmdb_id'] for c in candidates]
-                candidate_profiles = db.query(ItemLLMProfile).filter(
-                    ItemLLMProfile.tmdb_id.in_(candidate_tmdb_ids)
+                # Join with persistent_candidates to get tmdb_id and media_type
+                candidate_profiles = db.query(ItemLLMProfile, PersistentCandidate.tmdb_id, PersistentCandidate.media_type).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id.in_(candidate_tmdb_ids)
                 ).all()
                 
                 candidate_profiles_map = {
-                    (p.tmdb_id, p.media_type): p
-                    for p in candidate_profiles
+                    (tmdb_id, media_type): profile
+                    for profile, tmdb_id, media_type in candidate_profiles
                 }
                 logger.debug(f"Fetched {len(candidate_profiles_map)} ItemLLMProfiles for aspect matching")
             except Exception as e:
@@ -775,48 +782,40 @@ Example: "Shares the same dark Scandinavian noir atmosphere and explores moral a
                     candidate_profile = candidate_profiles_map.get(candidate_key)
                     
                     if candidate_profile:
-                        matches = 0
-                        total_checks = 0
-                        
-                        # Check people overlap
-                        if list_people and candidate_profile.key_people:
-                            try:
-                                cand_people = json.loads(candidate_profile.key_people) if isinstance(candidate_profile.key_people, str) else candidate_profile.key_people
-                                cand_people_lower = set(p.lower() for p in cand_people[:10])
+                        try:
+                            # Parse profile_json to access fields
+                            prof_data = json.loads(candidate_profile.profile_json) if isinstance(candidate_profile.profile_json, str) else candidate_profile.profile_json
+                            
+                            matches = 0
+                            total_checks = 0
+                            
+                            # Check people overlap
+                            if list_people and prof_data.get('people'):
+                                cand_people_lower = set(p.lower() for p in prof_data['people'][:10])
                                 people_overlap = len(list_people.intersection(cand_people_lower))
                                 if people_overlap > 0:
                                     matches += people_overlap
                                     total_checks += 1
-                            except:
-                                pass
-                        
-                        # Check themes overlap
-                        if list_themes and candidate_profile.themes:
-                            try:
-                                cand_themes = json.loads(candidate_profile.themes) if isinstance(candidate_profile.themes, str) else candidate_profile.themes
-                                cand_themes_lower = set(t.lower() for t in cand_themes[:5])
+                            
+                            # Check themes overlap (using keywords as themes)
+                            if list_themes and prof_data.get('keywords'):
+                                cand_themes_lower = set(k.lower() for k in prof_data['keywords'][:5])
                                 themes_overlap = len(list_themes.intersection(cand_themes_lower))
                                 if themes_overlap > 0:
                                     matches += themes_overlap
                                     total_checks += 1
-                            except:
-                                pass
-                        
-                        # Check studios/brands overlap
-                        if list_studios and candidate_profile.notable_brands:
-                            try:
-                                cand_brands = json.loads(candidate_profile.notable_brands) if isinstance(candidate_profile.notable_brands, str) else candidate_profile.notable_brands
-                                cand_brands_lower = set(b.lower() for b in cand_brands[:3])
-                                brands_overlap = len(list_studios.intersection(cand_brands_lower))
-                                if brands_overlap > 0:
-                                    matches += brands_overlap * 1.5  # Weight studios slightly higher
+                            
+                            # Check studios/brands overlap
+                            if list_studios and prof_data.get('studio'):
+                                if prof_data['studio'].lower() in list_studios:
+                                    matches += 1.5  # Weight studios slightly higher
                                     total_checks += 1
-                            except:
-                                pass
-                        
-                        # Calculate aspect boost (capped at 0.10)
-                        if total_checks > 0:
-                            aspect_boost = min(0.10, matches * 0.03)
+                            
+                            # Calculate aspect boost (capped at 0.10)
+                            if total_checks > 0:
+                                aspect_boost = min(0.10, matches * 0.03)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse candidate profile_json: {e}")
                 except Exception as e:
                     logger.debug(f"Aspect matching failed for {db_candidate.tmdb_id}: {e}")
                     aspect_boost = 0.0

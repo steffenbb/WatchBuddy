@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 
 from sqlalchemy.orm import Session
-from app.core.redis_client import get_redis
+from app.core.redis_client import get_redis_sync
 from app.models import (
     PairwiseTrainingSession, 
     PairwiseJudgment, 
@@ -27,7 +27,7 @@ class PairwiseTrainer:
     def __init__(self, db: Session, user_id: int = 1):
         self.db = db
         self.user_id = user_id
-        self.redis = get_redis()
+        self.redis = get_redis_sync()
         
     def create_session(
         self, 
@@ -97,6 +97,7 @@ class PairwiseTrainer:
         if not session or session.status != "active":
             return None
             
+        # Check if already complete (>= not just ==)
         if session.completed_pairs >= session.total_pairs:
             self._complete_session(session_id)
             return None
@@ -170,11 +171,15 @@ class PairwiseTrainer:
         
         self.db.add(judgment)
         
-        # Update session progress
+        # Update session progress - don't increment beyond total_pairs
         session = self.db.query(PairwiseTrainingSession).filter_by(id=session_id).first()
         if session and winner != 'skip':
-            session.completed_pairs += 1
-            session.updated_at = datetime.now(timezone.utc)
+            # Only increment if not already complete
+            if session.completed_pairs < session.total_pairs:
+                session.completed_pairs += 1
+            # Use utc_now() for consistency (avoid naive/aware datetime mix)
+            from app.utils.timezone import utc_now
+            session.updated_at = utc_now()
             
         self.db.commit()
         self.db.refresh(judgment)
@@ -219,7 +224,9 @@ class PairwiseTrainer:
             # Calculate session duration
             duration_seconds = 0.0
             if session.started_at:
-                duration_seconds = (datetime.now(timezone.utc) - session.started_at).total_seconds()
+                # Ensure both datetimes are timezone-aware for comparison
+                started_at = session.started_at if session.started_at.tzinfo else session.started_at.replace(tzinfo=timezone.utc)
+                duration_seconds = (datetime.now(timezone.utc) - started_at).total_seconds()
             
             session.status = "completed"
             session.completed_at = datetime.now(timezone.utc)
@@ -402,10 +409,24 @@ User preferred these items:
         try:
             # 1. UPDATE EMBEDDING VECTOR (proper vector arithmetic)
             vector_key = f"user_vector:{self.user_id}"
-            existing_vector = self.redis.get(vector_key)
+            
+            # Get binary data without UTF-8 decoding by using connection directly
+            existing_vector = None
+            try:
+                # Get connection from pool and send raw command
+                conn = self.redis.connection_pool.get_connection('GET')
+                try:
+                    conn.send_command('GET', vector_key)
+                    # Read response without decoding
+                    existing_vector = conn.read_response(disable_decoding=True)
+                finally:
+                    self.redis.connection_pool.release(conn)
+            except Exception as e:
+                logger.debug(f"Failed to get existing vector: {e}")
+                existing_vector = None
             
             # Get or initialize user vector (384-dim for MiniLM)
-            if existing_vector:
+            if existing_vector and existing_vector != b'':
                 user_vec = np.frombuffer(existing_vector, dtype=np.float32)
             else:
                 user_vec = np.zeros(384, dtype=np.float32)  # MiniLM dimension

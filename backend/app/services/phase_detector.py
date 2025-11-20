@@ -556,9 +556,12 @@ class PhaseDetector:
             # 2. Fetch ItemLLMProfile for these items
             item_profiles = []
             for watch in sorted_watches:
-                profile = self.db.query(ItemLLMProfile).filter(
-                    ItemLLMProfile.tmdb_id == watch["tmdb_id"],
-                    ItemLLMProfile.media_type == watch["media_type"]
+                # Join with persistent_candidates to filter by tmdb_id and media_type
+                profile = self.db.query(ItemLLMProfile).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id == watch["tmdb_id"],
+                    PersistentCandidate.media_type == watch["media_type"]
                 ).first()
                 
                 if profile and profile.profile_text:

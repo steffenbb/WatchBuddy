@@ -223,28 +223,29 @@ Highly rated: {', '.join(top_rated[:5]) if top_rated else 'None'}
             from app.services.ollama_client import get_ollama_client
             client = get_ollama_client()
             
+            logger.info(f"Generating persona text with Ollama, prompt length: {len(prompt)}, items: {len(weighted_history)}")
+            
             response = await client.generate(
                 model="phi3.5:3.8b-mini-instruct-q4_K_M",
                 prompt=prompt,
                 options={
                     "temperature": 0.3,  # Low temp for consistent summaries
-                    "num_predict": 150,  # Max 150 tokens (~2-3 sentences)
                     "num_ctx": 4096,  # Large context window for full history
                     "top_p": 0.9
-                }
+                },
+                timeout=60.0  # Explicit 60s timeout
             )
             
             persona_text = response.get("response", "").strip()
+            
+            logger.info(f"Ollama persona generated: length={len(persona_text)}, preview={persona_text[:100]}")
             
             # Validate response
             if not persona_text or len(persona_text) < 20:
                 logger.warning(f"LLM returned invalid persona (length={len(persona_text)}): {persona_text[:200]}")
                 raise ValueError("LLM returned empty or too short persona")
             
-            if len(persona_text) > 800:
-                logger.warning(f"LLM returned unusually long persona ({len(persona_text)} chars), truncating: {persona_text[:200]}")
-                persona_text = persona_text[:800]
-                
+            # No artificial length cap - let natural LLM response determine length
             return persona_text
             
         except Exception as e:

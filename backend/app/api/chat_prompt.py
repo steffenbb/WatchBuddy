@@ -372,7 +372,7 @@ async def chat_generate_list(
         
         # Query persistent candidates only
         logger.debug(f"[ChatPrompt] Building candidate pool with filters: {list(filters.keys())}")
-        q = db.query(PersistentCandidate).filter(PersistentCandidate.trakt_id.isnot(None))
+        q = db.query(PersistentCandidate)
         
         # Apply media type filter if specified
         if "media_types" in filters and filters["media_types"]:

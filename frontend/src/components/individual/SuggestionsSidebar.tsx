@@ -1,7 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { addItemsToIndividualList, Suggestion, suggestionsForIndividualList } from "../../api/individualLists";
 import { useToast } from "../ToastProvider";
-import HoverInfoCard from "../HoverInfoCard";
 
 export default function SuggestionsSidebar({ listId, onAdded }: { listId: number; onAdded: () => void }) {
   const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
@@ -57,19 +56,14 @@ export default function SuggestionsSidebar({ listId, onAdded }: { listId: number
         <div className="text-white/60 text-sm">No suggestions yet.</div>
       ) : (
         <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
-          {suggestions.map((s) => (
-            <HoverInfoCard
-              key={`${s.media_type}:${s.tmdb_id}`}
-              tmdbId={s.tmdb_id}
-              mediaType={s.media_type}
-              fallbackInfo={{
-                title: s.title,
-                overview: s.overview,
-                media_type: s.media_type,
-                release_date: s.year ? `${s.year}-01-01` : null
-              }}
-            >
-              <div className="flex gap-2 items-start p-2 rounded-lg bg-white/5 border border-white/10">
+          {suggestions.map((s) => {
+            const handleItemClick = () => {
+              if (s.tmdb_id) {
+                window.location.hash = `item/${s.media_type}/${s.tmdb_id}`;
+              }
+            };
+            return (
+              <div key={`${s.media_type}:${s.tmdb_id}`} className="flex gap-2 items-start p-2 rounded-lg bg-white/5 border border-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer" onClick={handleItemClick}>
                 {/* Poster thumbnail */}
                 {s.poster_path ? (
                   <img
@@ -82,7 +76,7 @@ export default function SuggestionsSidebar({ listId, onAdded }: { listId: number
                   <div className="w-[46px] h-[69px] rounded-md bg-white/10 border border-white/10 flex items-center justify-center text-white/30 text-xs flex-shrink-0">No image</div>
                 )}
                 <div className="flex-1 min-w-0">
-                  <div className="text-white text-sm font-semibold truncate">{s.title}</div>
+                  <div className="text-white text-sm font-semibold truncate hover:text-purple-300 transition-colors">{s.title}</div>
                   <div className="text-white/70 text-xs">{s.media_type} · {s.year || '—'}</div>
                   <div className="text-xs text-white/70 mt-1 flex gap-1 flex-wrap">
                     {s.is_high_fit && <span className="px-2 py-0.5 bg-emerald-500/30 rounded-full">high fit</span>}
@@ -90,10 +84,10 @@ export default function SuggestionsSidebar({ listId, onAdded }: { listId: number
                     {s.similarity_score != null && <span className="px-2 py-0.5 bg-indigo-500/20 rounded-full">sim {(s.similarity_score*100).toFixed(0)}%</span>}
                   </div>
                 </div>
-                <button onClick={() => addOne(s)} className="px-2 py-1 rounded-md bg-white/15 text-white hover:bg-white/25 text-xs">Add</button>
+                <button onClick={(e) => { e.stopPropagation(); addOne(s); }} className="px-2 py-1 rounded-md bg-white/15 text-white hover:bg-white/25 text-xs">Add</button>
               </div>
-            </HoverInfoCard>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

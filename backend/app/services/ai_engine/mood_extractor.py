@@ -82,14 +82,14 @@ class MoodExtractor:
         Returns:
             Dict with mood_tags, tone_tags, themes lists
         """
-        if not item_profile or not item_profile.summary_text:
+        if not item_profile or not item_profile.profile_text:
             return {
                 'mood_tags': [],
                 'tone_tags': [],
                 'themes': []
             }
         
-        text = item_profile.summary_text.lower()
+        text = item_profile.profile_text.lower()
         
         # Extract words (preserve hyphens for compound terms)
         words = set(re.findall(r'\b[\w-]+\b', text))

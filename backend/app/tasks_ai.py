@@ -514,6 +514,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
             where_clauses = [
                 "(tmdb_id = ANY(:ids) OR trakt_id = ANY(:ids))",
                 "active = true",
+                "poster_path IS NOT NULL",  # Only include items with posters
             ]
             params = {}
             if media_types:
@@ -624,6 +625,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                     relaxed_where = [
                         "(tmdb_id = ANY(:ids) OR trakt_id = ANY(:ids))",
                         "active = true",
+                        "poster_path IS NOT NULL",  # Only include items with posters
                     ]
                     relaxed_params = {"ids": id_list[:top_k]}
                     # Preserve media_type if explicitly requested
@@ -691,6 +693,15 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                 return 10**9
             rows.sort(key=_pos)
             logger.info(f"[{ai_list_id}] DB fetch (FAISS-targeted, attempt {attempt}) returned {len(rows)} candidates for scoring")
+            
+            # TMDB enrichment disabled - candidates should already have metadata from persistent_candidates table
+            # try:
+            #     from app.services.ai_engine.candidate_enricher import enrich_candidates_async
+            #     rows = await enrich_candidates_async(db, rows, max_age_days=30, max_concurrent=10)
+            #     logger.info(f"[{ai_list_id}] Enriched {len(rows)} candidates with TMDB metadata")
+            # except Exception as e:
+            #     logger.warning(f"[{ai_list_id}] Enrichment failed: {e}")
+            
             # Compose texts for scoring
             texts = [compose_text_for_embedding(c) for c in rows]
             cand_embs = None
@@ -757,7 +768,7 @@ async def _generate_chat_list_async(ai_list_id: str, user_id: int = 1):
                 try:
                     logger.info(f"[{ai_list_id}] Entering DB pool fallback (small_index={small_index}, faiss_rows={len(rows)})")
                     # Build a broad pool using filters (media_type, languages, genres ANY/ALL, years) and vote_count floor
-                    where2 = ["active = true"]
+                    where2 = ["active = true", "poster_path IS NOT NULL"]  # Only include items with posters
                     p2 = {}
                     # Vote floor based on obscurity intent
                     intent = (parsed.get("filters", {}).get("obscurity") or "balanced").lower()

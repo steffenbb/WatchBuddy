@@ -20,13 +20,13 @@ logger = logging.getLogger(__name__)
 class JudgeConfig:
     enabled: bool = False
     weight: float = 0.15
-    batch_size: int = 20
+    batch_size: int = 5  # REDUCED from 20 to 5 - smaller batches = faster response, less timeout risk
     cache_ttl_seconds: int = 14 * 24 * 3600
-    timeout_seconds: int = 8
-    provider: str = os.environ.get("AI_LLM_JUDGE_PROVIDER", "ollama")
-    api_base: str = os.environ.get("AI_LLM_API_BASE", os.environ.get("OPENAI_API_BASE", "http://ollama:11434"))
-    api_key_env: str = os.environ.get("AI_LLM_API_KEY_ENV", "")
-    model: str = os.environ.get("AI_LLM_JUDGE_MODEL", "phi3.5:3.8b-mini-instruct-q4_K_M")
+    timeout_seconds: int = int(os.environ.get("AI_LLM_TIMEOUT_SECONDS", "90")) or 90  # Increased to 90 for remote Ollama server
+    provider: str = os.environ.get("AI_LLM_JUDGE_PROVIDER", "ollama") or "ollama"
+    api_base: str = os.environ.get("AI_LLM_API_BASE", os.environ.get("OPENAI_API_BASE", "http://ollama:11434")) or "http://ollama:11434"
+    api_key_env: str = os.environ.get("AI_LLM_API_KEY_ENV", "") or ""
+    model: str = os.environ.get("AI_LLM_JUDGE_MODEL", "phi3.5:3.8b-mini-instruct-q4_K_M") or "phi3.5:3.8b-mini-instruct-q4_K_M"
 
 
 def _hash_query(query_summary: Dict) -> str:
@@ -197,25 +197,12 @@ def judge_scores(
     r = _get_redis_client()
     qh = _hash_query(query_summary)
 
-    # Try cache
+    # DISABLED CACHING - LLM judge should run fresh every time for dynamic scoring
+    # Cache was causing stale results and incorrect scores across different queries
     cached: Dict[int, float] = {}
-    if r is not None:
-        pipe = r.pipeline()
-        for it in candidates:
-            key = f"llmjudge:{qh}:{int(it['id'])}"
-            pipe.get(key)
-        vals = pipe.execute()
-        for it, v in zip(candidates, vals):
-            if v is not None:
-                try:
-                    cached[int(it["id"])] = float(v)
-                except Exception:
-                    pass
-
-    # Determine which items still need scoring
-    to_score = [it for it in candidates if int(it.get("id") or 0) not in cached]
-    if not to_score:
-        return cached
+    
+    # Score ALL candidates (no cache lookup)
+    to_score = candidates
 
     # Prepare HTTP client and request builders per provider
     api_key = os.environ.get(cfg.api_key_env) if cfg.api_key_env else None
@@ -225,10 +212,15 @@ def judge_scores(
 
     def _req_payload_openai(prompt: str) -> Dict:
         # OpenAI-compatible chat.completions (can be local vLLM/LM Studio/Ollama plugin)
-        model_name = cfg.model or "phi3.5:3.8b-mini-instruct-q4_K_M"
-        if not model_name or model_name.strip() == "":
+        # CRITICAL FIX: Ensure model_name is never None/empty
+        model_name = cfg.model
+        if not model_name or not str(model_name).strip():
+            logger.warning(f"[LLM_JUDGE] Model name is empty (cfg.model={cfg.model}), using default")
             model_name = "phi3.5:3.8b-mini-instruct-q4_K_M"
-            logger.warning(f"[LLM_JUDGE] Empty model in config, using default: {model_name}")
+        else:
+            model_name = str(model_name).strip()
+        
+        logger.info(f"[LLM_JUDGE] OpenAI-compatible request with model: {model_name}")
         return {
             "model": model_name,
             "messages": [
@@ -241,19 +233,16 @@ def judge_scores(
 
     def _req_payload_ollama(prompt: str) -> Dict:
         # Native Ollama chat API
-        model_name = cfg.model or "phi3.5:3.8b-mini-instruct-q4_K_M"
-        if not model_name or not model_name.strip():
-            logger.error(f"[LLM_JUDGE] Model name is empty! cfg.model={cfg.model}")
-            model_name = "phi3.5:3.8b-mini-instruct-q4_K_M"
-        logger.debug(f"[LLM_JUDGE] Using model: {model_name}")
+        # Hardcoded model name to match intent_extractor
+        logger.info(f"[LLM_JUDGE] Ollama request with model: phi3.5:3.8b-mini-instruct-q4_K_M")
         return {
-            "model": model_name,
+            "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
             "messages": [
                 {"role": "system", "content": "You are a rigorous ranking judge. Respond with strict JSON only."},
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0.0, "num_predict": 128, "num_ctx": 4096},
+            "options": {"temperature": 0.0, "num_predict": 512, "num_ctx": 4096},  # Increased from 128 to 512 for complete JSON output
             "keep_alive": "24h",
         }
 
@@ -263,7 +252,15 @@ def judge_scores(
     for batch in batches:
         prompt = _build_prompt(query_summary, rubric={"scale": "0-1", "goal": "maximize relevance"}, items=batch, persona=persona, history=history)
         try:
-            with httpx.Client(base_url=cfg.api_base, timeout=cfg.timeout_seconds) as client:
+            # Use explicit httpx.Timeout to set all timeout values (connect, read, write, pool)
+            # Set all four timeout values explicitly to prevent defaults
+            timeout = httpx.Timeout(
+                connect=cfg.timeout_seconds,
+                read=cfg.timeout_seconds,
+                write=cfg.timeout_seconds,
+                pool=cfg.timeout_seconds
+            )
+            with httpx.Client(base_url=cfg.api_base, timeout=timeout) as client:
                 if (provider_name or cfg.provider) == "ollama":
                     # Expect cfg.api_base like http://host.docker.internal:11434
                     resp = client.post("/api/chat", headers=headers, json=_req_payload_ollama(prompt))
@@ -286,20 +283,10 @@ def judge_scores(
             logger.warning(f"[LLM_JUDGE] Failed to call LLM API: {e}")
             content = "{}"
         scores, reasons = _parse_scores_and_reasons(content)
-        # Persist and merge
-        if r is not None and (scores or reasons):
-            pipe = r.pipeline()
-            for iid, sc in scores.items():
-                pipe.setex(f"llmjudge:{qh}:{iid}", cfg.cache_ttl_seconds, str(sc))
-            for iid, rs in reasons.items():
-                try:
-                    pipe.setex(f"llmjudge:reasons:{qh}:{iid}", cfg.cache_ttl_seconds, json.dumps(rs, ensure_ascii=False))
-                except Exception:
-                    pass
-            pipe.execute()
+        # NO CACHING - always compute fresh scores
         scored.update(scores)
         # Gentle pacing guard
         time.sleep(0.05)
 
-    cached.update(scored)
-    return cached
+    # Return fresh scores (no cache merge)
+    return scored

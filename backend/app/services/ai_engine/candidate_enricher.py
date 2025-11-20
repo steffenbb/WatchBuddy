@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models import PersistentCandidate, BGEEmbedding
 from app.services.tmdb_client import fetch_tmdb_metadata, extract_enriched_fields
-from app.core.database import utc_now
+from app.utils.timezone import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,8 @@ def enrich_candidates_sync(
     try:
         loop = asyncio.get_running_loop()
         # Already in event loop - cannot use asyncio.run()
-        logger.info(f"[Enricher] Skipping sync enrichment - already in async context with {len(candidates)} candidates (use enrich_candidates_async instead)")
-        return candidates
+        logger.warning(f"[Enricher] Called sync enricher from async context - this will fail! Use enrich_candidates_async instead")
+        raise RuntimeError("Cannot call enrich_candidates from async context - use enrich_candidates_async")
     except RuntimeError:
         # No event loop running - safe to create one
         pass
@@ -504,6 +504,14 @@ async def _regenerate_bge_embedding(db: Session, pc: PersistentCandidate) -> Non
         embedding_people = serialize_embedding(people_text) if people_text else None
         embedding_brands = serialize_embedding(brands_text) if brands_text else None
         
+        # Compute content hashes for staleness detection
+        import hashlib
+        hash_base = hashlib.sha1(base_text.encode('utf-8')).hexdigest()
+        hash_title = hashlib.sha1(title_text.encode('utf-8')).hexdigest() if title_text else None
+        hash_keywords = hashlib.sha1(keywords_text_full.encode('utf-8')).hexdigest() if keywords_text_full else None
+        hash_people = hashlib.sha1(people_text.encode('utf-8')).hexdigest() if people_text else None
+        hash_brands = hashlib.sha1(brands_text.encode('utf-8')).hexdigest() if brands_text else None
+        
         # Update or create BGEEmbedding
         bge_emb = db.query(BGEEmbedding).filter(
             BGEEmbedding.tmdb_id == pc.tmdb_id,
@@ -517,6 +525,11 @@ async def _regenerate_bge_embedding(db: Session, pc: PersistentCandidate) -> Non
             bge_emb.embedding_keywords = embedding_keywords
             bge_emb.embedding_people = embedding_people
             bge_emb.embedding_brands = embedding_brands
+            bge_emb.hash_base = hash_base
+            bge_emb.hash_title = hash_title
+            bge_emb.hash_keywords = hash_keywords
+            bge_emb.hash_people = hash_people
+            bge_emb.hash_brands = hash_brands
             bge_emb.updated_at = utc_now()
         else:
             # Create new
@@ -528,6 +541,11 @@ async def _regenerate_bge_embedding(db: Session, pc: PersistentCandidate) -> Non
                 embedding_keywords=embedding_keywords,
                 embedding_people=embedding_people,
                 embedding_brands=embedding_brands,
+                hash_base=hash_base,
+                hash_title=hash_title,
+                hash_keywords=hash_keywords,
+                hash_people=hash_people,
+                hash_brands=hash_brands,
                 created_at=utc_now(),
                 updated_at=utc_now()
             )

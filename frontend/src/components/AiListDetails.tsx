@@ -2,7 +2,6 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { RefreshCw, ThumbsUp, ThumbsDown, Eye, EyeOff } from 'lucide-react';
 import { listAiListItems, refreshAiList } from '../api/aiLists';
 import { toast } from '../utils/toast';
-import HoverInfoCard from './HoverInfoCard';
 import { api } from '../hooks/useApi';
 
 interface AiListItem {
@@ -218,21 +217,18 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 max-h-[70vh] overflow-auto pr-1">
-            {filteredAndSorted.map((it, idx) => (
-              <HoverInfoCard
-                key={`${it.tmdb_id}-${it.rank}`}
-                tmdbId={it.tmdb_id}
-                traktId={it.trakt_id}
-                mediaType={it.media_type}
-                fallbackInfo={{
-                  title: it.title,
-                  media_type: it.media_type,
-                  overview: it.explanation_text,
-                  release_date: it.year ? `${it.year}-01-01` : null,
-                  first_air_date: it.year ? `${it.year}-01-01` : null
-                }}
-              >
-                <div className="relative group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:bg-white/10 transition">
+            {filteredAndSorted.map((it, idx) => {
+              const handleItemClick = () => {
+                if (it.tmdb_id) {
+                  window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
+                }
+              };
+              return (
+                <div 
+                  key={`${it.tmdb_id}-${it.rank}`}
+                  className="relative group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:bg-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer"
+                  onClick={handleItemClick}
+                >
                   {it.poster_url ? (
                     <img src={it.poster_url} alt={it.title || ''} className="w-full h-48 object-cover" loading="lazy" />
                   ) : (
@@ -242,14 +238,14 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
                   {/* Rating buttons */}
                   <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
-                      onClick={() => it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, true)}
+                      onClick={(e) => { e.stopPropagation(); it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, true); }}
                       className={`p-1.5 rounded-lg backdrop-blur-sm ${it.trakt_id && userRatings[it.trakt_id] === 1 ? 'bg-green-500/80 text-white' : 'bg-black/50 hover:bg-green-500/80 text-white'}`}
                       aria-label="Like"
                     >
                       <ThumbsUp size={12} />
                     </button>
                     <button
-                      onClick={() => it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, false)}
+                      onClick={(e) => { e.stopPropagation(); it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, false); }}
                       className={`p-1.5 rounded-lg backdrop-blur-sm ${it.trakt_id && userRatings[it.trakt_id] === -1 ? 'bg-red-500/80 text-white' : 'bg-black/50 hover:bg-red-500/80 text-white'}`}
                       aria-label="Dislike"
                     >
@@ -269,8 +265,8 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
                     )}
                   </div>
                 </div>
-              </HoverInfoCard>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

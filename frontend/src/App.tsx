@@ -5,6 +5,7 @@ import Dashboard from "./components/Dashboard";
 import SetupScreen from "./components/SetupScreen";
 import HelpPage from "./components/HelpPage";
 import MetadataBuildProgress from "./components/MetadataBuildProgress";
+import InstallPrompt from "./components/InstallPrompt";
 import { ToastProvider } from "./components/ToastProvider";
 import { useTraktOAuth } from "./hooks/useTraktOAuth";
 
@@ -103,6 +104,7 @@ export default function App() {
       <Layout onLogoClick={onNavigateHome || undefined}>
         <Dashboard onRegisterNavigateHome={setOnNavigateHome} />
       </Layout>
+      <InstallPrompt />
     </ToastProvider>
   );
 }

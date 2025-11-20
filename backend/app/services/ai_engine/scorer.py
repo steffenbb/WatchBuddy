@@ -313,15 +313,20 @@ def _passes_filters(c: Dict[str, Any], filters: Dict[str, Any], list_type: str =
             logger.debug(f"[FILTER_REJECT] Year range mismatch: tmdb_id={c.get('tmdb_id')}, title={c.get('title')}, range=[{lo},{hi}], candidate={y}")
             return False
 
-    # Adult flag
+    # Adult flag - ALWAYS reject adult content for AI lists unless explicitly requested
+    cand_adult = _to_bool(c.get("adult"))
     if "adult" in filters:
         want_adult = filters["adult"]
-        cand_adult = _to_bool(c.get("adult"))
         if want_adult is True and cand_adult is False:
             logger.debug(f"[FILTER_REJECT] Adult flag mismatch (need adult): tmdb_id={c.get('tmdb_id')}, title={c.get('title')}")
             return False
         if want_adult is False and cand_adult is True:
             logger.debug(f"[FILTER_REJECT] Adult flag mismatch (no adult): tmdb_id={c.get('tmdb_id')}, title={c.get('title')}")
+            return False
+    else:
+        # Default: reject all adult content unless explicitly requested
+        if cand_adult is True:
+            logger.debug(f"[FILTER_REJECT] Adult content blocked (default): tmdb_id={c.get('tmdb_id')}, title={c.get('title')}")
             return False
 
     # Original language
@@ -605,17 +610,24 @@ def score_candidates(
     
     # 1.5) On-demand enrichment for candidates with stale/missing metadata
     # This happens BEFORE scoring so enriched data (keywords, cast, overview) can influence results
-    try:
-        from .candidate_enricher import enrich_candidates_sync
-        
-        logger.debug(f"[Scorer] Starting candidate enrichment for {len(cand_subset)} candidates (max_age=90 days)")
-        
-        # Use synchronous wrapper to avoid asyncio.run() issues
-        cand_subset = enrich_candidates_sync(cand_subset, max_age_days=90, max_concurrent=10)
-        
-        logger.debug(f"[Scorer] Candidate enrichment completed for {len(cand_subset)} candidates")
-    except Exception as e:
-        logger.warning(f"[Scorer] Candidate enrichment failed (continuing with existing data): {e}", exc_info=True)
+    # NOTE: We skip this in Celery context since enrichment already happened in tasks_ai.py
+    # Celery runs in an event loop which blocks asyncio.run()
+    # TMDB enrichment disabled - enrichment should be done at candidate provider level
+    # import asyncio
+    # try:
+    #     # Check if we're in an event loop (Celery context)
+    #     asyncio.get_running_loop()
+    #     # If we get here, we're in an event loop - skip enrichment
+    #     logger.debug(f"[Scorer] Skipping in-scorer enrichment (already in event loop - enrichment done in tasks_ai.py)")
+    # except RuntimeError:
+    #     # Not in event loop - safe to enrich here
+    #     try:
+    #         from .candidate_enricher import enrich_candidates_sync
+    #         logger.debug(f"[Scorer] Starting candidate enrichment for {len(cand_subset)} candidates (max_age=90 days)")
+    #         cand_subset = enrich_candidates_sync(cand_subset, max_age_days=90, max_concurrent=10)
+    #         logger.debug(f"[Scorer] Candidate enrichment completed for {len(cand_subset)} candidates")
+    #     except Exception as e:
+    #         logger.warning(f"[Scorer] Candidate enrichment failed (continuing with existing data): {e}")
     
     # Popularity and rating normalization
     popularity = np.array([float(c.get("popularity") or 0) for c in cand_subset])
@@ -640,9 +652,11 @@ def score_candidates(
                 watch_penalty_full[i] = -0.25  # Moderate penalty instead of eliminating
 
     # quick_score balances semantic fit and basic quality
-    quick_score_full = 0.5 * faiss_sim_full + 0.3 * pop_norm + 0.2 * rating_norm + watch_penalty_full
+    # CRITICAL: FAISS weight boosted from 0.5 to 0.7, popularity reduced from 0.3 to 0.15
+    # This ensures highly relevant but less popular items survive Top-K reduction
+    quick_score_full = 0.7 * faiss_sim_full + 0.15 * pop_norm + 0.15 * rating_norm + watch_penalty_full
     order = np.argsort(-quick_score_full)
-    # Dynamically choose how many to keep for AI lists: use larger of (3x desired) or topk_reduce, capped by BGE/FAISS query cap
+    # Dynamically choose how many to keep for AI lists: use larger of (5x desired) or topk_reduce, capped by BGE/FAISS query cap
     try:
         desired = int(filters.get("item_limit") or 50)
     except Exception:
@@ -653,9 +667,16 @@ def score_candidates(
         cap = int(getattr(_settings, "ai_bge_topk_query", 600) or 600)
     except Exception:
         cap = 600
-    dynamic_keep = max(topk_reduce, 3 * desired)
+    # INCREASED from 3x to 5x: keep more candidates for final scoring (e.g., 250 for 50-item list)
+    # This gives more relevant FAISS candidates a chance to rank high in final scoring
+    dynamic_keep = max(topk_reduce, 5 * desired)
     dynamic_keep = min(dynamic_keep, cap, len(order))
     keep = order[: dynamic_keep]
+    
+    # Log Top-K filtering effectiveness
+    if len(cand_subset) > 0:
+        faiss_top = np.sum(faiss_sim_full[keep] > 0.5) if len(keep) > 0 else 0
+        logger.info(f"[AI_SCORE][topk] Kept {len(keep)}/{len(cand_subset)} candidates (FAISS_high_score={faiss_top}, desired={desired})")
     cand_subset = [cand_subset[i] for i in keep]
     texts_subset = [texts_subset[i] for i in keep]
     pop_norm = pop_norm[keep]
@@ -664,38 +685,95 @@ def score_candidates(
     faiss_sim = faiss_sim_full[keep]
     watch_penalty = watch_penalty_full[keep]
 
-    # 2.1) Final order cache (order-only) to stabilize output and skip expensive reranking
+    # 2.1) Final order cache DISABLED - blocks LLM judge from running
     cache_key = None
     cached_order_ids = None
-    try:
-        from app.core.redis_client import get_redis_sync as _get_r
-        _r = _get_r()
-        cand_ids = [_stable_cand_id(c) for c in cand_subset]
-        if all(cid > 0 for cid in cand_ids):
-            cache_key = _order_cache_key(user_id, list_type, prompt_text, filters, cand_ids)
-            if cache_key:
-                raw = _r.get(cache_key)
-                if raw:
-                    try:
-                        import json as _json
-                        cached_order_ids = _json.loads(raw if isinstance(raw, str) else raw.decode("utf-8", errors="ignore"))
-                    except Exception:
-                        cached_order_ids = None
-    except Exception:
-        cache_key, cached_order_ids = None, None
 
     # 3) BM25 keyword matching (replacing TF-IDF for better relevance)
     try:
-        # Synonym expansion: add common synonyms to query for better keyword coverage
-        from .classifiers import MOOD_KEYWORDS
-        expanded_query_tokens = prompt_text.lower().split()
+        # English stopwords - remove common words that don't add meaning
+        stopwords = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
+            'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+            'could', 'should', 'may', 'might', 'can', 'about', 'into', 'through',
+            'during', 'before', 'after', 'above', 'below', 'between', 'under',
+            'again', 'further', 'then', 'once', 'here', 'there', 'when', 'where',
+            'why', 'how', 'all', 'both', 'each', 'few', 'more', 'most', 'other',
+            'some', 'such', 'only', 'own', 'same', 'so', 'than', 'too', 'very',
+            'just', 'that', 'these', 'those', 'what', 'which', 'who', 'if', 'while'
+        }
         
-        # Add synonyms from mood keyword map
-        for token in prompt_text.lower().split():
+        # Simple stemming rules for common patterns (lightweight alternative to Porter stemmer)
+        def simple_stem(word):
+            """Lightweight stemming for better matching."""
+            if len(word) <= 3:
+                return word
+            # Remove common suffixes
+            if word.endswith('ing'):
+                return word[:-3]
+            if word.endswith('ed'):
+                return word[:-2]
+            if word.endswith('ly'):
+                return word[:-2]
+            if word.endswith('ness'):
+                return word[:-4]
+            if word.endswith('ful'):
+                return word[:-3]
+            if word.endswith('less'):
+                return word[:-4]
+            if word.endswith('tion'):
+                return word[:-4]
+            if word.endswith('sion'):
+                return word[:-4]
+            if word.endswith('ment'):
+                return word[:-4]
+            if word.endswith('ous'):
+                return word[:-3]
+            if word.endswith('ive'):
+                return word[:-3]
+            if word.endswith('er') and len(word) > 4:
+                return word[:-2]
+            if word.endswith('est') and len(word) > 5:
+                return word[:-3]
+            if word.endswith('s') and len(word) > 3 and word[-2] not in 'us':
+                return word[:-1]
+            return word
+        
+        # Improved tokenization: handle punctuation and normalize
+        def tokenize_text(text):
+            """Tokenize with punctuation removal and stemming."""
+            # Replace hyphens with spaces (e.g., "sci-fi" -> "sci fi")
+            text = text.replace('-', ' ').replace('_', ' ')
+            # Remove punctuation except apostrophes
+            text = re.sub(r"[^\w\s']", ' ', text)
+            # Split and clean
+            tokens = []
+            for word in text.lower().split():
+                word = word.strip("'")
+                if word and len(word) > 1 and word not in stopwords:
+                    stemmed = simple_stem(word)
+                    tokens.append(stemmed)
+            return tokens
+        
+        # Tokenize query
+        query_tokens = tokenize_text(prompt_text)
+        
+        # Selective synonym expansion: only expand key mood/genre words
+        from .classifiers import MOOD_KEYWORDS
+        expanded_query_tokens = query_tokens.copy()
+        
+        # Only add synonyms for tokens that are in the mood keyword map
+        # This prevents over-expansion of generic words
+        for token in query_tokens:
             for mood, synonyms in MOOD_KEYWORDS.items():
-                if token in synonyms:
-                    # Add 2-3 top synonyms (avoid over-expansion)
-                    expanded_query_tokens.extend(synonyms[:3])
+                if token in synonyms or token == mood:
+                    # Add top 2 synonyms that aren't already in query
+                    added = 0
+                    for syn in synonyms:
+                        if syn not in expanded_query_tokens and added < 2:
+                            expanded_query_tokens.append(simple_stem(syn))
+                            added += 1
                     break
         
         # Deduplicate while preserving order
@@ -711,21 +789,23 @@ def score_candidates(
             logger.warning(f"[AI_SCORE][BM25] Empty tokenized query from: '{prompt_text}', using fallback scores")
             raise ValueError("Empty tokenized query")
         
-        # Tokenize corpus
-        tokenized_corpus = [text.lower().split() for text in texts_subset]
+        # Tokenize corpus with same preprocessing
+        tokenized_corpus = [tokenize_text(text) for text in texts_subset]
         
         # Build BM25 index with tuned parameters for movie overviews
-        # k1=1.2 (reduced from 1.5): movie overviews are shorter than web docs
-        # b=0.5 (reduced from 0.75): length normalization less aggressive
-        bm25 = BM25Okapi(tokenized_corpus, k1=1.2, b=0.5)
+        # k1=1.5: Controls term frequency saturation (higher = more weight to repeated terms)
+        # b=0.6: Length normalization (0.6 is good balance for movie overviews)
+        bm25 = BM25Okapi(tokenized_corpus, k1=1.5, b=0.6)
         bm25_scores = bm25.get_scores(tokenized_query)
         
-        # Query length normalization: boost short queries (1-4 words)
-        # Short queries like "dark" or "thriller" need extra weight
-        if len(prompt_text.split()) < 5:
-            query_boost = 1.15
+        # Query length normalization: boost short queries (1-3 words)
+        # Short queries like "dark" or "thriller" need extra weight since they're often precise
+        original_word_count = len([w for w in prompt_text.split() if w.strip()])
+        if original_word_count <= 3:
+            # Stronger boost for very short queries (1-2 words)
+            query_boost = 1.25 if original_word_count <= 2 else 1.15
             bm25_scores = bm25_scores * query_boost
-            logger.info(f"[AI_SCORE][BM25] Applied short query boost ({query_boost}x) for {len(prompt_text.split())} word query")
+            logger.info(f"[AI_SCORE][BM25] Applied short query boost ({query_boost}x) for {original_word_count}-word query")
         
         # Normalize BM25 scores
         bm25_sim = _normalize(np.array(bm25_scores))
@@ -1298,10 +1378,10 @@ def score_candidates(
     # For AI lists we allow running even if nightly prep hasn't completed; degrade gracefully when inputs are missing.
     judge_qhash = None
     judge_map = {}
-    # If an order cache exists for this (user,prompt,filters,candidate-ids), skip LLM judge to save cost.
+    # Run LLM judge if enabled (cache removed to ensure fresh scoring)
     
     try:
-        if getattr(settings, "ai_llm_judge_enabled", False) and len(cand_subset) > 0 and not cached_order_ids:
+        if getattr(settings, "ai_llm_judge_enabled", False) and len(cand_subset) > 0:
             # Soft readiness: attempt to get redis, but do not block if flags are absent
             try:
                 from app.core.redis_client import get_redis_sync as ____get_redis_sync
@@ -1448,18 +1528,20 @@ def score_candidates(
         logger.debug(f"[AI_SCORE][LLMJ] Judge skipped: {e}")
 
     # 5) Weighting by list type
-    # Adjusted to reduce literal keyword bias (e.g., titles containing "dark") and improve semantic/genre alignment
-    # For dynamic lists (mood/theme/fusion), keep negative novelty to prefer mainstream content a bit
+    # MAJOR FIX: Increased semantic weights and reduced BM25 to prioritize FAISS relevance over keyword matching
+    # When we have good FAISS candidates, semantic similarity should DOMINATE to surface them
+    # Reduced BM25 (sim) weight significantly - it was causing too much literal matching and missing good FAISS results
+    # TONE/SEASONAL FIX: Increased tone weights from 0.00-0.01 to 0.15-0.18 to properly enforce LLM-extracted tone/vibe
     weights_defaults = {
-        # Chat: increased phrase weight for subgenre/style matching (buddy cop, heist, etc.)
-        # Increased genre weight to prioritize multi-genre alignment over pure semantic similarity
-        "chat": {"sim": 0.20, "semantic": 0.30, "genre": 0.20, "rating": 0.10, "novelty": 0.02, "phrase": 0.15, "actor_studio": 0.06, "recency": 0.03, "watch_history": 0.05, "tone": 0.00, "multi_genre_strict": 0.10},
-        # Mood/Theme/Fusion: reduce phrase reliance; increase semantic and genre alignment
-        "mood": {"sim": 0.12, "semantic": 0.28, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.01},
-        "theme": {"sim": 0.12, "semantic": 0.28, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.01},
-        "fusion": {"sim": 0.10, "semantic": 0.30, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.09, "tone": 0.01},
+        # Chat: BOOSTED semantic from 0.28 to 0.40, REDUCED BM25 from 0.20 to 0.10
+        "chat": {"sim": 0.10, "semantic": 0.40, "genre": 0.20, "rating": 0.10, "novelty": 0.02, "phrase": 0.10, "actor_studio": 0.06, "recency": 0.03, "watch_history": 0.05, "tone": 0.15, "multi_genre_strict": 0.10},
+        # Mood/Theme/Fusion: BOOSTED semantic from 0.26 to 0.38, REDUCED BM25 from 0.12 to 0.08
+        # These lists are specifically about capturing mood/tone/vibe via embeddings, not keywords
+        "mood": {"sim": 0.08, "semantic": 0.38, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.18},
+        "theme": {"sim": 0.08, "semantic": 0.38, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.08, "tone": 0.18},
+        "fusion": {"sim": 0.08, "semantic": 0.40, "genre": 0.14, "rating": 0.10, "novelty": -0.12, "phrase": 0.03, "actor_studio": 0.06, "recency": 0.16, "watch_history": 0.09, "tone": 0.18},
     }
-    weights = weights_defaults.get(list_type, {"sim": 0.25, "semantic": 0.25, "genre": 0.0, "rating": 0.10, "novelty": 0.10, "phrase": 0.10, "actor_studio": 0.08, "recency": 0.05, "watch_history": 0.09, "tone": 0.00})
+    weights = weights_defaults.get(list_type, {"sim": 0.25, "semantic": 0.25, "genre": 0.0, "rating": 0.10, "novelty": 0.10, "phrase": 0.10, "actor_studio": 0.08, "recency": 0.05, "watch_history": 0.09, "tone": 0.15})
 
     # Load per-list-type tunables and canary-gate them
     _tun = _load_tunables(list_type)
@@ -1471,8 +1553,8 @@ def score_candidates(
                     weights[k] = float(v)
         except Exception:
             pass
-    # RRF weight for hybrid signal
-    rrf_w = float(_tun.get("rrf_weight", 0.15)) if _use_tun else 0.15
+    # RRF weight for hybrid signal - INCREASED from 0.15 to 0.20 to better blend semantic+BM25
+    rrf_w = float(_tun.get("rrf_weight", 0.20)) if _use_tun else 0.20
     # CE/LLM topK/weights overrides
     ce_topk_override = int(_tun.get("ce_topk")) if _use_tun and _tun.get("ce_topk") else None
     ce_weight_override = float(_tun.get("ce_weight")) if _use_tun and (_tun.get("ce_weight") is not None) else None
@@ -1494,12 +1576,40 @@ def score_candidates(
             if tid and tid in user_ratings:
                 ratings_boost[i] = 0.3 if user_ratings[tid] == 1 else (-0.7 if user_ratings[tid] == -1 else 0.0)
 
-    # Tone boost: if user tone from filters contains 'light' or 'cozy', prefer higher rating
-    tone = [t.lower() for t in (filters.get("tone") or [])]
+    # Tone boost: match candidates against extracted tone_words from LLM
+    # This is the PRIMARY tone scoring mechanism that uses LLM-extracted tone data
+    # Uses comprehensive MOOD_KEYWORDS from classifiers.py (same as parser)
+    tone_words = [t.lower() for t in (filters.get("tone") or [])]
     tone_bonus = np.zeros(len(cand_subset), dtype=np.float32)
-    if any(k in tone for k in ["light", "cozy", "wholesome", "warm"]):
-        # Reward higher ratings slightly as a proxy for feel-good
-        tone_bonus = rating_norm * 0.5
+    
+    if tone_words:
+        # Import comprehensive mood/tone mappings from classifiers (same as parser uses)
+        from .classifiers import MOOD_KEYWORDS
+        
+        # Score each candidate based on tone word matches in text blob
+        for i, c in enumerate(cand_subset):
+            text_blob = " ".join([str(c.get(k) or "").lower() for k in 
+                                 ["title", "overview", "tagline", "keywords"]])
+            tone_hits = 0
+            total_targets = 0
+            
+            for tw in tone_words:
+                # Use MOOD_KEYWORDS for comprehensive synonym coverage
+                expanded = MOOD_KEYWORDS.get(tw, [tw])
+                total_targets += len(expanded)
+                
+                for variant in expanded:
+                    if variant in text_blob:
+                        tone_hits += 1
+            
+            # Normalize by number of target matches (0.0 to 1.0)
+            if total_targets > 0:
+                tone_bonus[i] = min(1.0, tone_hits / total_targets)
+        
+        # Log tone matching effectiveness
+        matched_count = int(np.sum(tone_bonus > 0))
+        if matched_count > 0:
+            logger.info(f"[AI_SCORE][TONE] Tone matching applied to {matched_count}/{len(cand_subset)} candidates (tone_words: {tone_words[:5]})")
 
     # Contextual mood adjustments based on time of day (for mood/theme/fusion lists)
     mood_time_bonus = np.zeros(len(cand_subset), dtype=np.float32)
@@ -1511,14 +1621,35 @@ def score_candidates(
             
             logger.debug(f"Applying contextual mood adjustments for timezone {user_timezone}: {contextual_moods}")
             
-            # Map mood keywords to genres/tones that should be boosted based on time of day
+            # Comprehensive mood-to-genre mapping (covers all MOOD_KEYWORDS from classifiers.py)
             mood_genre_map = {
-                "happy": ["comedy", "family", "animation", "musical"],
-                "excited": ["action", "adventure", "thriller"],
+                "happy": ["comedy", "family", "animation", "musical", "romance"],
+                "excited": ["action", "adventure", "thriller", "science fiction"],
                 "romantic": ["romance", "drama"],
-                "thoughtful": ["documentary", "drama", "history"],
-                "curious": ["science fiction", "mystery", "documentary"],
-                "scared": ["horror", "thriller"]
+                "thoughtful": ["documentary", "drama", "history", "biography"],
+                "curious": ["science fiction", "mystery", "documentary", "thriller"],
+                "scared": ["horror", "thriller"],
+                # Extended mappings from MOOD_KEYWORDS
+                "uplifting": ["comedy", "family", "animation", "romance", "drama"],
+                "dark": ["thriller", "crime", "horror", "mystery", "drama"],
+                "funny": ["comedy", "animation"],
+                "suspenseful": ["thriller", "mystery", "horror", "crime"],
+                "sad": ["drama", "romance"],
+                "scary": ["horror", "thriller"],
+                "action-packed": ["action", "adventure", "thriller"],
+                "thought-provoking": ["drama", "science fiction", "mystery", "documentary"],
+                "whimsical": ["fantasy", "animation", "comedy"],
+                "epic": ["fantasy", "adventure", "history", "war", "science fiction"],
+                "intimate": ["drama", "romance"],
+                "nostalgic": ["drama", "comedy"],
+                "mysterious": ["mystery", "thriller", "horror"],
+                "violent": ["action", "crime", "thriller", "horror"],
+                "peaceful": ["documentary", "drama"],
+                "chaotic": ["action", "thriller", "crime"],
+                "empowering": ["action", "drama", "biography"],
+                "cozy": ["comedy", "family", "animation", "romance"],
+                "gritty": ["crime", "drama", "thriller"],
+                "serious": ["drama", "history", "biography", "documentary"],
             }
             
             # Apply mood boosts to candidates that match the contextual mood
@@ -1541,13 +1672,29 @@ def score_candidates(
     mood_keywords = [str(k).lower() for k in (filters.get("mood") or [])]
     mood_penalty = np.zeros(len(cand_subset), dtype=np.float32)
     if list_type in ["mood", "theme", "fusion"] and mood_keywords:
-        # Map moods to target genres to validate alignment
+        # Comprehensive mood-to-genre mapping (same as used in contextual mood boost)
         mood_genre_map = {
+            "uplifting": ["comedy", "family", "animation", "romance", "drama"],
             "dark": ["thriller", "crime", "horror", "mystery", "drama"],
+            "romantic": ["romance", "drama"],
+            "funny": ["comedy", "animation"],
+            "suspenseful": ["thriller", "mystery", "horror", "crime"],
+            "sad": ["drama", "romance"],
+            "scary": ["horror", "thriller"],
+            "action-packed": ["action", "adventure", "thriller"],
+            "thought-provoking": ["drama", "science fiction", "mystery", "documentary"],
+            "whimsical": ["fantasy", "animation", "comedy"],
+            "epic": ["fantasy", "adventure", "history", "war", "science fiction"],
+            "intimate": ["drama", "romance"],
+            "nostalgic": ["drama", "comedy"],
+            "mysterious": ["mystery", "thriller", "horror"],
+            "violent": ["action", "crime", "thriller", "horror"],
+            "peaceful": ["documentary", "drama"],
+            "chaotic": ["action", "thriller", "crime"],
+            "empowering": ["action", "drama", "biography"],
             "cozy": ["comedy", "family", "animation", "romance"],
-            "uplifting": ["comedy", "family", "romance"],
-            "serious": ["drama", "history", "biography"],
             "gritty": ["crime", "drama", "thriller"],
+            "serious": ["drama", "history", "biography", "documentary"],
         }
         # Build a fast parser for candidate genres
         def _cand_genres(c):
@@ -1574,33 +1721,41 @@ def score_candidates(
     # 5.1b) Mood alignment bonus & conflicting genre penalty (stronger relevance control)
     mood_alignment = np.zeros(len(cand_subset), dtype=np.float32)
     conflicting_penalty = np.zeros(len(cand_subset), dtype=np.float32)
-    tone_words = [t.lower() for t in (filters.get("tone") or [])]
+    tone_words_align = [t.lower() for t in (filters.get("tone") or [])]
 
-    # Define expansions and conflicting genre maps (applies across mood/theme/fusion)
-    tone_expansions = {
-        "dark": ["dark", "grim", "bleak", "brooding", "ominous"],
-        "gritty": ["gritty", "raw", "harsh"],
-        "uplifting": ["uplifting", "inspiring", "heartwarming", "feel-good"],
-        "romantic": ["romantic", "love", "heartfelt"],
-        "cozy": ["cozy", "warm", "comforting"],
-        "thrilling": ["thrilling", "suspense", "edge-of-your-seat"],
-        "serious": ["serious", "somber", "weighty"],
-        "scary": ["scary", "spooky", "chilling"],
-    }
+    # Import comprehensive MOOD_KEYWORDS from classifiers (same as parser and tone_bonus logic)
+    from .classifiers import MOOD_KEYWORDS
+    
+    # Comprehensive conflicting genre mapping - prevents mismatches
+    # e.g., "dark thriller" shouldn't return family/kids content
     conflicting_genres_map = {
-        # Moods mapped to genres that usually clash with intent
+        # Dark/serious moods conflict with family-friendly content
         "dark": ["family", "animation", "kids", "children", "musical", "anime"],
-        "gritty": ["family", "animation", "kids", "anime"],
-        "serious": ["family", "animation", "kids", "anime"],
-        "thrilling": ["family", "animation", "kids", "anime"],
-        "scary": ["family", "animation", "kids", "anime"],
-        "uplifting": ["crime", "horror", "slasher", "gore"],
-        "cozy": ["crime", "horror", "slasher", "gore"],
+        "gritty": ["family", "animation", "kids", "children", "anime"],
+        "serious": ["family", "animation", "kids", "children", "anime"],
+        "thrilling": ["family", "animation", "kids", "children", "anime"],
+        "suspenseful": ["family", "animation", "kids", "children", "anime"],
+        "scary": ["family", "animation", "kids", "children", "anime"],
+        "violent": ["family", "animation", "kids", "children", "anime"],
+        "chaotic": ["family", "animation", "kids", "children"],
+        "action-packed": ["family", "kids", "children"],  # Some animated action is OK
+        # Light/uplifting moods conflict with dark/violent content
+        "uplifting": ["horror", "slasher", "gore", "thriller"],
+        "cozy": ["horror", "slasher", "gore", "thriller", "crime"],
         "romantic": ["horror", "slasher", "gore"],
+        "whimsical": ["horror", "crime", "thriller"],
+        "peaceful": ["horror", "action", "thriller", "war"],
+        "intimate": ["action", "war"],
+        "funny": ["horror", "thriller"],  # Unless horror comedy
+        "lighthearted": ["horror", "thriller", "crime"],
+        # Specific mood conflicts
+        "empowering": ["horror"],
+        "nostalgic": ["horror"],
+        "mysterious": ["comedy"],  # Mystery comedy is rare
     }
 
     # Build mood tags to drive penalties even when tone words are absent (themes/fusions)
-    mood_tags = set(tone_words)
+    mood_tags = set(tone_words_align)  # Use tone_words_align to avoid variable conflict
     mood_tags.update([m.lower() for m in (filters.get("mood") or [])])
     mood_tags.update([tok.lower() for tok in (filters.get("tokens") or [])])
     # Derive tags from explicit genres when helpful
@@ -1646,13 +1801,14 @@ def score_candidates(
 
     if list_type in ["mood", "theme", "fusion"]:
         # Only compute mood alignment when we actually have tone words
-        if tone_words:
+        if tone_words_align:
             for i, c in enumerate(cand_subset):
                 blob = _cand_text_blob(c)
                 tone_hits = 0
                 total_targets = 0
-                for tw in tone_words:
-                    expanded = tone_expansions.get(tw, [tw])
+                for tw in tone_words_align:
+                    # Use comprehensive MOOD_KEYWORDS for synonym expansion
+                    expanded = MOOD_KEYWORDS.get(tw, [tw])
                     total_targets += len(expanded)
                     for w in expanded:
                         if w in blob:
@@ -1689,12 +1845,48 @@ def score_candidates(
     seasonal_bonus = np.zeros(len(cand_subset), dtype=np.float32)
     seasonal_words = [s.lower() for s in (filters.get("seasonal") or [])]
     if seasonal_words:
+        # Comprehensive seasonal synonyms for better matching (expanded from parser patterns)
+        seasonal_expansions = {
+            "christmas": ["christmas", "xmas", "x-mas", "holiday", "holidays", "santa", "noel", "festive", "yuletide", "advent", "nativity"],
+            "halloween": ["halloween", "hallowe'en", "spooky", "haunted", "trick-or-treat", "all hallows", "samhain"],
+            "thanksgiving": ["thanksgiving", "turkey day", "harvest", "pilgrim"],
+            "easter": ["easter", "bunny", "egg hunt", "resurrection", "paschal"],
+            "valentine": ["valentine", "valentine's", "valentines", "love day", "cupid"],
+            "new year": ["new year", "new year's", "new years", "nye", "hogmanay"],
+            "summer": ["summer", "summertime", "beach", "vacation", "tropical", "heat wave"],
+            "winter": ["winter", "snow", "cold", "blizzard", "ice", "frosty", "frozen"],
+            "spring": ["spring", "springtime", "bloom", "blossom", "renewal", "rebirth"],
+            "fall": ["fall", "autumn", "harvest", "leaves", "foliage", "autumnal"],
+            "hanukkah": ["hanukkah", "chanukah", "festival of lights"],
+            "diwali": ["diwali", "deepavali", "festival of lights"],
+            "lunar new year": ["lunar new year", "chinese new year", "spring festival"],
+            "mardi gras": ["mardi gras", "carnival", "fat tuesday"],
+            "day of the dead": ["day of the dead", "dia de los muertos", "dia de muertos"],
+        }
+        
         for i, c in enumerate(cand_subset):
             text_blob = " ".join([str(c.get(k) or "").lower() for k in ["title", "overview", "tagline", "keywords"]])
-            hits = sum(1 for w in seasonal_words if w in text_blob)
-            if hits:
-                # Doubled from 0.6 to 1.2 - seasonal context is highly specific and should dominate
-                seasonal_bonus[i] = min(1.0, hits / max(1, len(seasonal_words))) * 1.2
+            hits = 0
+            total_targets = 0
+            
+            for sw in seasonal_words:
+                # Use expanded synonyms for seasonal terms
+                expanded = seasonal_expansions.get(sw, [sw])
+                total_targets += len(expanded)
+                
+                for variant in expanded:
+                    if variant in text_blob:
+                        hits += 1
+            
+            if hits > 0:
+                # INCREASED from 1.2x to 2.5x - seasonal context is VERY specific and should strongly dominate
+                # Christmas/Halloween queries should prioritize actual holiday content over generic matches
+                seasonal_bonus[i] = min(1.0, hits / max(1, total_targets)) * 2.5
+        
+        # Log seasonal matching effectiveness
+        matched_count = int(np.sum(seasonal_bonus > 0))
+        if matched_count > 0:
+            logger.info(f"[AI_SCORE][SEASONAL] Seasonal matching applied to {matched_count}/{len(cand_subset)} candidates (seasonal_words: {seasonal_words})")
 
     # Integrate new mood alignment & penalties; seasonal bonus scaled separately
     # 4.9) Negative cues penalty - penalize candidates matching "without X", "no X", "avoid X"
@@ -1744,6 +1936,13 @@ def score_candidates(
                 if popularity < 20 and votes < 500:
                     rating_qualifier_boost[i] += 0.08
     
+    # CRITICAL FIX: Tone/mood/seasonal need to DOMINATE when present - multiply by larger values
+    # These are already 0-1 normalized, so we need significant multipliers to overcome other signals
+    # Without this, a generic high-rated movie with keyword match can beat a perfect mood/seasonal match
+    tone_contribution = (2.0 * tone_bonus) if np.any(tone_bonus > 0) else 0.0  # 2x multiplier when tone words present
+    mood_contribution = (1.5 * mood_alignment) if np.any(mood_alignment > 0) else 0.0  # 1.5x multiplier for mood alignment
+    seasonal_contribution = (3.0 * seasonal_bonus) if np.any(seasonal_bonus > 0) else 0.0  # 3x multiplier for seasonal (was just seasonal_bonus)
+    
     final = (
         weights["sim"] * bm25_sim           # BM25 keyword matching (replaced TF-IDF)
         + weights["semantic"] * semantic_sim # Multi-query expanded semantic similarity
@@ -1756,13 +1955,13 @@ def score_candidates(
         + weights["actor_studio"] * actor_studio_bonus
         + weights["recency"] * recency_bonus
         + weights["watch_history"] * watch_history_bonus
-        + weights.get("tone", 0.0) * tone_bonus
+        + tone_contribution      # FIXED: 2x multiplier on tone_bonus when present (was weights.get("tone", 0.0) * tone_bonus)
         + mood_time_bonus
         + mood_penalty
-        + 0.22 * mood_alignment  # substantial boost for mood thematic fit
+        + mood_contribution      # FIXED: 1.5x multiplier on mood_alignment when present (was 0.28 * mood_alignment)
         + conflicting_penalty    # push obviously mismatched genres down
         + anime_penalty          # push anime/manga down unless explicitly requested
-        + seasonal_bonus         # holiday/seasonal relevance
+        + seasonal_contribution  # FIXED: 3x multiplier on seasonal_bonus when present (was just seasonal_bonus)
         + negative_penalty       # penalize "without X", "no X" matches
         + rating_qualifier_boost # boost quality-specific requests
         + genre_emb_bonus        # fuzzy genre matching via embeddings
@@ -2027,24 +2226,6 @@ def score_candidates(
                     pass
     except Exception as e:
         logger.warning(f"[Scorer] Pairwise LLM reranking failed: {e}")
-    try:
-        if cached_order_ids:
-            id_to_result = {}
-            for it in results:
-                try:
-                    cid = _stable_cand_id(it)
-                except Exception:
-                    cid = 0
-                if cid:
-                    id_to_result[cid] = it
-            reordered = [id_to_result[cid] for cid in cached_order_ids if cid in id_to_result]
-            # Keep original items not in cache order at the end
-            seen = set(cached_order_ids)
-            tail = [it for it in results if _stable_cand_id(it) not in seen]
-            if reordered:
-                results = reordered + tail
-    except Exception:
-        pass
     # Optional MMR diversity re-rank (canary/tunable)
     try:
         if apply_mmr and len(results) > 0:

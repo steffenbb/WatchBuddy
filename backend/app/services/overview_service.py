@@ -103,8 +103,7 @@ class OverviewService:
         try:
             # Get ItemLLMProfile for the candidate
             item_profile = db.query(ItemLLMProfile).filter_by(
-                tmdb_id=candidate.tmdb_id,
-                media_type=candidate.media_type
+                candidate_id=candidate.id
             ).first()
             
             # Get UserTextProfile
@@ -123,7 +122,7 @@ class OverviewService:
 User Profile: {user_profile.summary_text[:200]}
 
 Item: {candidate.title} ({candidate.year})
-{item_profile.summary_text[:300]}
+{item_profile.profile_text[:300]}
 
 Match score: {score:.0%}
 Top matching aspects: {aspect_str}
@@ -138,13 +137,14 @@ Example good rationales:
 Output ONLY the rationale sentence, nothing else:"""
 
             # Call LLM
+            logger.info(f"[OverviewService] Generating LLM rationale for {candidate.media_type}/{candidate.tmdb_id}, context={context}, prompt_length={len(prompt)}")
             timeout = httpx.Timeout(60.0, connect=5.0)
             async with httpx.AsyncClient(timeout=timeout) as client:
                 payload = {
                     "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
                     "prompt": prompt,
                     "stream": False,
-                    "options": {"temperature": 0.7, "num_predict": 50, "num_ctx": 4096},
+                    "options": {"temperature": 0.7, "num_ctx": 4096},
                     "keep_alive": "24h"
                 }
                 
@@ -156,13 +156,14 @@ Output ONLY the rationale sentence, nothing else:"""
                 if raw and len(raw) > 10:
                     # Clean up the response
                     rationale = raw.strip('"').strip()
-                    # Ensure it's not too long
-                    if len(rationale) > 120:
-                        rationale = rationale[:117] + "..."
+                    logger.info(f"[OverviewService] LLM rationale generated: length={len(rationale)}, preview={rationale[:80]}")
+                    # No artificial cap - let frontend handle display
                     return rationale
                     
+        except httpx.TimeoutException as e:
+            logger.error(f"[LLM Rationale] Timeout (60s) for {candidate.media_type}/{candidate.tmdb_id}: {e}")
         except Exception as e:
-            logger.debug(f"[LLM Rationale] Failed: {e}")
+            logger.error(f"[LLM Rationale] Failed for {candidate.media_type}/{candidate.tmdb_id}: {type(e).__name__}: {e}")
         
         # Fallback to template
         return self._generate_template_rationale(score, breakdown, context)
@@ -1337,19 +1338,38 @@ Use EXACT names: "investment_tracker", "new_shows", "trending", "upcoming"
             import json as _json
             import re
             
-            # Look for array pattern
-            array_match = re.search(r'\[[\s\S]*?\]', output)
-            if array_match:
-                output = array_match.group(0)
-            else:
-                # Try to strip quotes and parse
-                output = output.strip('"\'""„" \n\r')
+            # Strategy 1: Find balanced brackets - extract first complete JSON array
+            bracket_count = 0
+            start_pos = output.find('[')
+            end_pos = -1
+            
+            if start_pos >= 0:
+                for i in range(start_pos, len(output)):
+                    if output[i] == '[':
+                        bracket_count += 1
+                    elif output[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_pos = i + 1
+                            break
+                
+                if end_pos > 0:
+                    output = output[start_pos:end_pos]
+            
+            # Strategy 2: If that fails, try regex
+            if '[' not in output or ']' not in output:
+                array_match = re.search(r'\[(?:[^\[\]]|\[[^\]]*\])*\]', output)
+                if array_match:
+                    output = array_match.group(0)
+                else:
+                    # Last resort - strip quotes
+                    output = output.strip('"\'""„" \n\r')
             
             # Parse array
             try:
                 ranked_modules = _json.loads(output)
             except _json.JSONDecodeError as e:
-                logger.warning(f"[OverviewService] LLM module ranking failed: {e}")
+                logger.warning(f"[OverviewService] LLM module ranking failed: {e}. Raw output: {output[:200]}")
                 return self._compute_module_priorities_fallback(modules)
             
             if not isinstance(ranked_modules, list) or len(ranked_modules) != 4:

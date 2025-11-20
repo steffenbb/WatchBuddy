@@ -98,12 +98,12 @@ class SyncAnalyzer:
             print(f"    - From persistent DB: {persistent_count}")
             print(f"    - From live API: {api_count}")
             
-                # Track TMDB lookup failures (missing critical metadata)
-                # For persistent candidates, title and tmdb_id are always present
-                # Real failures are missing genres, poster_path, or other enrichment data
-                tmdb_failures = sum(1 for c in candidates 
-                                   if not c.get('_from_persistent_store') and 
-                                   (not c.get('title') or not c.get('tmdb_id')))
+            # Track TMDB lookup failures (missing critical metadata)
+            # For persistent candidates, title and tmdb_id are always present
+            # Real failures are missing genres, poster_path, or other enrichment data
+            tmdb_failures = sum(1 for c in candidates 
+                               if not c.get('_from_persistent_store') and 
+                               (not c.get('title') or not c.get('tmdb_id')))
             result['tmdb_failures'] = tmdb_failures
             if tmdb_failures > 0:
                 print(f"    ⚠ TMDB lookup failures: {tmdb_failures}")

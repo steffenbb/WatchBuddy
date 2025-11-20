@@ -63,14 +63,24 @@ class UserProfileService:
             User profile dict with genre weights, preferences, etc.
         """
         if not force_refresh:
-            cached = self.redis.get(self.cache_key)
-            if cached:
-                try:
-                    profile = json.loads(cached)
-                    logger.debug(f"Loaded cached profile for user {self.user_id}")
-                    return profile
-                except Exception as e:
-                    logger.warning(f"Failed to parse cached profile: {e}")
+            try:
+                cached = self.redis.get(self.cache_key)
+                if cached:
+                    # Handle both string and bytes
+                    if isinstance(cached, bytes):
+                        cached = cached.decode('utf-8')
+                    
+                    # Skip empty strings
+                    if not cached or cached.strip() == '':
+                        logger.debug(f"Empty cached profile for user {self.user_id}, rebuilding")
+                    else:
+                        profile = json.loads(cached)
+                        logger.debug(f"Loaded cached profile for user {self.user_id}")
+                        return profile
+            except json.JSONDecodeError as e:
+                logger.warning(f"Failed to parse cached profile (JSON error): {e}, rebuilding")
+            except Exception as e:
+                logger.warning(f"Failed to load cached profile: {e}, rebuilding")
         
         # Build profile from scratch
         profile = self._build_profile()
@@ -119,9 +129,13 @@ class UserProfileService:
                 UserRating.user_id == self.user_id
             ).all()
             
-            # Get watch history from Trakt
-            trakt_client = TraktClient(user_id=self.user_id)
-            watched_items = self._fetch_trakt_history(trakt_client)
+            # Get watch history from Trakt (if connected)
+            watched_items = []
+            try:
+                trakt_client = TraktClient(user_id=self.user_id, db=db)
+                watched_items = self._fetch_trakt_history(trakt_client)
+            except Exception as e:
+                logger.warning(f"Failed to initialize Trakt client or fetch history: {e}")
             
             # Combine ratings and watched items
             all_items = self._merge_watched_and_ratings(watched_items, ratings, db)
@@ -149,23 +163,31 @@ class UserProfileService:
                 if item['watched_at'] and item['watched_at'] > recent_cutoff
             ][:20]  # Limit to 20 most recent
             
+            # Ensure all numeric values are JSON-serializable
             profile = {
-                "genre_weights": genre_weights,
-                "avg_popularity": float(avg_popularity),
-                "avg_rating": float(avg_rating),
-                "recent_activity_boost": 1.5,  # Fixed multiplier for now
-                "preferred_obscurity": obscurity_pref,
-                "top_genres": top_genres,
-                "recent_tmdb_ids": recent_items,
-                "total_watched": len(all_items),
+                "genre_weights": {str(k): float(v) for k, v in genre_weights.items()},
+                "avg_popularity": float(avg_popularity) if not np.isnan(avg_popularity) else 50.0,
+                "avg_rating": float(avg_rating) if not np.isnan(avg_rating) else 7.0,
+                "recent_activity_boost": 1.5,
+                "preferred_obscurity": str(obscurity_pref),
+                "top_genres": list(top_genres),
+                "recent_tmdb_ids": [int(x) for x in recent_items if x is not None],
+                "total_watched": int(len(all_items)),
                 "updated_at": utc_now().isoformat()
             }
+            
+            # Validate JSON serialization before returning
+            try:
+                json.dumps(profile)
+            except Exception as json_err:
+                logger.error(f"Profile not JSON-serializable: {json_err}, returning default")
+                return self._default_profile()
             
             logger.info(f"Built profile for user {self.user_id}: {len(all_items)} items, top genres: {top_genres[:3]}")
             return profile
             
         except Exception as e:
-            logger.error(f"Failed to build profile for user {self.user_id}: {e}")
+            logger.error(f"Failed to build profile for user {self.user_id}: {e}", exc_info=True)
             return self._default_profile()
         finally:
             db.close()

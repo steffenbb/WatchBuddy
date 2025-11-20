@@ -76,45 +76,13 @@ export default function PairwiseTrainer() {
   };
 
   const createSession = async () => {
-    if (!userPrompt.trim()) {
-      setError('Please enter a prompt describing what you want to watch');
-      return;
-    }
-
     setIsCreating(true);
     setError(null);
 
     try {
-      // Get candidate pool from synchronous chat list generation
-      // Use 120s timeout to accommodate IntentExtractor retry logic (60s + 30s + 30s)
-      const chatResponse = await apiPost('/chat/generate-list', {
-        user_id: 1,
-        prompt: userPrompt,
-        item_limit: 30
-      }, 120000) as any;
-
-      if (!chatResponse.items || chatResponse.items.length < 2) {
-        setError('Not enough candidates found for training. Try a different prompt.');
-        return;
-      }
-
-      // Extract trakt_id from items (chat endpoint returns trakt_id, not persistent_candidate_id)
-      const candidateIds = chatResponse.items
-        .map((item: any) => item.trakt_id) // Use trakt_id from chat response
-        .filter((id: number) => id !== null && id !== undefined);
-
-      if (candidateIds.length < 2) {
-        setError('Not enough valid candidates for training. Try a different prompt.');
-        return;
-      }
-
-      // Create pairwise session
-      const session = await apiPost('/pairwise/session/create', {
-        user_id: 1,
-        prompt: userPrompt,
-        candidate_ids: candidateIds.slice(0, 20), // Use top 20 for manageable session
-        list_type: 'chat',
-        filters: null
+      // Create auto-generated session with diverse candidates from database
+      const session = await apiPost('/pairwise/session/create-auto', {
+        user_id: 1
       }) as TrainingSession;
 
       setSessionId(session.session_id);
@@ -218,20 +186,6 @@ export default function PairwiseTrainer() {
             Help us learn your preferences by comparing pairs of movies/shows. Your choices will improve future recommendations.
           </p>
 
-          <div className="mb-6">
-            <label className="block text-sm font-medium text-gray-300 mb-2">
-              What do you want to watch?
-            </label>
-            <textarea
-              value={userPrompt}
-              onChange={(e) => setUserPrompt(e.target.value)}
-              placeholder="E.g., 'dark sci-fi with strong characters' or 'feel-good comedies from the 90s'"
-              className="w-full px-4 py-3 bg-gray-800/50 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              rows={3}
-              disabled={isCreating}
-            />
-          </div>
-
           {error && (
             <div className="mb-4 p-4 bg-red-900/30 border border-red-500/50 rounded-lg text-red-300">
               {error}
@@ -240,14 +194,14 @@ export default function PairwiseTrainer() {
 
           <button
             onClick={createSession}
-            disabled={isCreating || !userPrompt.trim()}
+            disabled={isCreating}
             className={`w-full px-6 py-3 rounded-lg font-semibold transition-all ${
-              isCreating || !userPrompt.trim()
+              isCreating
                 ? 'bg-gray-700 text-gray-400 cursor-not-allowed'
                 : 'bg-gradient-to-r from-purple-600 to-blue-600 hover:from-purple-500 hover:to-blue-500 text-white'
             }`}
           >
-            {isCreating ? 'Creating Session...' : 'Start Training'}
+            {isCreating ? 'Loading Candidates...' : 'Start Training'}
           </button>
         </div>
       </div>

@@ -747,13 +747,14 @@ Profile:"""
         # Call LLM via async wrapper
         async def _call_llm():
             try:
+                logger.info(f"[UserTextProfile] Generating profile for user {user_id}, prompt length: {len(prompt)}")
                 timeout = httpx.Timeout(60.0, connect=5.0)
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     payload = {
                         "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
                         "prompt": prompt,
                         "stream": False,
-                        "options": {"temperature": 0.7, "num_predict": 200, "num_ctx": 4096},
+                        "options": {"temperature": 0.7, "num_ctx": 4096},
                         "keep_alive": "24h"
                     }
                     resp = await client.post("http://ollama:11434/api/generate", json=payload)
@@ -766,9 +767,13 @@ Profile:"""
                         # Remove any leading "Profile:" labels
                         if raw.lower().startswith("profile:"):
                             raw = raw[8:].strip()
-                        return raw[:500]  # Cap at 500 chars
+                        logger.info(f"[UserTextProfile] Generated for user {user_id}: length={len(raw)}, preview={raw[:100]}")
+                        return raw  # No artificial cap
+            except httpx.TimeoutException as e:
+                logger.error(f"[UserTextProfile] LLM timeout (60s) for user {user_id}: {e}")
+                return None
             except Exception as e:
-                logger.warning(f"[UserTextProfile] LLM generation failed: {e}")
+                logger.error(f"[UserTextProfile] LLM generation failed for user {user_id}: {type(e).__name__}: {e}")
                 return None
         
         summary_text = asyncio.run(_call_llm())

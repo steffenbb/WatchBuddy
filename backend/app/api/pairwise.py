@@ -67,6 +67,60 @@ def get_db():
         db.close()
 
 
+@router.post("/session/create-auto", response_model=Dict[str, Any])
+async def create_auto_training_session(
+    user_id: int = Body(1, embed=True),
+    db: Session = Depends(get_db)
+):
+    """Create a training session with automatically selected diverse candidates.
+    
+    Selects 20 diverse, popular candidates from the database for pairwise comparison.
+    No prompt needed - candidates are chosen to represent variety across genres/types.
+    """
+    try:
+        from app.models import PersistentCandidate
+        
+        # Get 20 diverse, popular candidates (randomized for variety across sessions)
+        from sqlalchemy import func
+        candidates = db.query(PersistentCandidate).filter(
+            PersistentCandidate.active == True,
+            PersistentCandidate.is_adult == False,
+            PersistentCandidate.vote_count >= 100,
+            PersistentCandidate.popularity >= 10  # Reasonably popular items
+        ).order_by(
+            func.random()  # Randomize selection for different candidates each session
+        ).limit(20).all()
+        
+        if len(candidates) < 2:
+            raise HTTPException(status_code=404, detail="Not enough candidates in database")
+        
+        candidate_ids = [c.id for c in candidates]
+        
+        trainer = PairwiseTrainer(db=db, user_id=user_id)
+        session = trainer.create_session(
+            prompt="Auto-generated diverse selection",
+            candidate_ids=candidate_ids,
+            list_type="auto",
+            filters=None
+        )
+        
+        try:
+            await metrics.increment("trainer.sessions_created", 1)
+        except Exception as e:
+            logger.debug(f"Failed to record session metrics: {e}")
+        
+        return {
+            "session_id": session.id,
+            "total_pairs": session.total_pairs,
+            "status": session.status,
+            "message": f"Created training session with {len(candidate_ids)} auto-selected candidates"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to create auto training session: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/session/create", response_model=Dict[str, Any])
 async def create_training_session(
     request: CreateSessionRequest,

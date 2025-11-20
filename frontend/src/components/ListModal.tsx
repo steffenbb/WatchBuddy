@@ -2,7 +2,6 @@ import React from "react";
 import { X, RefreshCw, ThumbsUp, ThumbsDown, Filter, Eye, EyeOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "../hooks/useApi";
-import HoverInfoCard from "./HoverInfoCard";
 
 interface ListModalProps {
   listId: number;
@@ -213,23 +212,21 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                 // Get user rating from state (trakt_id is the key)
                 const userRating = userRatings[it.trakt_id] || 0;
                 
+                const handleItemClick = () => {
+                  if (it.tmdb_id) {
+                    window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
+                  }
+                };
+                
                 return (
-                  <HoverInfoCard
+                  <motion.div 
                     key={idx}
-                    tmdbId={it.tmdb_id}
-                    traktId={it.trakt_id}
-                    mediaType={it.media_type}
-                    fallbackInfo={{
-                      title: it.title,
-                      media_type: it.media_type
-                    }}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: idx * 0.02, duration: 0.2 }}
+                    className="relative group rounded-xl overflow-hidden bg-white/5 border border-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer"
+                    onClick={handleItemClick}
                   >
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: idx * 0.02, duration: 0.2 }}
-                      className="relative group rounded-xl overflow-hidden bg-white/5 border border-white/10"
-                    >
                       <div className="aspect-[2/3] w-full bg-slate-900">
                         {src ? (
                           <img src={src} alt={it.title || "Item"} className="w-full h-full object-cover" loading="lazy" />
@@ -248,14 +245,14 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                       {/* Rating buttons */}
                       <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
-                          onClick={() => handleRate(it.id, it.trakt_id, it.media_type, true)}
+                          onClick={(e) => { e.stopPropagation(); handleRate(it.id, it.trakt_id, it.media_type, true); }}
                           className={`p-1.5 rounded-lg backdrop-blur-sm ${userRating === 1 ? 'bg-green-500/80 text-white' : 'bg-black/50 hover:bg-green-500/80 text-white'}`}
                           aria-label="Like"
                         >
                           <ThumbsUp size={12} />
                         </button>
                         <button
-                          onClick={() => handleRate(it.id, it.trakt_id, it.media_type, false)}
+                          onClick={(e) => { e.stopPropagation(); handleRate(it.id, it.trakt_id, it.media_type, false); }}
                           className={`p-1.5 rounded-lg backdrop-blur-sm ${userRating === -1 ? 'bg-red-500/80 text-white' : 'bg-black/50 hover:bg-red-500/80 text-white'}`}
                           aria-label="Dislike"
                         >
@@ -265,7 +262,6 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                       
                       <div className="p-2 text-xs text-white/80 truncate">{it.title || it.original_title || "Untitled"}</div>
                     </motion.div>
-                  </HoverInfoCard>
                 );
               })}
             </div>

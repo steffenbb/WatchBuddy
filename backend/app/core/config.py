@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # LLM judge reranker (optional, LOCAL by default)
     # Provider options: "openai_compatible" (can be local), "ollama"
-    ai_llm_judge_enabled: bool = os.getenv("AI_LLM_JUDGE_ENABLED", "false").lower() == "true"
+    ai_llm_judge_enabled: bool = os.getenv("AI_LLM_JUDGE_ENABLED", "true").lower() == "true"
     ai_llm_judge_topk: int = int(os.getenv("AI_LLM_JUDGE_TOPK", "100"))
     ai_llm_judge_weight: float = float(os.getenv("AI_LLM_JUDGE_WEIGHT", "0.15"))
     # Small, CPU-friendly local defaults

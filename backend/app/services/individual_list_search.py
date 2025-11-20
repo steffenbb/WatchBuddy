@@ -197,7 +197,7 @@ class IndividualListSearchService:
             # Use a broad search to get candidates, then let hybrid_search score them
             db = SessionLocal()
             try:
-                # Get candidates matching the query text (title, overview, keywords)
+                # Get candidates matching the query text (title, overview, keywords, cast)
                 # This is a preliminary filter before semantic scoring
                 search_terms = query.lower().split()
                 
@@ -207,16 +207,27 @@ class IndividualListSearchService:
                 if media_type:
                     query_obj = query_obj.filter(PersistentCandidate.media_type == media_type)
                 
-                # Match any search term in title or overview (broad retrieval)
+                # Match any search term in title, overview, cast, or keywords (broad retrieval)
                 if search_terms:
                     conditions = []
                     for term in search_terms[:3]:  # Limit to first 3 terms for performance
                         conditions.append(PersistentCandidate.title.ilike(f'%{term}%'))
                         conditions.append(PersistentCandidate.overview.ilike(f'%{term}%'))
+                        conditions.append(PersistentCandidate.cast.ilike(f'%{term}%'))
+                        conditions.append(PersistentCandidate.keywords.ilike(f'%{term}%'))
                     query_obj = query_obj.filter(or_(*conditions))
                 
-                # Get top 500 candidates for semantic scoring
-                candidates = query_obj.limit(500).all()
+                # Get top 2000 candidates for semantic scoring (increased for better recall)
+                candidates = query_obj.limit(2000).all()
+                
+                if not candidates or len(candidates) < 10:
+                    # Fallback: broaden search if we got few results
+                    logger.debug(f"Few candidates ({len(candidates)}), trying broader search")
+                    query_obj = db.query(PersistentCandidate)
+                    if media_type:
+                        query_obj = query_obj.filter(PersistentCandidate.media_type == media_type)
+                    # Just get top popular items for semantic comparison
+                    candidates = query_obj.order_by(PersistentCandidate.popularity.desc()).limit(1000).all()
                 
                 if not candidates:
                     logger.debug(f"No candidates found for query: {query}")

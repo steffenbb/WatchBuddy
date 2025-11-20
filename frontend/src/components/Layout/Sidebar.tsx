@@ -10,10 +10,9 @@ type NavItem = {
 
 export const navItems: NavItem[] = [
   { key: "home", label: "Home", icon: <Home size={18} />, onClick: () => { window.location.hash = ""; } },
-  { key: "overview", label: "Your Overview", icon: <BarChart3 size={18} />, onClick: () => { window.location.hash = "overview"; } },
-  { key: "smart", label: "Lists", icon: <ListChecks size={18} />, onClick: () => { window.location.hash = "lists"; } },
+  { key: "smart", label: "SmartLists", icon: <ListChecks size={18} />, onClick: () => { window.location.hash = "lists"; } },
   { key: "ai", label: "AI Lists", icon: <Brain size={18} />, onClick: () => { window.location.hash = "dynamic"; } },
-  { key: "individual", label: "My Lists", icon: <Users size={18} />, onClick: () => { window.location.hash = "myLists"; } },
+  { key: "individual", label: "Individual Lists", icon: <Users size={18} />, onClick: () => { window.location.hash = "myLists"; } },
   { key: "trainer", label: "Preference Trainer", icon: <Target size={18} />, onClick: () => { window.location.hash = "trainer"; } },
   { key: "status", label: "Status", icon: <Activity size={18} />, onClick: () => { window.location.hash = "status"; } },
   { key: "settings", label: "Settings", icon: <Settings size={18} />, onClick: () => { window.location.hash = "settings"; } },
@@ -34,7 +33,6 @@ export default function Sidebar() {
   const getActiveKey = () => {
     const hash = activeHash.replace('#', '');
     if (!hash || hash === '') return 'home'; // Default to home page
-    if (hash === 'overview') return 'overview';
     if (hash === 'lists') return 'smart';
     if (hash === 'dynamic') return 'ai';
     if (hash === 'myLists') return 'individual';

@@ -653,9 +653,19 @@ async def get_list_items(
                         year = pc.get("year")
             except Exception:
                 year = None
+            # Get tmdb_id from metadata or PersistentCandidate
+            tmdb_id = None
+            if meta and meta.tmdb_id:
+                tmdb_id = meta.tmdb_id
+            elif meta and meta.tmdb_id:
+                pc = pc_by_tmdb.get((meta.tmdb_id, item.media_type))
+                if pc:
+                    tmdb_id = meta.tmdb_id
+            
             response_items.append({
                 "id": item.id,
                 "trakt_id": item.trakt_id,
+                "tmdb_id": tmdb_id,  # CRITICAL: Include tmdb_id for item navigation
                 "media_type": item.media_type,
                 "score": item.score,
                 "is_watched": item.is_watched,
