@@ -1180,13 +1180,21 @@ class ListSyncService:
             
             # Get existing items in this session
             existing_items = {}
+            existing_items_by_item_id = {}  # Lookup for items without trakt_id
             items_to_refresh = set()  # Track items to be replaced with new content
             
             if not is_full_sync:
                 current_items = db.query(ListItem).filter(
                     ListItem.smartlist_id == user_list_id
                 ).all()
-                existing_items = {item.trakt_id: item for item in current_items if item.trakt_id}
+                # Build two lookup dictionaries:
+                # 1. By trakt_id (for items with trakt_id)
+                # 2. By item_id (for items without trakt_id, to prevent duplicates)
+                for item in current_items:
+                    if item.trakt_id:
+                        existing_items[item.trakt_id] = item
+                    else:
+                        existing_items_by_item_id[item.item_id] = item
                 
                 # Implement 60% content refresh: randomly select 60% of items to replace
                 if existing_items and len(existing_items) > 5:  # Only refresh if we have enough items
@@ -1204,10 +1212,12 @@ class ListSyncService:
                 ).delete()
                 db.commit()
                 existing_items = {}
+                existing_items_by_item_id = {}
                 items_to_refresh = set()
             
             # Track which items we're keeping
             processed_trakt_ids = set()
+            processed_item_ids = set()  # Track item_ids to prevent duplicates
             any_candidates_applied = False
             
             logger.warning(f"[DEBUG] Starting loop - total candidates: {len(candidates)}")
@@ -1232,61 +1242,61 @@ class ListSyncService:
                     logger.warning(f"[DEBUG] Skipping candidate {idx} - no usable identifier (no trakt_id/tmdb_id/item_id)")
                     continue
                 
+                # Calculate item_id early to use for duplicate detection
+                safe_trakt: Optional[int] = trakt_id if isinstance(trakt_id, int) else None
+                if safe_trakt is not None:
+                    item_id_value = str(safe_trakt)
+                elif tmdb_id is not None:
+                    item_id_value = f"tmdb-{tmdb_id}"
+                else:
+                    item_id_value = str(candidate.get('item_id'))
+                
+                # Check if we've already processed this item in this sync (prevent duplicates within same batch)
+                if item_id_value in processed_item_ids:
+                    logger.debug(f"[DUPLICATE] Skipping duplicate item_id={item_id_value} in same batch")
+                    continue
+                
                 if trakt_id:
                     processed_trakt_ids.add(trakt_id)
+                processed_item_ids.add(item_id_value)
                 
-                # Check if item already exists
-                existing_item = existing_items.get(trakt_id) if trakt_id else None
+                # Check if item already exists (check both trakt_id and item_id lookups)
+                existing_item = None
+                should_refresh = False
+                if trakt_id:
+                    existing_item = existing_items.get(trakt_id)
+                    should_refresh = trakt_id in items_to_refresh
+                if not existing_item and item_id_value:
+                    existing_item = existing_items_by_item_id.get(item_id_value)
+                    # Items without trakt_id are not in the refresh set, so they won't be refreshed
+                    should_refresh = False
                 
                 # If item exists AND is NOT marked for refresh, update it
                 # If item exists AND IS marked for refresh, treat as new (replace it)
-                if existing_item and trakt_id not in items_to_refresh:
+                if existing_item and not should_refresh:
                     # Update existing item (keep it)
                     existing_item.score = candidate.get("score", 0)
                     existing_item.is_watched = candidate.get("is_watched", False)
                     existing_item.watched_at = candidate.get("watched_at")
                     existing_item.title = candidate.get("title", "")
+                    existing_item.media_type = candidate.get("media_type", "movie")
+                    existing_item.explanation = candidate.get("explanation", "")
+                    # Update item_id and trakt_id if they've changed (e.g., trakt_id now resolved)
+                    if safe_trakt and not existing_item.trakt_id:
+                        existing_item.trakt_id = safe_trakt
+                        existing_item.item_id = item_id_value
                     updated_count += 1
                     any_candidates_applied = True
                 else:
                     # Create new item (either new or replacing old item marked for refresh)
-                    if existing_item and trakt_id in items_to_refresh:
+                    if existing_item and should_refresh:
                         # Remove old item to replace it
                         db.delete(existing_item)
-                        logger.debug(f"[CONTENT_REFRESH] Replacing item trakt_id={trakt_id}")
+                        logger.debug(f"[CONTENT_REFRESH] Replacing item with item_id={item_id_value}")
                     
                     title_value = candidate.get("title", "")
-                    logger.warning(f"[DEBUG] Creating ListItem - trakt_id={trakt_id}, title='{title_value}', media_type={candidate.get('media_type', 'movie')}")
+                    logger.warning(f"[DEBUG] Creating ListItem - item_id={item_id_value}, trakt_id={safe_trakt}, title='{title_value}', media_type={candidate.get('media_type', 'movie')}")
                     
-                    # Determine safe item_id and trakt_id values
-                    # trakt_id MUST be int or None; item_id can be string surrogate (tmdb-<id>)
-                    safe_trakt: Optional[int] = trakt_id if isinstance(trakt_id, int) else None
-                    # Prefer trakt_id for item_id if available, else tmdb_id, else provided item_id
-                    if safe_trakt is not None:
-                        item_id_value = str(safe_trakt)
-                    elif tmdb_id is not None:
-                        item_id_value = f"tmdb-{tmdb_id}"
-                    else:
-                        item_id_value = str(candidate.get('item_id'))
-
-                    # If we don't have a trakt_id, try to upsert on item_id to avoid duplicates
-                    if safe_trakt is None and item_id_value:
-                        existing_by_item = db.query(ListItem).filter(
-                            ListItem.smartlist_id == user_list_id,
-                            ListItem.item_id == item_id_value
-                        ).first()
-                        if existing_by_item:
-                            # Update existing TMDB-only item
-                            existing_by_item.media_type = candidate.get("media_type", "movie")
-                            existing_by_item.title = title_value
-                            existing_by_item.score = candidate.get("score", 0)
-                            existing_by_item.is_watched = candidate.get("is_watched", False)
-                            existing_by_item.watched_at = candidate.get("watched_at")
-                            existing_by_item.explanation = candidate.get("explanation", "")
-                            updated_count += 1
-                            any_candidates_applied = True
-                            continue
-
                     new_item = ListItem(
                         smartlist_id=user_list_id,
                         item_id=item_id_value,
@@ -1309,10 +1319,14 @@ class ListSyncService:
                     logger.info("[INCREMENTAL] No candidates applied; skipping removal of existing items to avoid wiping the list")
                     db.commit()
                     return updated_count
-                items_to_remove = [
-                    item for trakt_id, item in existing_items.items() 
-                    if trakt_id not in processed_trakt_ids
-                ]
+                # Check both trakt_id and item_id based items
+                items_to_remove = []
+                for tid, item in existing_items.items():
+                    if tid not in processed_trakt_ids:
+                        items_to_remove.append(item)
+                for iid, item in existing_items_by_item_id.items():
+                    if iid not in processed_item_ids:
+                        items_to_remove.append(item)
                 for item in items_to_remove:
                     db.delete(item)
             

@@ -66,12 +66,12 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
   return (
     <div className="grid lg:grid-cols-3 gap-4 p-2 md:p-0 max-w-full overflow-x-hidden">
       <div className="lg:col-span-2 space-y-3 min-w-0 max-w-full">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2 flex-1 min-w-0 overflow-hidden">
             <button onClick={onBack} className="px-3 py-2 rounded-lg bg-white/15 text-white hover:bg-white/25 text-sm md:text-base flex-shrink-0">← Back</button>
-            <h2 className="text-white font-bold text-lg md:text-xl truncate min-w-0">{list?.name || "List"}</h2>
+            <h2 className="text-white font-bold text-lg md:text-xl truncate flex-1 min-w-0">{list?.name || "List"}</h2>
           </div>
-          <div className="flex gap-2 w-full sm:w-auto flex-shrink-0">
+          <div className="flex gap-2 w-full sm:w-auto flex-shrink-0 sm:ml-auto">
             <button 
               onClick={handleSync} 
               disabled={syncing}
@@ -91,13 +91,14 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
             {list.items?.map((item: any) => {
               const handleItemClick = () => {
                 if (item.tmdb_id) {
+                  // Navigate to item page - this will push to history
                   window.location.hash = `item/${item.media_type}/${item.tmdb_id}`;
                 }
               };
               return (
                 <div 
                   key={item.id}
-                  className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 max-w-full overflow-hidden hover:ring-2 hover:ring-purple-500 transition"
+                  className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 overflow-hidden hover:ring-2 hover:ring-purple-500 transition"
                 >
                   <div className="shrink-0 w-16 cursor-pointer" onClick={handleItemClick}>
                     {item.poster_path ? (
@@ -108,19 +109,19 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
                         loading="lazy"
                       />
                     ) : (
-                      <div className="w-16 h-24 rounded-md bg-white/10 border border-white/20 flex items-center justify-center text-white/60 text-xs">
+                      <div className="w-16 h-24 rounded-md bg-white/10 border border-white/20 flex items-center justify-center text-white/60 text-xs text-center px-1">
                         No image
                       </div>
                     )}
                   </div>
-                  <div className="flex-1 min-w-0">
+                  <div className="flex-1 min-w-0 overflow-hidden">
                     <div 
-                      className="text-white font-semibold truncate cursor-pointer hover:text-purple-300 transition-colors" 
+                      className="text-white font-semibold cursor-pointer hover:text-purple-300 transition-colors break-words line-clamp-2" 
                       onClick={handleItemClick}
                     >
                       {item.title}
                     </div>
-                    <div className="text-white/70 text-xs">{item.media_type} · {item.year || '—'}</div>
+                    <div className="text-white/70 text-xs truncate">{item.media_type} · {item.year || '—'}</div>
                     {item.fit_score != null && (
                       <div className="text-xs text-white/70 mt-1"><span className="px-2 py-0.5 bg-emerald-500/20 rounded-full">fit {(item.fit_score*100).toFixed(0)}%</span></div>
                     )}

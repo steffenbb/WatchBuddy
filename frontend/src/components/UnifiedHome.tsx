@@ -79,6 +79,9 @@ export default function UnifiedHome() {
       try {
         setOverviewLoading(true);
         const data = await apiPost("/overview", { user_id: 1 }) as OverviewResponse;
+        console.log('[UnifiedHome] Overview response:', data);
+        console.log('[UnifiedHome] Sections:', data?.sections);
+        console.log('[UnifiedHome] Section types:', data?.sections?.map(s => s.type));
         setOverview(data);
       } catch (err: any) {
         console.error('Failed to load overview:', err);
@@ -227,7 +230,11 @@ export default function UnifiedHome() {
           </div>
 
           {overview.sections.map((section, idx) => (
-            <OverviewModule key={`${section.type}-${idx}`} section={section} />
+            section.type === 'investment_tracker' ? (
+              <InvestmentTrackerModule key={`${section.type}-${idx}`} section={section} />
+            ) : (
+              <OverviewModule key={`${section.type}-${idx}`} section={section} />
+            )
           ))}
         </div>
       ) : !overviewLoading ? (
@@ -244,6 +251,107 @@ export default function UnifiedHome() {
           </button>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function InvestmentTrackerModule({ section }: { section: OverviewSection }) {
+  const data = section.data || {};
+  const continuations = data.items || data.continuations || [];
+  const topGenres = data.top_genres || [];
+
+  return (
+    <div className="bg-white/5 border border-white/10 rounded-2xl p-4 md:p-6 overflow-hidden">
+      <h2 className="text-xl md:text-2xl font-bold text-white mb-4 md:mb-6">🎬 Your Investment Tracker</h2>
+      
+      {/* Stats Grid */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4 mb-6 md:mb-8">
+        <div className="bg-white/10 rounded-xl p-3 md:p-4 border border-white/20">
+          <div className="text-white/60 text-xs md:text-sm mb-1 truncate">Total Watch Time</div>
+          <div className="text-xl md:text-2xl font-bold text-white truncate">{data.total_hours || 0}h</div>
+        </div>
+        <div className="bg-white/10 rounded-xl p-3 md:p-4 border border-white/20">
+          <div className="text-white/60 text-xs md:text-sm mb-1 truncate">Items Watched</div>
+          <div className="text-xl md:text-2xl font-bold text-white truncate">{data.total_items || 0}</div>
+        </div>
+        <div className="bg-white/10 rounded-xl p-3 md:p-4 border border-white/20">
+          <div className="text-white/60 text-xs md:text-sm mb-1 truncate">Quality Score</div>
+          <div className="text-xl md:text-2xl font-bold text-white truncate">{data.quality_score || 0}%</div>
+        </div>
+        <div className="bg-white/10 rounded-xl p-3 md:p-4 border border-white/20">
+          <div className="text-white/60 text-xs md:text-sm mb-1 truncate">Longest Streak</div>
+          <div className="text-xl md:text-2xl font-bold text-white truncate">{data.longest_streak || 0} days</div>
+        </div>
+      </div>
+
+      {/* Top Genres */}
+      {topGenres.length > 0 && (
+        <div className="mb-6 md:mb-8">
+          <h3 className="text-base md:text-lg font-semibold text-white mb-3">Top Genres by Watch Time</h3>
+          <div className="space-y-2">
+            {topGenres.slice(0, 5).map((genre: any, idx: number) => (
+              <div key={idx} className="flex items-center gap-2 md:gap-3 min-w-0">
+                <div className="w-16 md:w-24 text-white/80 text-xs md:text-sm truncate flex-shrink-0">{genre.genre}</div>
+                <div className="flex-1 bg-white/10 rounded-full h-6 overflow-hidden min-w-0">
+                  <div 
+                    className="bg-purple-500 h-full rounded-full flex items-center justify-end pr-2"
+                    style={{ width: `${Math.min(100, (genre.hours / topGenres[0].hours) * 100)}%` }}
+                  >
+                    <span className="text-white text-xs font-semibold whitespace-nowrap">{genre.hours}h</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Continue Watching */}
+      {continuations.length > 0 && (
+        <div className="overflow-hidden -mx-4 md:-mx-6 px-4 md:px-6">
+          <h3 className="text-base md:text-lg font-semibold text-white mb-3">Continue Watching</h3>
+          <div className="overflow-x-auto -mx-4 md:-mx-6 px-4 md:px-6 scrollbar-hide">
+            <div className="flex gap-3 md:gap-4 pb-2">
+              {continuations.map((item: any) => (
+                <div
+                  key={item.trakt_id}
+                  className="group cursor-pointer flex-shrink-0 w-[140px] md:w-[160px]"
+                  onClick={() => {
+                    if (item.tmdb_id) {
+                      window.location.hash = `item/show/${item.tmdb_id}`;
+                    }
+                  }}
+                >
+                  <div className="relative aspect-[2/3] mb-2 rounded-lg overflow-hidden bg-white/10 border border-white/20 group-hover:ring-2 group-hover:ring-purple-500 transition-all">
+                    {item.poster_path ? (
+                      <img
+                        src={`https://image.tmdb.org/t/p/w342${item.poster_path}`}
+                        alt={item.title}
+                        className="w-full h-full object-cover"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-white/40 text-xs text-center p-2">
+                        No Image
+                      </div>
+                    )}
+                    
+                    {item.episodes_behind && (
+                      <div className="absolute top-1 left-1 md:top-2 md:left-2 bg-purple-500/90 text-white text-[10px] md:text-xs px-1.5 md:px-2 py-0.5 md:py-1 rounded-full font-semibold whitespace-nowrap">
+                        {item.episodes_behind} behind
+                      </div>
+                    )}
+                  </div>
+
+                  <h3 className="text-white font-semibold text-xs md:text-sm line-clamp-2 group-hover:text-purple-300 transition-colors break-words">
+                    {item.title}
+                  </h3>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

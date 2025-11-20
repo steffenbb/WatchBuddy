@@ -463,7 +463,23 @@ Output ONLY the rationale sentence, nothing else:"""
             top_valuable = most_valuable[0] if most_valuable else None
             
             # Build payload compatible with frontend Overview module
+            # Convert continuations to items array for grid display
+            items = []
+            for c in continuations_list:
+                items.append({
+                    'trakt_id': c.get('trakt_id'),
+                    'tmdb_id': c.get('tmdb_id'),
+                    'title': c.get('title'),
+                    'media_type': 'show',
+                    'poster_path': c.get('poster_path'),
+                    'year': None,
+                    'score': 0.9,  # High relevance - these are shows they're actively watching
+                    'episodes_behind': c.get('episodes_behind'),
+                    'last_watched_at': c.get('last_watched_at')
+                })
+            
             payload = {
+                'items': items,  # Frontend expects 'items' array
                 'total_hours': round(total_hours, 1),
                 'total_items': len(history),
                 'top_genres': top_genres_formatted,

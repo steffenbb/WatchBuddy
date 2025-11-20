@@ -214,6 +214,7 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                 
                 const handleItemClick = () => {
                   if (it.tmdb_id) {
+                    // Navigate to item page - this will push to history
                     window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
                   }
                 };
