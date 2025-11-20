@@ -537,22 +537,168 @@ class PhaseDetector:
             "show_count": sum(1 for w in cluster_watches if w["media_type"] == "show")
         }
     
+    def _generate_phase_label_with_llm(self, cluster_watches: List[Dict], metrics: Dict) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Generate creative phase label and explanation using LLM with ItemLLMProfile + UserTextProfile.
+        Returns (label, explanation, icon_emoji) or (None, None, None) if LLM fails.
+        """
+        try:
+            import httpx
+            from app.models import ItemLLMProfile, UserTextProfile
+            
+            # 1. Get top 3 items from cluster
+            sorted_watches = sorted(
+                cluster_watches,
+                key=lambda w: ensure_utc(w.get("watched_at")) or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True
+            )[:3]
+            
+            # 2. Fetch ItemLLMProfile for these items
+            item_profiles = []
+            for watch in sorted_watches:
+                # Join with persistent_candidates to filter by tmdb_id and media_type
+                profile = self.db.query(ItemLLMProfile).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id == watch["tmdb_id"],
+                    PersistentCandidate.media_type == watch["media_type"]
+                ).first()
+                
+                if profile and profile.profile_text:
+                    item_profiles.append({
+                        'title': watch['title'],
+                        'profile': profile.profile_text[:400]
+                    })
+            
+            # 3. Get user text profile
+            user_profile = self.db.query(UserTextProfile).filter_by(
+                user_id=self.user_id
+            ).first()
+            
+            user_context = user_profile.summary_text if user_profile else "No profile yet - analyzing viewing patterns"
+            
+            # 4. Build phase context
+            genres_str = ', '.join(metrics.get('dominant_genres', [])[:3])
+            keywords_str = ', '.join(metrics.get('dominant_keywords', [])[:5])
+            
+            # Calculate time span
+            watched_dates = [ensure_utc(w["watched_at"]) for w in cluster_watches if w.get("watched_at")]
+            if len(watched_dates) > 1:
+                days_span = (max(watched_dates) - min(watched_dates)).days
+                start_date = min(watched_dates).strftime('%B %d')
+                end_date = max(watched_dates).strftime('%B %d, %Y')
+            else:
+                days_span = 1
+                start_date = watched_dates[0].strftime('%B %d, %Y') if watched_dates else "Recently"
+                end_date = ""
+            
+            # 5. Build LLM prompt
+            items_text = "\n".join(f"- {item['title']}: {item['profile']}" for item in item_profiles) if item_profiles else "Limited metadata available"
+            
+            prompt = f"""Analyze this viewing phase and generate a creative, personalized label and explanation:
+
+**User Profile**: {user_context}
+
+**Phase Details**:
+- Items Watched: {metrics['item_count']}
+- Time Period: {start_date} to {end_date} ({days_span} days)
+- Cohesion: {metrics['cohesion']:.2f}/1.0 (how related)
+- Watch Density: {metrics['watch_density']:.2f}
+- Genres: {genres_str or 'Mixed'}
+- Themes: {keywords_str or 'Varied'}
+
+**Representative Content**:
+{items_text}
+
+Generate:
+1. Creative phase label (3-6 words)
+2. Personalized explanation (1-2 sentences why user watched this)
+3. Appropriate emoji
+
+**CRITICAL**: Output ONLY valid JSON. No markdown, no explanation, just pure JSON:
+{{"label": "Creative Phase Name", "explanation": "Why user watched this", "icon": "🎬"}}
+"""
+            
+            # 6. Call LLM
+            with httpx.Client() as client:
+                resp = client.post(
+                    "http://ollama:11434/api/generate",
+                    json={
+                        "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
+                        "prompt": prompt,
+                        "options": {"temperature": 0.7, "num_predict": 150, "num_ctx": 4096},
+                        "keep_alive": "24h",
+                    },
+                    timeout=60.0,
+                )
+            
+            if resp.status_code != 200:
+                logger.warning(f"[PhaseDetector] LLM request failed: {resp.status_code}")
+                return None, None, None
+            
+            # 7. Parse response
+            data = resp.json()
+            output = data.get("response", "").strip()
+            
+            # Clean JSON
+            if "```json" in output:
+                output = output.split("```json")[1].split("```")[0].strip()
+            elif "```" in output:
+                output = output.split("```")[1].split("```")[0].strip()
+            output = output.strip('"\'""„" \n\r')
+            
+            # Parse
+            import json as _json
+            result = _json.loads(output)
+            
+            label = result.get('label', '').strip()
+            explanation = result.get('explanation', '').strip()
+            icon = result.get('icon', '🎬').strip()
+            
+            # Validate
+            if label and 3 <= len(label) <= 80 and explanation and len(explanation) >= 10:
+                if len(label) > 60:
+                    label = label[:57] + "..."
+                if len(explanation) > 200:
+                    explanation = explanation[:197] + "..."
+                
+                logger.info(f"[PhaseDetector] LLM generated: '{label}'")
+                return label, explanation, icon
+            else:
+                logger.warning(f"[PhaseDetector] LLM validation failed")
+                return None, None, None
+        
+        except Exception as e:
+            logger.warning(f"[PhaseDetector] LLM phase label failed: {e}")
+            return None, None, None
+    
     def _generate_phase_label(self, cluster_watches: List[Dict], metrics: Dict) -> Tuple[str, str]:
         """
         Generate AI-powered dynamic label and emoji for phase.
         Returns (label, icon).
+        Enhanced to use LLM first, with fallback to rule-based method.
         """
+        # Try LLM-based generation first
+        llm_label, llm_explanation, llm_icon = self._generate_phase_label_with_llm(cluster_watches, metrics)
+        
+        if llm_label and llm_explanation:
+            # Store explanation for later use
+            metrics['_llm_explanation'] = llm_explanation
+            return llm_label, llm_icon
+        
+        # Fallback to rule-based generation
+        logger.info("[PhaseDetector] Using rule-based phase label (LLM fallback)")
+        
         # Franchise phase
         if metrics["franchise_dominance"] >= FRANCHISE_DOMINANCE_THRESHOLD and metrics["dominant_collection_name"]:
             label = f"{metrics['dominant_collection_name']} Phase"
-            icon = "🎬"  # Generic franchise icon
+            icon = "🎬"
             return label, icon
 
-        # Use dynamic naming for non-franchise phases (gracefully handle absence)
+        # Use dynamic naming for non-franchise phases
         try:
             label = self._generate_dynamic_phase_name(cluster_watches, metrics)
         except Exception:
-            # Fallback: genre-based label
             genres = metrics.get("dominant_genres") or []
             if genres:
                 label = f"{genres[0].title()} Phase"
@@ -576,14 +722,18 @@ class PhaseDetector:
     def _generate_explanation(self, cluster_watches: List[Dict], metrics: Dict, label: str) -> str:
         """
         Generate "Why this phase?" explanation text.
-            Uses intelligent analysis of content patterns.
+        Uses LLM explanation if available, otherwise falls back to template.
         """
+        # Check if we have LLM-generated explanation
+        if '_llm_explanation' in metrics:
+            return metrics['_llm_explanation']
+        
+        # Fallback to rule-based explanation
         item_count = metrics["item_count"]
         genres = metrics["dominant_genres"]
         keywords = metrics["dominant_keywords"][:3]
         
         # Calculate days span
-        # Normalize to timezone-aware UTC to safely compute spans
         watched_dates = [ensure_utc(w["watched_at"]) for w in cluster_watches if w.get("watched_at")]
         days_span = (max(watched_dates) - min(watched_dates)).days if len(watched_dates) > 1 else 1
         
@@ -873,13 +1023,146 @@ class PhaseDetector:
     
     def predict_next_phase(self, lookback_days: int = 42) -> Optional[Dict]:
         """
-        Public method to predict the next phase based on recent 4-6 weeks.
-        Analyzes viewing patterns and extrapolates next likely phase.
+        Predict the next phase using pairwise judgments (if available) + watch history fallback.
+        
+        Strategy:
+        1. Try pairwise judgment analysis (recent training sessions)
+        2. Fall back to watch history pattern analysis
+        3. Use BGE embeddings to find candidate clusters
+        4. Generate prediction with LLM
         
         Returns dict with prediction details (not a persisted UserPhase).
         """
-        logger.info(f"[PhaseDetector] Predicting next phase for user {self.user_id} (lookback={lookback_days} days)")
+        logger.info(f"[PhaseDetector] Predicting next phase for user {self.user_id}")
         
+        # Try pairwise judgment prediction first
+        pairwise_prediction = self._predict_from_pairwise_judgments()
+        
+        if pairwise_prediction:
+            logger.info("[PhaseDetector] Using pairwise judgment-based prediction")
+            return pairwise_prediction
+        
+        # Fall back to watch history analysis
+        logger.info("[PhaseDetector] Using watch history-based prediction (pairwise fallback)")
+        return self._predict_from_watch_history(lookback_days)
+    
+    def _predict_from_pairwise_judgments(self) -> Optional[Dict]:
+        """
+        Predict next phase from recent pairwise training sessions.
+        Analyzes user preferences revealed through A/B comparisons.
+        """
+        try:
+            from app.models import PairwiseTrainingSession, PairwiseJudgment
+            
+            # Get recent training sessions (last 30 days)
+            cutoff = utc_now() - timedelta(days=30)
+            sessions = self.db.query(PairwiseTrainingSession).filter(
+                PairwiseTrainingSession.user_id == self.user_id,
+                PairwiseTrainingSession.updated_at >= cutoff
+            ).order_by(PairwiseTrainingSession.updated_at.desc()).limit(5).all()
+            
+            if not sessions:
+                logger.debug("[PhaseDetector] No recent pairwise sessions")
+                return None
+            
+            # Extract preference patterns from judgments
+            preferred_genres = []
+            preferred_keywords = []
+            preferred_tmdb_ids = []
+            
+            for session in sessions:
+                judgments = self.db.query(PairwiseJudgment).filter_by(
+                    session_id=session.id
+                ).all()
+                
+                for judgment in judgments:
+                    # Determine winner
+                    if judgment.choice == 'A':
+                        winner_id = judgment.candidate_a_tmdb_id
+                        winner_type = judgment.candidate_a_media_type
+                    elif judgment.choice == 'B':
+                        winner_id = judgment.candidate_b_tmdb_id
+                        winner_type = judgment.candidate_b_media_type
+                    else:
+                        continue
+                    
+                    preferred_tmdb_ids.append((winner_id, winner_type))
+                    
+                    # Get winner metadata
+                    winner = self.db.query(PersistentCandidate).filter(
+                        PersistentCandidate.tmdb_id == winner_id,
+                        PersistentCandidate.media_type == winner_type
+                    ).first()
+                    
+                    if winner:
+                        genres = self._parse_json(winner.genres)
+                        keywords = self._parse_json(winner.keywords)
+                        if genres:
+                            preferred_genres.extend(genres)
+                        if keywords:
+                            preferred_keywords.extend(keywords)
+            
+            if len(preferred_tmdb_ids) < 3:
+                logger.debug("[PhaseDetector] Insufficient pairwise judgments")
+                return None
+            
+            # Analyze preference patterns
+            genre_counts = Counter(preferred_genres)
+            keyword_counts = Counter(preferred_keywords)
+            
+            top_genres = [g[0] for g in genre_counts.most_common(3)]
+            top_keywords = [k[0] for k in keyword_counts.most_common(5)]
+            
+            # Find similar unwatched candidates
+            candidate_pool = self.db.query(PersistentCandidate).filter(
+                PersistentCandidate.active == True
+            ).limit(200).all()
+            
+            # Score candidates using BGE multi-vector search
+            from app.services.ai_engine.dual_index_search import hybrid_search
+            
+            scored_candidates = hybrid_search(
+                self.db,
+                self.user_id,
+                candidate_pool,
+                top_k=20,
+                bge_weight=0.8,  # Higher weight for pairwise (more reliable signal)
+                faiss_weight=0.2
+            )
+            
+            if not scored_candidates:
+                return None
+            
+            # Generate prediction
+            prediction = {
+                'label': self._generate_prediction_label(top_genres, top_keywords),
+                'confidence': 0.75,  # High confidence from pairwise
+                'top_genres': top_genres,
+                'top_keywords': top_keywords,
+                'recommended_items': [
+                    {
+                        'tmdb_id': item['candidate'].tmdb_id,
+                        'title': item['candidate'].title,
+                        'poster_path': item['candidate'].poster_path,
+                        'score': item['score'],
+                        'source': item['source']
+                    }
+                    for item in scored_candidates[:10]
+                ],
+                'explanation': f"Based on your recent preferences, you're showing interest in {', '.join(top_genres[:2])} content with themes like {', '.join(top_keywords[:3])}.",
+                'source': 'pairwise'
+            }
+            
+            return prediction
+        
+        except Exception as e:
+            logger.warning(f"[PhaseDetector] Pairwise prediction failed: {e}")
+            return None
+    
+    def _predict_from_watch_history(self, lookback_days: int = 42) -> Optional[Dict]:
+        """
+        Predict next phase from watch history patterns (fallback method).
+        """
         cutoff = utc_now() - timedelta(days=lookback_days)
         recent_watches = self.db.query(TraktWatchHistory).filter(
             TraktWatchHistory.user_id == self.user_id,
@@ -887,10 +1170,10 @@ class PhaseDetector:
         ).order_by(TraktWatchHistory.watched_at.desc()).all()
         
         if len(recent_watches) < 5:
-            logger.debug(f"[PhaseDetector] Insufficient recent watches for prediction ({len(recent_watches)})")
+            logger.debug(f"[PhaseDetector] Insufficient recent watches ({len(recent_watches)})")
             return None
         
-        # Convert model objects to dicts for embedding loader
+        # Convert to dicts
         watch_data_raw = [
             {
                 'trakt_id': w.trakt_id,
@@ -898,7 +1181,8 @@ class PhaseDetector:
                 'title': w.title,
                 'media_type': w.media_type,
                 'watched_at': w.watched_at,
-                'genres': w.genres
+                'genres': w.genres,
+                'keywords': w.keywords
             }
             for w in recent_watches
         ]
@@ -1033,3 +1317,24 @@ class PhaseDetector:
             UserPhase.user_id == self.user_id,
             UserPhase.end_at.isnot(None)
         ).order_by(UserPhase.start_at.desc()).limit(limit).all()
+    
+    def _generate_prediction_label(self, genres: List[str], keywords: List[str]) -> str:
+        """Generate phase prediction label from genres and keywords."""
+        if not genres and not keywords:
+            return "Emerging Viewing Phase"
+        
+        # Prefer descriptive keywords over generic genres
+        if keywords:
+            first_kw = keywords[0].title()
+            generic = ["Action", "Drama", "Story", "Film", "Movie", "Show"]
+            if first_kw not in generic:
+                return f"Emerging {first_kw} Phase"
+        
+        # Fall back to genre
+        if genres:
+            if len(genres) == 1:
+                return f"Emerging {genres[0].title()} Phase"
+            else:
+                return f"{genres[0].title()} & {genres[1].title()} Exploration"
+        
+        return "Next Viewing Phase"

@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { addItemsToIndividualList, searchIndividualList, SearchResult } from "../../api/individualLists";
 import { useToast } from "../ToastProvider";
-import HoverInfoCard from "../HoverInfoCard";
 
 export default function SearchModal({ listId, onClose, onAdded }: { listId: number; onClose: () => void; onAdded: () => void }) {
   const [q, setQ] = useState("");
@@ -146,26 +145,22 @@ export default function SearchModal({ listId, onClose, onAdded }: { listId: numb
               {results.map(r => {
                 const key = `${r.media_type}:${r.tmdb_id}`;
                 const isSel = !!selected[key];
+                const handleItemClick = () => {
+                  if (r.tmdb_id) {
+                    window.location.hash = `item/${r.media_type}/${r.tmdb_id}`;
+                  }
+                };
                 return (
-                  <HoverInfoCard
-                    key={key}
-                    tmdbId={r.tmdb_id}
-                    mediaType={r.media_type}
-                    fallbackInfo={{
-                      title: r.title,
-                      overview: r.overview,
-                      media_type: r.media_type,
-                      release_date: r.year ? `${r.year}-01-01` : null
-                    }}
-                  >
-                    <label className={`flex gap-3 p-3 rounded-xl border ${isSel? 'border-emerald-400 bg-emerald-400/10':'border-white/20 bg-white/5'} cursor-pointer hover:bg-white/10`}>
-                      <input type="checkbox" checked={isSel} onChange={(e)=>setSelected(prev=>({...prev,[key]: e.target.checked}))} />
+                  <div key={key} className="relative">
+                    <label className={`flex gap-3 p-3 rounded-xl border ${isSel? 'border-emerald-400 bg-emerald-400/10':'border-white/20 bg-white/5'} cursor-pointer hover:bg-white/10 hover:ring-2 hover:ring-purple-500 transition`}>
+                      <input type="checkbox" checked={isSel} onChange={(e)=>setSelected(prev=>({...prev,[key]: e.target.checked}))} onClick={(e) => e.stopPropagation()} />
                       {r.poster_path ? (
                         <img
                           src={`https://image.tmdb.org/t/p/w154${r.poster_path}`}
                           alt={r.title}
                           className="w-12 h-18 object-cover rounded-md border border-white/20"
                           loading="lazy"
+                          onClick={handleItemClick}
                         />
                       ) : (
                         <div className="w-12 h-18 rounded-md bg-white/10 border border-white/20 flex items-center justify-center text-white/60 text-[10px]">
@@ -173,7 +168,7 @@ export default function SearchModal({ listId, onClose, onAdded }: { listId: numb
                         </div>
                       )}
                       <div className="flex-1 min-w-0">
-                        <div className="text-white font-semibold truncate">{r.title}</div>
+                        <div className="text-white font-semibold truncate cursor-pointer hover:text-purple-300 transition-colors" onClick={handleItemClick}>{r.title}</div>
                         <div className="text-white/70 text-xs truncate">{r.media_type} · {r.year || '—'}</div>
                         <div className="text-white/60 text-xs mt-1 line-clamp-2">{r.overview || ''}</div>
                         {(r.fit_score != null || r.relevance_score != null) && (
@@ -184,7 +179,7 @@ export default function SearchModal({ listId, onClose, onAdded }: { listId: numb
                         )}
                       </div>
                     </label>
-                  </HoverInfoCard>
+                  </div>
                 );
               })}
             </div>

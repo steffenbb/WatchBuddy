@@ -25,10 +25,12 @@ from app.models import (
 from app.services.scoring_engine import ScoringEngine
 from app.services.trakt_client import TraktClient
 from app.services.tmdb_client import fetch_tmdb_metadata, fetch_tmdb_upcoming
-from app.models import MediaMetadata
+from app.models import MediaMetadata, ItemLLMProfile, UserTextProfile
 from app.utils.timezone import utc_now
 from app.core.redis_client import get_redis_sync
 from sqlalchemy.exc import IntegrityError
+import httpx
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,160 @@ class OverviewService:
         self.scoring_engine = ScoringEngine()
         self.trakt_client = TraktClient(user_id=user_id)
         self.redis = get_redis_sync()
+    
+    async def _generate_llm_rationales_batch(
+        self,
+        db: Session,
+        items: List[Tuple[Any, float, Dict[str, float]]],
+        context: str = "recommendation"
+    ) -> List[str]:
+        """Generate multiple rationales in parallel for efficiency.
+        
+        Args:
+            db: Database session
+            items: List of (candidate, score, breakdown) tuples
+            context: Context string
+            
+        Returns:
+            List of rationale strings
+        """
+        tasks = []
+        for candidate, score, breakdown in items:
+            tasks.append(self._generate_llm_rationale(db, candidate, score, breakdown, context))
+        
+        # Run all LLM calls in parallel (but with timeout)
+        try:
+            rationales = await asyncio.gather(*tasks, return_exceptions=True)
+            # Convert exceptions to template fallbacks
+            result = []
+            for i, r in enumerate(rationales):
+                if isinstance(r, Exception):
+                    candidate, score, breakdown = items[i]
+                    result.append(self._generate_template_rationale(score, breakdown, context))
+                else:
+                    result.append(r)
+            return result
+        except Exception as e:
+            logger.warning(f"Batch rationale generation failed: {e}")
+            return [self._generate_template_rationale(s, b, context) for _, s, b in items]
+    
+    async def _generate_llm_rationale(
+        self, 
+        db: Session, 
+        candidate: Any, 
+        score: float, 
+        breakdown: Dict[str, float],
+        context: str = "recommendation"
+    ) -> str:
+        """Generate personalized rationale using LLM with ItemLLMProfile and UserTextProfile.
+        
+        Args:
+            db: Database session
+            candidate: PersistentCandidate object
+            score: Final match score (0-1)
+            breakdown: Score breakdown dict with aspect scores
+            context: Context string (recommendation, trending, upcoming)
+            
+        Returns:
+            Personalized rationale string or fallback template
+        """
+        try:
+            # Get ItemLLMProfile for the candidate
+            item_profile = db.query(ItemLLMProfile).filter_by(
+                candidate_id=candidate.id
+            ).first()
+            
+            # Get UserTextProfile
+            user_profile = db.query(UserTextProfile).filter_by(user_id=self.user_id).first()
+            
+            # If we don't have profiles, use template fallback
+            if not item_profile or not user_profile:
+                return self._generate_template_rationale(score, breakdown, context)
+            
+            # Build LLM prompt
+            top_aspects = sorted(breakdown.items(), key=lambda x: x[1], reverse=True)[:2]
+            aspect_str = ", ".join([f"{k}: {v:.0%}" for k, v in top_aspects if v > 0.5])
+            
+            prompt = f"""Write a single short sentence (10-15 words) explaining why this {candidate.media_type} is recommended.
+
+User Profile: {user_profile.summary_text[:200]}
+
+Item: {candidate.title} ({candidate.year})
+{item_profile.profile_text[:300]}
+
+Match score: {score:.0%}
+Top matching aspects: {aspect_str}
+
+Write as if speaking directly to the user. Be specific about WHY it matches (mention actors, themes, style, etc. from the item profile). Keep it natural and conversational.
+
+Example good rationales:
+- "Features Park Chan-wook's signature visual style you loved in Oldboy"
+- "Matches your taste for slow-burn psychological thrillers with unreliable narrators"
+- "Stars Mads Mikkelsen in the Nordic noir atmosphere you enjoy"
+
+Output ONLY the rationale sentence, nothing else:"""
+
+            # Call LLM
+            logger.info(f"[OverviewService] Generating LLM rationale for {candidate.media_type}/{candidate.tmdb_id}, context={context}, prompt_length={len(prompt)}")
+            timeout = httpx.Timeout(60.0, connect=5.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                payload = {
+                    "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"temperature": 0.7, "num_ctx": 4096},
+                    "keep_alive": "24h"
+                }
+                
+                resp = await client.post("http://ollama:11434/api/generate", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                raw = data.get("response", "").strip()
+                
+                if raw and len(raw) > 10:
+                    # Clean up the response
+                    rationale = raw.strip('"').strip()
+                    logger.info(f"[OverviewService] LLM rationale generated: length={len(rationale)}, preview={rationale[:80]}")
+                    # No artificial cap - let frontend handle display
+                    return rationale
+                    
+        except httpx.TimeoutException as e:
+            logger.error(f"[LLM Rationale] Timeout (60s) for {candidate.media_type}/{candidate.tmdb_id}: {e}")
+        except Exception as e:
+            logger.error(f"[LLM Rationale] Failed for {candidate.media_type}/{candidate.tmdb_id}: {type(e).__name__}: {e}")
+        
+        # Fallback to template
+        return self._generate_template_rationale(score, breakdown, context)
+    
+    def _generate_template_rationale(
+        self, 
+        score: float, 
+        breakdown: Dict[str, float],
+        context: str = "recommendation"
+    ) -> str:
+        """Generate template-based rationale as fallback."""
+        rationale_parts = []
+        
+        if breakdown.get('keywords', 0) > 0.7:
+            rationale_parts.append("strong thematic match")
+        if breakdown.get('people', 0) > 0.7:
+            if context == "trending":
+                rationale_parts.append("features cast you love")
+            else:
+                rationale_parts.append("features actors/directors you love")
+        if breakdown.get('brands', 0) > 0.7:
+            rationale_parts.append("from studios/networks you enjoy")
+        if breakdown.get('title', 0) > 0.7:
+            rationale_parts.append("similar concept to your favorites")
+        
+        base = f"{round(score * 100)}% match"
+        if context == "trending":
+            base += " • Trending now"
+        
+        if rationale_parts:
+            return f"{base} ({', '.join(rationale_parts)})"
+        else:
+            return f"{base} with your taste"
     
     async def compute_all_modules(self, db: Session, mood_overrides: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         """
@@ -213,11 +369,9 @@ class OverviewService:
                     current_streak = 1
             longest_streak = max(longest_streak, current_streak) if watch_dates else 0
             
-            # Watch time this week
-            week_ago = utc_now() - timedelta(days=7)
-            # Make week_ago naive for comparison with database timestamps
-            week_ago_naive = week_ago.replace(tzinfo=None) if week_ago.tzinfo else week_ago
-            this_week = [h for h in history if h.watched_at >= week_ago_naive]
+            # Watch time this week (use naive datetime to match DB column)
+            week_ago = datetime.utcnow() - timedelta(days=7)
+            this_week = [h for h in history if h.watched_at >= week_ago]
             week_minutes = sum(h.runtime or 0 for h in this_week)
             week_hours = week_minutes / 60.0
             
@@ -464,23 +618,73 @@ class OverviewService:
             
             logger.info(f"[NewShows] Processing {len(candidates)} unwatched candidates")
             
-            # Convert to scoring format
-            candidates_dict = [self._candidate_to_dict(c) for c in candidates]
-            
-            # Apply mood overrides to filters
-            filters = self._build_filters_from_mood(mood_overrides) if mood_overrides else {}
-            
-            # Score using existing FAISS + ScoringEngine
-            # Use 'discovery_overview' type for overview-specific scoring (doesn't penalize lack of history)
-            user_obj = {'id': self.user_id}
-            scored = self.scoring_engine.score_candidates(
-                user=user_obj,
-                candidates=candidates_dict,
-                list_type='discovery_overview',  # Special mode for overview modules
-                explore_factor=0.20,  # Balance between taste match and discovery
-                item_limit=50,
-                filters=filters
-            )
+            # Try BGE multi-vector hybrid search first
+            try:
+                from app.services.ai_engine.dual_index_search import hybrid_search
+                
+                logger.info("[NewShows] Using BGE multi-vector hybrid search")
+                scored_hybrid = hybrid_search(
+                    db,
+                    self.user_id,
+                    candidates,
+                    top_k=50,
+                    bge_weight=0.7,
+                    faiss_weight=0.3
+                )
+                
+                if scored_hybrid:
+                    # Format hybrid results with LLM rationales
+                    scored = []
+                    for item in scored_hybrid:
+                        candidate = item['candidate']
+                        score = item['score']
+                        breakdown = item['score_breakdown']
+                        
+                        # Generate personalized LLM rationale
+                        rationale = await self._generate_llm_rationale(
+                            db, candidate, score, breakdown, context="recommendation"
+                        )
+                        
+                        scored.append({
+                            'trakt_id': candidate.trakt_id,
+                            'tmdb_id': candidate.tmdb_id,
+                            'title': candidate.title,
+                            'media_type': candidate.media_type,
+                            'year': candidate.year,
+                            'overview': candidate.overview,
+                            'poster_path': candidate.poster_path,
+                            'backdrop_path': candidate.backdrop_path,
+                            'genres': candidate.genres,
+                            'vote_average': candidate.vote_average,
+                            'release_date': candidate.release_date,
+                            'final_score': score,
+                            'score': score,
+                            'match_percentage': round(score * 100),
+                            'rationale': rationale,
+                            'score_breakdown': breakdown,
+                            'search_method': item['source']
+                        })
+                    
+                    logger.info(f"[NewShows] BGE hybrid search returned {len(scored)} results")
+                else:
+                    raise Exception("Hybrid search returned no results")
+                    
+            except Exception as e:
+                logger.warning(f"[NewShows] BGE hybrid search failed: {e}, falling back to ScoringEngine")
+                
+                # Fallback to existing FAISS + ScoringEngine
+                candidates_dict = [self._candidate_to_dict(c) for c in candidates]
+                filters = self._build_filters_from_mood(mood_overrides) if mood_overrides else {}
+                
+                user_obj = {'id': self.user_id}
+                scored = self.scoring_engine.score_candidates(
+                    user=user_obj,
+                    candidates=candidates_dict,
+                    list_type='discovery_overview',
+                    explore_factor=0.20,
+                    item_limit=50,
+                    filters=filters
+                )
             
             # Attempt to backfill missing images for scored items (best-effort)
             await self._fill_missing_images_for_items(db, scored)
@@ -584,31 +788,72 @@ class OverviewService:
             # NOTE: Don't commit here - we're inside a savepoint in compute_all_modules
             # Metadata updates will be committed when the outer transaction commits
             
-            # Convert to scoring format
-            candidates_dict = [self._candidate_to_dict(c) for c in candidates]
+            logger.info(f"[Trending] Found {len(candidates)} candidates to score")
             
-            logger.info(f"[Trending] Found {len(candidates_dict)} candidates to score")
-            if candidates_dict:
-                logger.info(f"[Trending] Sample candidate: {candidates_dict[0].get('title', 'NO_TITLE')} (trakt:{candidates_dict[0].get('trakt_id')})")
-            
-            # Apply mood overrides
-            filters = self._build_filters_from_mood(mood_overrides) if mood_overrides else {}
-            
-            # Score: 70% taste match + 30% trending popularity
-            user_obj = {'id': self.user_id}
-            scored = self.scoring_engine.score_candidates(
-                user=user_obj,
-                candidates=candidates_dict,
-                list_type='discovery_overview',  # Use discovery-focused scoring
-                explore_factor=0.15,  # Less discovery, more taste match
-                item_limit=40,
-                filters=filters
-            )
-            
-            logger.info(f"[Trending] After scoring: {len(scored)} items")
-            if scored:
-                sample = scored[0]
-                logger.info(f"[Trending] Scored sample: title={sample.get('title')}, trakt_id={sample.get('trakt_id')}, tmdb_id={sample.get('tmdb_id')}")
+            # Try BGE multi-vector hybrid search
+            try:
+                from app.services.ai_engine.dual_index_search import hybrid_search
+                
+                logger.info("[Trending] Using BGE multi-vector hybrid search")
+                scored_hybrid = hybrid_search(
+                    db,
+                    self.user_id,
+                    candidates,
+                    top_k=40,
+                    bge_weight=0.7,
+                    faiss_weight=0.3
+                )
+                
+                if scored_hybrid:
+                    scored = []
+                    for item in scored_hybrid:
+                        candidate = item['candidate']
+                        score = item['score']
+                        breakdown = item['score_breakdown']
+                        
+                        # Generate personalized LLM rationale for trending items
+                        rationale = await self._generate_llm_rationale(
+                            db, candidate, score, breakdown, context="trending"
+                        )
+                        
+                        scored.append({
+                            'trakt_id': candidate.trakt_id,
+                            'tmdb_id': candidate.tmdb_id,
+                            'title': candidate.title,
+                            'media_type': candidate.media_type,
+                            'year': candidate.year,
+                            'overview': candidate.overview,
+                            'poster_path': candidate.poster_path,
+                            'backdrop_path': candidate.backdrop_path,
+                            'genres': candidate.genres,
+                            'vote_average': candidate.vote_average,
+                            'final_score': score,
+                            'score': score,
+                            'rationale': rationale,
+                            'trending_badge': '🔥 Trending',
+                            'search_method': item['source']
+                        })
+                    
+                    logger.info(f"[Trending] BGE hybrid search returned {len(scored)} results")
+                else:
+                    raise Exception("Hybrid search returned no results")
+                    
+            except Exception as e:
+                logger.warning(f"[Trending] BGE hybrid search failed: {e}, falling back to ScoringEngine")
+                
+                # Fallback to existing scoring
+                candidates_dict = [self._candidate_to_dict(c) for c in candidates]
+                filters = self._build_filters_from_mood(mood_overrides) if mood_overrides else {}
+                
+                user_obj = {'id': self.user_id}
+                scored = self.scoring_engine.score_candidates(
+                    user=user_obj,
+                    candidates=candidates_dict,
+                    list_type='discovery_overview',
+                    explore_factor=0.15,
+                    item_limit=40,
+                    filters=filters
+                )
 
             # Best-effort image backfill for missing posters/backdrops
             await self._fill_missing_images_for_items(db, scored)
@@ -786,13 +1031,132 @@ class OverviewService:
             
             logger.info(f"[Upcoming] Processing {len(candidates)} unwatched candidates")
             
-            # Convert to scoring format
-            candidates_dict = [self._candidate_to_dict(c) for c in candidates]
-            
-            # Filter to future releases only
+            # Filter to future releases only (do this before scoring)
             today = utc_now().date()
+            future_candidates = []
+            for c in candidates:
+                if c.release_date:
+                    try:
+                        # Parse release date (YYYY-MM-DD or YYYY)
+                        if len(c.release_date) >= 10:
+                            release_date = datetime.strptime(c.release_date[:10], '%Y-%m-%d').date()
+                        elif len(c.release_date) == 4:
+                            release_date = datetime.strptime(c.release_date, '%Y').date()
+                        else:
+                            continue
+                        
+                        # Keep if releases within next 90 days
+                        days_until = (release_date - today).days
+                        if -7 <= days_until <= 90:  # Include recent releases (last week)
+                            future_candidates.append(c)
+                    except:
+                        pass
+            
+            candidates = future_candidates
+            if not candidates:
+                return {'items': [], 'message': 'No upcoming releases found in the next 90 days'}
+            
+            # Try BGE multi-vector hybrid search
+            try:
+                from app.services.ai_engine.dual_index_search import hybrid_search
+                
+                logger.info("[Upcoming] Using BGE multi-vector hybrid search")
+                scored_hybrid = hybrid_search(
+                    db,
+                    self.user_id,
+                    candidates,
+                    top_k=30,
+                    bge_weight=0.7,
+                    faiss_weight=0.3
+                )
+                
+                if scored_hybrid:
+                    scored = []
+                    for item in scored_hybrid:
+                        candidate = item['candidate']
+                        score = item['score']
+                        breakdown = item['score_breakdown']
+                        
+                        # Calculate days until release
+                        days_until_release = None
+                        if candidate.release_date:
+                            try:
+                                if len(candidate.release_date) >= 10:
+                                    release_date = datetime.strptime(candidate.release_date[:10], '%Y-%m-%d').date()
+                                elif len(candidate.release_date) == 4:
+                                    release_date = datetime.strptime(candidate.release_date, '%Y').date()
+                                else:
+                                    release_date = None
+                                
+                                if release_date:
+                                    days_until_release = (release_date - today).days
+                            except:
+                                pass
+                        
+                        # Generate personalized LLM rationale for upcoming items
+                        rationale = await self._generate_llm_rationale(
+                            db, candidate, score, breakdown, context="upcoming"
+                        )
+                        
+                        if days_until_release is not None:
+                            if days_until_release < 0:
+                                release_badge = "Just Released"
+                            elif days_until_release == 0:
+                                release_badge = "Out Today!"
+                            elif days_until_release <= 7:
+                                release_badge = "This Week"
+                            elif days_until_release <= 30:
+                                release_badge = "This Month"
+                            else:
+                                release_badge = f"In {days_until_release} days"
+                        else:
+                            release_badge = "Coming Soon"
+                        
+                        scored.append({
+                            'trakt_id': candidate.trakt_id,
+                            'tmdb_id': candidate.tmdb_id,
+                            'title': candidate.title,
+                            'media_type': candidate.media_type,
+                            'year': candidate.year,
+                            'overview': candidate.overview,
+                            'poster_path': candidate.poster_path,
+                            'backdrop_path': candidate.backdrop_path,
+                            'genres': candidate.genres,
+                            'vote_average': candidate.vote_average,
+                            'release_date': candidate.release_date,
+                            'final_score': score,
+                            'score': score,
+                            'rationale': rationale,
+                            'release_badge': release_badge,
+                            'days_until_release': days_until_release,
+                            'search_method': item['source']
+                        })
+                    
+                    logger.info(f"[Upcoming] BGE hybrid search returned {len(scored)} results")
+                else:
+                    raise Exception("Hybrid search returned no results")
+                    
+            except Exception as e:
+                logger.warning(f"[Upcoming] BGE hybrid search failed: {e}, falling back to ScoringEngine")
+                
+                # Fallback to existing scoring
+                candidates_dict = [self._candidate_to_dict(c) for c in candidates]
+                filters = self._build_filters_from_mood(mood_overrides) if mood_overrides else {}
+                
+                user_obj = {'id': self.user_id}
+                scored = self.scoring_engine.score_candidates(
+                    user=user_obj,
+                    candidates=candidates_dict,
+                    list_type='discovery_overview',
+                    explore_factor=0.20,
+                    item_limit=30,
+                    filters=filters
+                )
+                
+            
+            # Filter to only future releases (works for both BGE and fallback paths)
             future_only = []
-            for c in candidates_dict:
+            for c in scored:
                 rd = c.get('release_date')
                 if not rd:
                     continue
@@ -880,17 +1244,154 @@ class OverviewService:
             logger.error(f"Failed to compute upcoming: {e}", exc_info=True)
             return {'items': [], 'error': str(e)}
     
-    def _compute_module_priorities(self, db: Session, modules: Dict[str, Dict]) -> Dict[str, float]:
+    def _compute_module_priorities_with_llm(self, db: Session, modules: Dict[str, Dict]) -> Dict[str, float]:
         """
-        Compute priority scores for dynamic section reordering.
+        Use LLM with UserTextProfile to dynamically reorder Overview modules.
+        Falls back to rule-based priorities if LLM fails.
+        """
+        try:
+            import httpx
+            from app.models import UserTextProfile
+            
+            # Get user text profile
+            user_profile = db.query(UserTextProfile).filter_by(
+                user_id=self.user_id
+            ).first()
+            
+            if not user_profile:
+                logger.debug("[OverviewService] No UserTextProfile, using rule-based priorities")
+                return self._compute_module_priorities_fallback(modules)
+            
+            # Extract module metadata
+            investment_data = modules.get('investment_tracker', {})
+            new_shows_data = modules.get('new_shows', {})
+            trending_data = modules.get('trending', {})
+            upcoming_data = modules.get('upcoming', {})
+            
+            recent_activity = investment_data.get('week_hours', 0)
+            continuations_count = len(investment_data.get('continuations', []))
+            new_shows_count = len(new_shows_data.get('items', []))
+            trending_count = len(trending_data.get('items', []))
+            upcoming_count = len(upcoming_data.get('items', []))
+            
+            # Build LLM prompt
+            prompt = f"""Given this user's current viewing state:
+
+**User Profile**: {user_profile.summary_text}
+
+**Recent Activity**:
+- Watch hours this week: {recent_activity:.1f}
+- Unfinished shows with new episodes: {continuations_count}
+- Personalized new releases available: {new_shows_count}
+- Trending items matched to user: {trending_count}
+- Upcoming releases user will like: {upcoming_count}
+
+**Available Overview Modules**:
+1. Investment Tracker - show stats, continuations, watch history analysis
+2. New Shows & Movies - recent releases matching user taste
+3. Trending Now - popular content filtered by user preferences  
+4. Coming Soon - upcoming releases the user will like
+
+Rank these modules 1-4 based on what would be MOST valuable to this user RIGHT NOW.
+
+Consider:
+- Are they actively binging? → Prioritize Investment Tracker
+- Do they have backlogs? → Prioritize Investment Tracker
+- Are they exploring/discovering? → Prioritize New Shows/Trending
+- Low recent activity? → Prioritize New Shows to re-engage
+
+**CRITICAL**: Output ONLY a valid JSON array. No markdown, no explanation:
+["module_name_1", "module_name_2", "module_name_3", "module_name_4"]
+
+Use EXACT names: "investment_tracker", "new_shows", "trending", "upcoming"
+"""
+            
+            # Call LLM
+            with httpx.Client() as client:
+                resp = client.post(
+                    "http://ollama:11434/api/generate",
+                    json={
+                        "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
+                        "prompt": prompt,
+                        "options": {"temperature": 0.3, "num_predict": 100, "num_ctx": 4096},
+                        "keep_alive": "24h",
+                    },
+                    timeout=60.0,
+                )
+            
+            if resp.status_code != 200:
+                logger.warning(f"[OverviewService] LLM request failed: {resp.status_code}")
+                return self._compute_module_priorities_fallback(modules)
+            
+            # Parse response
+            data = resp.json()
+            output = data.get("response", "").strip()
+            logger.debug(f"[OverviewService] Raw LLM output: {output[:200]}")
+            
+            # Clean JSON - extract only the array
+            if "```json" in output:
+                output = output.split("```json")[1].split("```")[0].strip()
+            elif "```" in output:
+                output = output.split("```")[1].split("```")[0].strip()
+            
+            # Find and extract only the JSON array (handle extra text after array)
+            import json as _json
+            import re
+            
+            # Strategy 1: Find balanced brackets - extract first complete JSON array
+            bracket_count = 0
+            start_pos = output.find('[')
+            end_pos = -1
+            
+            if start_pos >= 0:
+                for i in range(start_pos, len(output)):
+                    if output[i] == '[':
+                        bracket_count += 1
+                    elif output[i] == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            end_pos = i + 1
+                            break
+                
+                if end_pos > 0:
+                    output = output[start_pos:end_pos]
+            
+            # Strategy 2: If that fails, try regex
+            if '[' not in output or ']' not in output:
+                array_match = re.search(r'\[(?:[^\[\]]|\[[^\]]*\])*\]', output)
+                if array_match:
+                    output = array_match.group(0)
+                else:
+                    # Last resort - strip quotes
+                    output = output.strip('"\'""„" \n\r')
+            
+            # Parse array
+            try:
+                ranked_modules = _json.loads(output)
+            except _json.JSONDecodeError as e:
+                logger.warning(f"[OverviewService] LLM module ranking failed: {e}. Raw output: {output[:200]}")
+                return self._compute_module_priorities_fallback(modules)
+            
+            if not isinstance(ranked_modules, list) or len(ranked_modules) != 4:
+                logger.warning(f"[OverviewService] Invalid LLM ranking: {ranked_modules}")
+                return self._compute_module_priorities_fallback(modules)
+            
+            # Convert to priority scores (1st=100, 2nd=75, 3rd=50, 4th=25)
+            priorities = {}
+            scores = [100.0, 75.0, 50.0, 25.0]
+            for i, module in enumerate(ranked_modules):
+                priorities[module] = scores[i] if i < len(scores) else 0.0
+            
+            logger.info(f"[OverviewService] LLM module ranking: {ranked_modules}")
+            return priorities
         
-        Logic:
-        - Investment Tracker: high if user actively watching show with continuations
-        - New Shows: high if no active watching or completed show recently
-        - Trending: baseline medium priority
-        - Upcoming: high if major release within 7 days
-        
-        Returns dict of module_type -> priority score (0-100)
+        except Exception as e:
+            logger.warning(f"[OverviewService] LLM module ranking failed: {e}")
+            return self._compute_module_priorities_fallback(modules)
+    
+    def _compute_module_priorities_fallback(self, modules: Dict[str, Dict]) -> Dict[str, float]:
+        """
+        Rule-based priority computation (fallback when LLM unavailable).
         """
         priorities = {
             'investment_tracker': 50.0,
@@ -903,7 +1404,7 @@ class OverviewService:
         if modules.get('investment_tracker', {}).get('continuations') or modules.get('investment_tracker', {}).get('upcoming_continuations'):
             priorities['investment_tracker'] = 80.0
         
-        # Boost new shows if no continuations or last watch >3 days ago
+        # Boost new shows if no continuations
         investment = modules.get('investment_tracker', {})
         if not investment.get('continuations'):
             priorities['new_shows'] = 75.0
@@ -912,9 +1413,21 @@ class OverviewService:
         priorities['trending'] = 60.0
         
         # Boost upcoming if releases within 7 days
-        # (will implement after _compute_upcoming is done)
+        upcoming = modules.get('upcoming', {})
+        if upcoming.get('items'):
+            for item in upcoming['items'][:3]:
+                if item.get('days_until_release', 999) <= 7:
+                    priorities['upcoming'] = 70.0
+                    break
         
         return priorities
+    
+    def _compute_module_priorities(self, db: Session, modules: Dict[str, Dict]) -> Dict[str, float]:
+        """
+        Compute priority scores for dynamic section reordering.
+        Enhanced to use LLM first, with fallback to rule-based.
+        """
+        return self._compute_module_priorities_with_llm(db, modules)
 
     async def _fill_missing_images_for_items(self, db: Session, items: List[Dict[str, Any]], max_lookups: int = 10) -> None:
         """Best-effort backfill for missing poster/backdrop paths using MediaMetadata or TMDB.
@@ -1372,30 +1885,15 @@ class OverviewService:
     ) -> None:
         """
         Update existing PersistentCandidate with fresh TMDB metadata.
+        
+        Uses the centralized enricher which also regenerates BGE embeddings.
         """
         try:
-            tmdb_media_type = 'tv' if media_type == 'show' else 'movie'
-            metadata = await fetch_tmdb_metadata(tmdb_id, tmdb_media_type)
+            from app.services.ai_engine.candidate_enricher import enrich_single_candidate
             
-            if not metadata:
-                return
+            # Use centralized enricher (includes BGE embedding regeneration)
+            await enrich_single_candidate(db, candidate, tmdb_id, media_type)
             
-            # Update fields
-            candidate.title = metadata.get('title') or metadata.get('name') or candidate.title
-            candidate.overview = metadata.get('overview') or candidate.overview
-            candidate.poster_path = metadata.get('poster_path') or candidate.poster_path
-            candidate.backdrop_path = metadata.get('backdrop_path') or candidate.backdrop_path
-            candidate.vote_average = metadata.get('vote_average') or candidate.vote_average
-            candidate.vote_count = metadata.get('vote_count') or candidate.vote_count
-            candidate.popularity = metadata.get('popularity') or candidate.popularity
-            candidate.last_refreshed = utc_now()
-            
-            # Recompute scores
-            candidate.obscurity_score = self._compute_obscurity_score(metadata)
-            candidate.mainstream_score = self._compute_mainstream_score(metadata)
-            candidate.freshness_score = self._compute_freshness_score(metadata)
-            
-            db.add(candidate)
             logger.debug(f"[Ingest] Updated candidate: {candidate.title} (trakt:{candidate.trakt_id})")
             
         except Exception as e:

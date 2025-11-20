@@ -162,7 +162,13 @@ async def init_db():
                     # Columns on persistent_candidates
                     ("SELECT COUNT(*) FROM information_schema.columns WHERE table_name='persistent_candidates' AND column_name IN ('embedding','production_companies','spoken_languages','number_of_seasons')", 4),
                     # Performance indexes
-                    ("SELECT COUNT(*) FROM pg_indexes WHERE tablename='persistent_candidates' AND indexname IN ('idx_persistent_candidates_media_type','idx_persistent_candidates_genres_trgm')", 2)
+                    ("SELECT COUNT(*) FROM pg_indexes WHERE tablename='persistent_candidates' AND indexname IN ('idx_persistent_candidates_media_type','idx_persistent_candidates_genres_trgm')", 2),
+                    # Presence of new AI tables (critical for AI features)
+                    ("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='bge_embeddings'", 1),
+                    ("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='item_llm_profiles'", 1),
+                    ("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='user_text_profiles'", 1),
+                    ("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='pairwise_training_sessions'", 1),
+                    ("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='pairwise_judgments'", 1)
                 ]
                 for sql, expected in sentinels:
                     val = conn.execute(text(sql)).scalar() or 0

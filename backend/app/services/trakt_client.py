@@ -118,7 +118,15 @@ class TraktClient:
         if method.upper() == "GET":
             cached = await self._r().get(cache_key)
             if cached:
-                return json.loads(cached)
+                # Handle both bytes and strings
+                if isinstance(cached, bytes):
+                    cached = cached.decode('utf-8')
+                # Skip empty strings to prevent JSON parsing errors
+                if cached and cached.strip():
+                    try:
+                        return json.loads(cached)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse cached Trakt response: {e}, fetching fresh")
 
         # No fallback to global access token: always require user-specific token
         if not self._access_token:

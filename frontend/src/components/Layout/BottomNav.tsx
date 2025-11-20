@@ -13,10 +13,10 @@ export default function BottomNav() {
   const getActiveKey = () => {
     const hash = activeHash.replace("#", "");
     if (!hash || hash === "") return "home";
-    if (hash === "overview") return "overview";
     if (hash === "lists") return "smart";
     if (hash === "dynamic") return "ai";
     if (hash === "myLists") return "individual";
+    if (hash === "trainer") return "trainer";
     if (hash === "status") return "status";
     if (hash === "settings") return "settings";
     if (hash === "help") return "help";

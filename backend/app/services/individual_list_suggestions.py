@@ -1,30 +1,36 @@
 """
 individual_list_suggestions.py
 
-FAISS-based suggestions service for Individual Lists.
+AI-powered suggestions service for Individual Lists.
 Generates intelligent suggestions based on current list items using:
-- FAISS nearest neighbors for semantic similarity
+- Dual-index semantic search (BGE multi-vector + FAISS fallback)
+- LLM-generated personalized rationales
 - Genre diversification
 - User profile fit scoring
+- Aspect-aware matching (cast, themes, studios)
 - Deduplication (don't suggest items already in list)
 """
 import json
 import logging
-from typing import List, Dict, Any, Set
+from typing import List, Dict, Any, Set, Optional
 from collections import Counter
 import numpy as np
+import asyncio
+import httpx
+from sqlalchemy import or_
 
 from app.services.ai_engine.faiss_index import load_index, get_embedding_from_index
+from app.services.ai_engine.dual_index_search import hybrid_search
 from app.services.fit_scoring import FitScorer
 from app.core.database import SessionLocal
 from app.core.redis_client import get_redis_sync
-from app.models import PersistentCandidate, IndividualListItem
+from app.models import PersistentCandidate, IndividualListItem, ItemLLMProfile, UserTextProfile
 
 logger = logging.getLogger(__name__)
 
 SUGGESTIONS_LIMIT = 20
-NEIGHBORS_PER_ITEM = 25  # Increase neighbor breadth to provide suggestions even for dense/genre-specific lists
-MIN_SIMILARITY = 0.45  # Lower threshold to prevent empty suggestions when embeddings cluster tightly
+NEIGHBORS_PER_ITEM = 30  # Increased for better dual-index coverage
+MIN_SIMILARITY = 0.40  # Slightly lower for broader suggestions
 
 
 class IndividualListSuggestionsService:
@@ -46,6 +52,7 @@ class IndividualListSuggestionsService:
     def __init__(self, user_id: int):
         self.user_id = user_id
         self.fit_scorer = FitScorer(user_id)
+        self.use_llm_rationales = True  # Enable LLM-generated rationales
     
     def get_suggestions(self, list_id: int) -> List[Dict[str, Any]]:
         """
@@ -102,8 +109,8 @@ class IndividualListSuggestionsService:
             # Score candidates with diversity boost
             scored = self._score_candidates(candidates, list_genres)
             
-            # Enrich with full metadata
-            enriched = self._enrich_with_metadata(scored, db, list_genres=list_genres)
+            # Enrich with full metadata (includes aspect-aware boosting)
+            enriched = self._enrich_with_metadata(scored, db, list_genres=list_genres, list_items=list_items)
             
             # Apply fit scoring (use cached profile first)
             final = self.fit_scorer.score_candidates(enriched, use_cached_profile=True)
@@ -138,11 +145,12 @@ class IndividualListSuggestionsService:
                     except Exception:
                         pass
                 
-                # Weight: 50% similarity, 30% fit, 20% diversity + genre boost
+                # Weight: 50% similarity, 30% fit, 20% diversity + aspect/genre boosts
                 item['_final_score'] = (
                     suggestion_score * 0.5 + 
                     fit_score * 0.3 + 
-                    item.get('_diversity_boost', 0.0) * 0.25 + 
+                    item.get('_diversity_boost', 0.0) * 0.20 + 
+                    item.get('_aspect_boost', 0.0) +  # Direct additive boost for matching cast/themes
                     genre_boost
                 )
                 # Expose similarity for UI badges if available
@@ -161,6 +169,58 @@ class IndividualListSuggestionsService:
             final.sort(key=lambda x: x['_final_score'], reverse=True)
             
             result = final[:SUGGESTIONS_LIMIT]
+            
+            # Generate LLM rationales for top suggestions (async batch)
+            if self.use_llm_rationales and result:
+                try:
+                    # Build list context from existing items
+                    list_titles = [item.title for item in list_items[:5]]
+                    list_genres = set()
+                    for item in list_items:
+                        if item.genres:
+                            try:
+                                genres = json.loads(item.genres) if isinstance(item.genres, str) else item.genres
+                                list_genres.update(g.lower() for g in genres)
+                            except:
+                                pass
+                    
+                    list_context = f"A list containing: {', '.join(list_titles[:5])}. Common genres: {', '.join(list(list_genres)[:5])}."
+                    
+                    # Fetch UserTextProfile for personalization
+                    user_profile = None
+                    try:
+                        user_profile = db.query(UserTextProfile).filter(
+                            UserTextProfile.user_id == self.user_id
+                        ).first()
+                    except Exception as e:
+                        logger.debug(f"Could not fetch UserTextProfile: {e}")
+                    
+                    # Generate rationales in batch (async)
+                    async def generate_all_rationales():
+                        tasks = [
+                            self._generate_llm_rationale(candidate, list_context, user_profile)
+                            for candidate in result
+                        ]
+                        return await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Run async batch
+                    rationales = asyncio.run(generate_all_rationales())
+                    
+                    # Attach rationales to results
+                    for idx, rationale in enumerate(rationales):
+                        if idx < len(result) and isinstance(rationale, str) and rationale:
+                            result[idx]['llm_rationale'] = rationale
+                        else:
+                            result[idx]['llm_rationale'] = ""
+                    
+                    logger.debug(f"Generated {sum(1 for r in rationales if r)} LLM rationales")
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to generate LLM rationales: {e}")
+                    # Continue without rationales
+                    for item in result:
+                        item['llm_rationale'] = ""
+            
             # Store in cache briefly (45s)
             if r and cache_key:
                 try:
@@ -198,9 +258,254 @@ class IndividualListSuggestionsService:
         existing_ids: Set[tuple]
     ) -> List[Dict[str, Any]]:
         """
-        Get FAISS nearest neighbors for all list items.
+        Get nearest neighbors using dual-index hybrid search (BGE + FAISS).
+        
+        Builds composite query from list items, then uses multi-vector BGE search
+        with FAISS fallback for better semantic matching.
         
         Returns list of candidates with {tmdb_id, media_type, similarity_scores, frequency}.
+        """
+        try:
+            # Build composite query from list items' titles and metadata
+            query_parts = []
+            db = SessionLocal()
+            try:
+                # Fetch metadata for list items to build rich query
+                tmdb_ids = [item.tmdb_id for item in list_items[:10]]  # Limit to top 10 items
+                candidates = db.query(PersistentCandidate).filter(
+                    PersistentCandidate.tmdb_id.in_(tmdb_ids)
+                ).all()
+                
+                for candidate in candidates:
+                    if candidate.title:
+                        query_parts.append(candidate.title)
+                    # Add genres and overview snippets for context
+                    try:
+                        if candidate.genres:
+                            genres = json.loads(candidate.genres)
+                            query_parts.extend(genres[:3])  # Top 3 genres
+                    except:
+                        pass
+                    
+                    # Add overview keywords (first 50 chars)
+                    if candidate.overview:
+                        query_parts.append(candidate.overview[:50])
+            finally:
+                db.close()
+            
+            # Build query string
+            query_text = " ".join(query_parts[:20])  # Limit total parts
+            if not query_text:
+                logger.warning("No query text built from list items, falling back to basic FAISS")
+                # Fallback to old method if query building fails
+                return self._get_faiss_neighbors_fallback(list_items, existing_ids)
+            
+            logger.debug(f"Built query from {len(list_items)} list items: {query_text[:100]}...")
+            
+            # Get candidate pool from database for hybrid search
+            db2 = SessionLocal()
+            try:
+                # Get broad candidate pool based on list items' characteristics
+                search_terms = query_text.lower().split()[:5]  # Top 5 terms
+                
+                query_obj = db2.query(PersistentCandidate)
+                
+                # Broad matching on title/overview
+                if search_terms:
+                    conditions = []
+                    for term in search_terms:
+                        conditions.append(PersistentCandidate.title.ilike(f'%{term}%'))
+                        conditions.append(PersistentCandidate.overview.ilike(f'%{term}%'))
+                    query_obj = query_obj.filter(or_(*conditions))
+                
+                candidate_pool = query_obj.limit(1000).all()
+                
+                if not candidate_pool:
+                    logger.warning("No candidates found for hybrid search, falling back")
+                    return self._get_faiss_neighbors_fallback(list_items, existing_ids)
+                
+                logger.debug(f"Found {len(candidate_pool)} candidates for hybrid search")
+                
+                # Use dual-index hybrid search with candidate pool
+                search_results = hybrid_search(
+                    db=db2,
+                    user_id=self.user_id,
+                    candidate_pool=candidate_pool,
+                    top_k=NEIGHBORS_PER_ITEM * len(list_items),  # More results to dedupe
+                    bge_weight=0.7,  # Prefer BGE multi-vector (better semantic understanding)
+                    faiss_weight=0.3
+                )
+            finally:
+                db2.close()
+            
+            # Aggregate by (tmdb_id, media_type) and track frequency
+            candidate_scores = {}
+            
+            for result in search_results:
+                # Extract from new hybrid_search return format
+                candidate = result.get('candidate')
+                if not candidate:
+                    continue
+                
+                tmdb_id = candidate.tmdb_id
+                media_type = candidate.media_type
+                similarity = result.get('score', 0.0)
+                
+                key = (tmdb_id, media_type)
+                
+                # Skip if already in list
+                if key in existing_ids:
+                    continue
+                
+                # Filter by minimum similarity
+                if similarity < MIN_SIMILARITY:
+                    continue
+                
+                # Aggregate scores (items may appear from multiple search vectors)
+                if key not in candidate_scores:
+                    candidate_scores[key] = {
+                        'tmdb_id': tmdb_id,
+                        'media_type': media_type,
+                        'scores': [],
+                        'frequency': 0
+                    }
+                
+                candidate_scores[key]['scores'].append(similarity)
+                candidate_scores[key]['frequency'] += 1
+            
+            # Convert to list and calculate statistics
+            candidates = []
+            for key, data in candidate_scores.items():
+                avg_score = np.mean(data['scores'])
+                max_score = max(data['scores'])
+                
+                candidates.append({
+                    'tmdb_id': data['tmdb_id'],
+                    'media_type': data['media_type'],
+                    'avg_similarity': float(avg_score),
+                    'max_similarity': float(max_score),
+                    'frequency': data['frequency']
+                })
+            
+            # Sort by frequency and average similarity
+            candidates.sort(key=lambda x: (x['frequency'], x['avg_similarity']), reverse=True)
+            
+            logger.debug(f"Dual-index search found {len(candidates)} unique candidates")
+            return candidates
+            
+        except Exception as e:
+            logger.error(f"Failed dual-index search, falling back: {e}")
+            # Fallback to basic FAISS if dual-index fails
+            return self._get_faiss_neighbors_fallback(list_items, existing_ids)
+    
+    async def _generate_llm_rationale(
+        self,
+        candidate: Dict[str, Any],
+        list_context: str,
+        user_profile: Optional[UserTextProfile] = None
+    ) -> str:
+        """
+        Generate LLM explanation for why this candidate fits the list.
+        
+        Similar to overview_service rationale generation, but focused on
+        explaining fit with THIS specific user list.
+        
+        Args:
+            candidate: Enriched candidate dict with title, genres, overview
+            list_context: Summary of what's in the user's list
+            user_profile: Optional user preferences for personalization
+        
+        Returns:
+            Single sentence rationale or empty string on failure
+        """
+        try:
+            # Build prompt with list context
+            title = candidate.get('title', 'Unknown')
+            genres = ', '.join(candidate.get('genres', [])[:3]) if candidate.get('genres') else 'Unknown'
+            overview = candidate.get('overview', '')[:200]  # Truncate
+            
+            # Add user profile context if available
+            user_context = ""
+            if user_profile:
+                user_context = f"\n\nUser preferences: {user_profile.profile_text}"
+            
+            prompt = f"""You are explaining why a movie/show suggestion fits a user's list.
+
+List context: {list_context}
+{user_context}
+
+Suggested item:
+- Title: {title}
+- Genres: {genres}
+- Overview: {overview}
+
+Task: Write ONE sentence explaining why this item fits the list. Focus on thematic connections, genre overlap, or similar tones.
+
+**CRITICAL**: Output ONLY the rationale sentence, no preamble, no "This fits because...", just the explanation itself.
+
+Example: "Shares the same dark Scandinavian noir atmosphere and explores moral ambiguity through complex characters."
+"""
+            
+            logger.info(f"Requesting Ollama rationale for list suggestion: item={title[:50]}, prompt_length={len(prompt)}")
+            
+            # Make async request to Ollama
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(
+                    "http://ollama:11434/api/generate",
+                    json={
+                        "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {
+                            "temperature": 0.7,
+                            "num_ctx": 4096  # Large context window
+                        },
+                        "keep_alive": "24h"
+                    }
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    rationale = result.get('response', '').strip()
+                    logger.info(f"Ollama rationale generated for list suggestion: item={title[:50]}, length={len(rationale)}, preview={rationale[:80]}")
+                    
+                    # Clean up common prefixes
+                    prefixes = [
+                        "This fits because ",
+                        "This item fits because ",
+                        "It fits because ",
+                        "Suggested because ",
+                        "Rationale: "
+                    ]
+                    for prefix in prefixes:
+                        if rationale.startswith(prefix):
+                            rationale = rationale[len(prefix):]
+                    
+                    # No artificial length cap - let frontend handle display
+                    return rationale
+                else:
+                    logger.warning(f"LLM rationale failed with status {response.status_code} for item={title[:50]}")
+                    return ""
+                    
+        except asyncio.TimeoutError:
+            logger.error(f"LLM rationale timeout (60s) for item={title[:50]}")
+            return ""
+        except httpx.TimeoutException:
+            logger.error(f"HTTP timeout (60s) for LLM rationale: item={title[:50]}")
+            return ""
+        except Exception as e:
+            logger.error(f"LLM rationale error for item={title[:50]}: {type(e).__name__}: {e}")
+            return ""
+    
+    def _get_faiss_neighbors_fallback(
+        self,
+        list_items: List[IndividualListItem],
+        existing_ids: Set[tuple]
+    ) -> List[Dict[str, Any]]:
+        """
+        Fallback method using basic FAISS search (original implementation).
+        
+        Used when dual-index search fails or BGE index unavailable.
         """
         try:
             # Load FAISS index
@@ -295,11 +600,11 @@ class IndividualListSuggestionsService:
             # Sort by frequency and average similarity
             candidates.sort(key=lambda x: (x['frequency'], x['avg_similarity']), reverse=True)
             
-            logger.debug(f"Found {len(candidates)} unique neighbor candidates")
+            logger.debug(f"FAISS fallback found {len(candidates)} unique candidates")
             return candidates
             
         except Exception as e:
-            logger.error(f"Failed to get FAISS neighbors: {e}")
+            logger.error(f"Failed FAISS fallback: {e}")
             return []
     
     def _score_candidates(
@@ -335,12 +640,14 @@ class IndividualListSuggestionsService:
         self,
         candidates: List[Dict[str, Any]],
         db,
-        list_genres: Dict[str, int] = None
+        list_genres: Dict[str, int] = None,
+        list_items: List[IndividualListItem] = None
     ) -> List[Dict[str, Any]]:
         """
         Enrich candidates with full metadata from DB.
         
-        Also calculates diversity boost based on genres.
+        Also calculates diversity boost based on genres and aspect-aware boosting
+        (matching cast, themes, studios from list items).
         """
         if not candidates:
             return []
@@ -358,6 +665,66 @@ class IndividualListSuggestionsService:
             (c.tmdb_id, c.media_type): c
             for c in db_candidates
         }
+        
+        # Extract aspects from list items (cast, themes, studios) for aspect-aware boosting
+        list_people = set()
+        list_themes = set()
+        list_studios = set()
+        
+        if list_items:
+            try:
+                # Batch fetch ItemLLMProfiles for list items
+                list_tmdb_ids = [item.tmdb_id for item in list_items[:10]]  # Top 10 items
+                # Join with persistent_candidates to filter by tmdb_id
+                profiles = db.query(ItemLLMProfile).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id.in_(list_tmdb_ids)
+                ).all()
+                
+                for profile in profiles:
+                    try:
+                        # Parse profile_json to access fields
+                        prof_data = json.loads(profile.profile_json) if isinstance(profile.profile_json, str) else profile.profile_json
+                        
+                        # Extract people (cast/crew)
+                        if prof_data.get('people'):
+                            list_people.update(p.lower() for p in prof_data['people'][:10])  # Top 10 people per item
+                        
+                        # Extract keywords as themes
+                        if prof_data.get('keywords'):
+                            list_themes.update(k.lower() for k in prof_data['keywords'][:5])
+                        
+                        # Extract studio/brands
+                        if prof_data.get('studio'):
+                            list_studios.add(prof_data['studio'].lower())
+                    except Exception as e:
+                        logger.debug(f"Failed to parse profile_json: {e}")
+                        pass
+                
+                logger.debug(f"Extracted {len(list_people)} people, {len(list_themes)} themes, {len(list_studios)} studios from list")
+            except Exception as e:
+                logger.debug(f"Could not extract list aspects: {e}")
+        
+        # Batch fetch ItemLLMProfiles for aspect matching (avoid N+1 queries)
+        candidate_profiles_map = {}
+        if list_people or list_themes or list_studios:
+            try:
+                candidate_tmdb_ids = [c['tmdb_id'] for c in candidates]
+                # Join with persistent_candidates to get tmdb_id and media_type
+                candidate_profiles = db.query(ItemLLMProfile, PersistentCandidate.tmdb_id, PersistentCandidate.media_type).join(
+                    PersistentCandidate, ItemLLMProfile.candidate_id == PersistentCandidate.id
+                ).filter(
+                    PersistentCandidate.tmdb_id.in_(candidate_tmdb_ids)
+                ).all()
+                
+                candidate_profiles_map = {
+                    (tmdb_id, media_type): profile
+                    for profile, tmdb_id, media_type in candidate_profiles
+                }
+                logger.debug(f"Fetched {len(candidate_profiles_map)} ItemLLMProfiles for aspect matching")
+            except Exception as e:
+                logger.debug(f"Could not batch fetch ItemLLMProfiles: {e}")
         
         # Enrich
         enriched = []
@@ -406,6 +773,53 @@ class IndividualListSuggestionsService:
             except Exception:
                 diversity_boost = 0.0
             
+            # Aspect-aware boosting: match people, themes, studios from list
+            aspect_boost = 0.0
+            if list_people or list_themes or list_studios:
+                try:
+                    # Get candidate's ItemLLMProfile from batch-fetched map
+                    candidate_key = (db_candidate.tmdb_id, db_candidate.media_type)
+                    candidate_profile = candidate_profiles_map.get(candidate_key)
+                    
+                    if candidate_profile:
+                        try:
+                            # Parse profile_json to access fields
+                            prof_data = json.loads(candidate_profile.profile_json) if isinstance(candidate_profile.profile_json, str) else candidate_profile.profile_json
+                            
+                            matches = 0
+                            total_checks = 0
+                            
+                            # Check people overlap
+                            if list_people and prof_data.get('people'):
+                                cand_people_lower = set(p.lower() for p in prof_data['people'][:10])
+                                people_overlap = len(list_people.intersection(cand_people_lower))
+                                if people_overlap > 0:
+                                    matches += people_overlap
+                                    total_checks += 1
+                            
+                            # Check themes overlap (using keywords as themes)
+                            if list_themes and prof_data.get('keywords'):
+                                cand_themes_lower = set(k.lower() for k in prof_data['keywords'][:5])
+                                themes_overlap = len(list_themes.intersection(cand_themes_lower))
+                                if themes_overlap > 0:
+                                    matches += themes_overlap
+                                    total_checks += 1
+                            
+                            # Check studios/brands overlap
+                            if list_studios and prof_data.get('studio'):
+                                if prof_data['studio'].lower() in list_studios:
+                                    matches += 1.5  # Weight studios slightly higher
+                                    total_checks += 1
+                            
+                            # Calculate aspect boost (capped at 0.10)
+                            if total_checks > 0:
+                                aspect_boost = min(0.10, matches * 0.03)
+                        except Exception as e:
+                            logger.debug(f"Failed to parse candidate profile_json: {e}")
+                except Exception as e:
+                    logger.debug(f"Aspect matching failed for {db_candidate.tmdb_id}: {e}")
+                    aspect_boost = 0.0
+            
             enriched_item = {
                 'tmdb_id': db_candidate.tmdb_id,
                 'trakt_id': db_candidate.trakt_id,
@@ -422,7 +836,8 @@ class IndividualListSuggestionsService:
                 '_suggestion_score': candidate['_suggestion_score'],
                 '_frequency': candidate['frequency'],
                 '_avg_similarity': candidate['avg_similarity'],
-                '_diversity_boost': diversity_boost
+                '_diversity_boost': diversity_boost,
+                '_aspect_boost': aspect_boost  # Add aspect boost
             }
             
             enriched.append(enriched_item)

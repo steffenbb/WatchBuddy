@@ -33,14 +33,34 @@ import json
 from datetime import datetime
 from celery import shared_task
 from celery.exceptions import Retry
+from typing import List, Dict, Tuple
 from app.core.redis_client import get_redis
 from app.core.redis_client import get_redis_sync
 from app.utils.timezone import utc_now
 from app.services.scoring_engine import ScoringEngine
 from app.services.mood import get_user_mood
 from app.core.database import SessionLocal
+from app.core.config import settings
+from app.services.ai_engine.bge_index import BGEIndex, BGEEmbedder
+from app.services.ai_engine.metadata_processing import compose_text_for_embedding
 
 logger = logging.getLogger(__name__)
+
+def _safe_join(val) -> str:
+    """Join JSON array-like or list-like values into a comma-separated string."""
+    try:
+        if isinstance(val, str):
+            if not val:
+                return ""
+            arr = json.loads(val)
+            if isinstance(arr, list):
+                return ", ".join(str(x) for x in arr)
+            return str(val)
+        if isinstance(val, list):
+            return ", ".join(str(x) for x in val)
+    except Exception:
+        pass
+    return str(val or "")
 
 class SyncLock:
     """Redis-based lock for sync operations."""
@@ -132,6 +152,684 @@ def format_sync_notification(list_title: str, trigger: str, updated: int = 0, re
     else:
         msg += "No changes."
     return msg
+
+
+@shared_task(bind=True, max_retries=3, name="build_bge_index_topN")
+def build_bge_index_topN(self, top_n: int | None = None) -> dict:
+    """Nightly builder for the secondary BGE FAISS index (additive, no schema changes).
+
+    - Select top-N candidates by popularity/quality
+    - Compose stable text and hash
+    - Embed only missing/stale items
+    - Append to separate FAISS index under settings.ai_bge_index_dir
+
+    This task is safe to run even if retrieval isn't enabled yet.
+    """
+    import hashlib
+    from sqlalchemy import text
+
+    base_dir = settings.ai_bge_index_dir
+    model_name = settings.ai_bge_model_name
+    limit = int(top_n or settings.ai_bge_topn_nightly or 0)
+    if limit <= 0:
+        return {"updated": 0, "skipped": 0, "total": 0}
+
+    db = SessionLocal()
+    try:
+        # Select strong candidates: active, with good metadata; prioritize popularity and votes
+        sql = text(
+            """
+            SELECT id, tmdb_id, trakt_id, media_type, title, original_title, overview,
+                   genres, keywords, "cast", production_companies,
+                   vote_average, vote_count, popularity, year, language, runtime,
+                   tagline, homepage, production_countries, spoken_languages,
+                   networks, created_by, number_of_seasons, number_of_episodes,
+                   episode_run_time, first_air_date, last_air_date, in_production,
+                   status
+            FROM persistent_candidates
+            WHERE active = true AND title IS NOT NULL AND title != ''
+            ORDER BY
+                CASE 
+                    WHEN vote_average >= 7.0 AND vote_count >= 100 THEN 1
+                    WHEN vote_average >= 6.0 AND vote_count >= 50 THEN 2
+                    ELSE 3
+                END,
+                popularity DESC NULLS LAST,
+                vote_count DESC NULLS LAST
+            LIMIT :lim
+            """
+        )
+        rows = db.execute(sql, {"lim": limit}).fetchall()
+        total = len(rows)
+        if total == 0:
+            return {"updated": 0, "skipped": 0, "total": 0}
+
+        # Prepare texts and hashes (base + labeled variants)
+        candidates = {}
+        id_to_text = {}
+        id_to_labels: Dict[int, Dict[str, str]] = {}
+        id_to_metadata: Dict[int, Tuple[int, str]] = {}  # Store tmdb_id, media_type to avoid re-query
+        for row in rows:
+            (
+                rid, tmdb_id, trakt_id, media_type, title, original_title, overview,
+                genres, keywords, cast, production_companies,
+                vote_average, vote_count, popularity, year, language, runtime,
+                tagline, homepage, production_countries, spoken_languages,
+                networks, created_by, number_of_seasons, number_of_episodes,
+                episode_run_time, first_air_date, last_air_date, in_production,
+                status,
+            ) = row
+            cand = {
+                'id': rid,
+                'tmdb_id': tmdb_id,
+                'trakt_id': trakt_id,
+                'media_type': media_type,
+                'title': title or '',
+                'original_title': original_title or '',
+                'overview': overview or '',
+                'genres': genres or '[]',
+                'keywords': keywords or '[]',
+                'cast': cast or '[]',
+                'production_companies': production_companies or '[]',
+                'vote_average': vote_average or 0,
+                'vote_count': vote_count or 0,
+                'popularity': popularity or 0,
+                'year': year,
+                'language': language or '',
+                'runtime': runtime or 0,
+                'tagline': tagline or '',
+                'homepage': homepage or '',
+                'production_countries': production_countries or '[]',
+                'spoken_languages': spoken_languages or '[]',
+                'networks': networks or '[]',
+                'created_by': created_by or '[]',
+                'number_of_seasons': number_of_seasons,
+                'number_of_episodes': number_of_episodes,
+                'episode_run_time': episode_run_time or '[]',
+                'first_air_date': first_air_date or '',
+                'last_air_date': last_air_date or '',
+                'in_production': in_production,
+                'status': status or '',
+            }
+            # Base text
+            text_base = compose_text_for_embedding(cand)
+            id_to_text[rid] = text_base
+            candidates[rid] = hashlib.sha1(text_base.encode('utf-8')).hexdigest()
+            id_to_metadata[rid] = (tmdb_id, media_type)  # Cache for persistence
+            # Labeled texts for multi-vector index
+            labels: Dict[str, str] = {}
+            # Title-only emphasis
+            if title:
+                labels["title"] = title
+            # Keywords focus
+            labels["keywords"] = _safe_join(cand.get('keywords', '[]'))
+            # People/brands focus
+            labels["people"] = _safe_join(cand.get('cast', '[]'))
+            brands = _safe_join(cand.get('production_companies', '[]'))
+            if brands:
+                labels["brands"] = brands
+            id_to_labels[rid] = labels
+
+        # Load existing index and map
+        idx = BGEIndex(base_dir)
+        idx.load()
+        missing = idx.get_missing_or_stale(candidates)
+
+        if not missing:
+            logger.info(f"[BGE] No updates needed (topN={total})")
+            return {"updated": 0, "skipped": total, "total": total}
+
+        logger.info(f"[BGE] 🚀 Starting base embedding generation for {len(missing):,} items")
+        logger.info(f"[BGE] Total candidates: {total:,} | Need updates: {len(missing):,} | Up-to-date: {total - len(missing):,}")
+
+        # Embed in batches and persist to database
+        embedder = BGEEmbedder(model_name=model_name)
+        batch_size = 64
+        updated = 0
+        
+        # Import BGEEmbedding model for persistence
+        from app.models import BGEEmbedding
+        from sqlalchemy import text as sql_text
+        
+        for i in range(0, len(missing), batch_size):
+            batch_ids = missing[i:i+batch_size]
+            texts = [id_to_text[iid] for iid in batch_ids]
+            
+            # Log progress
+            current = min(i + batch_size, len(missing))
+            progress_pct = (current / len(missing)) * 100
+            logger.info(f"[BGE Base] 📊 Progress: {current:,}/{len(missing):,} ({progress_pct:.1f}%) - Embedding batch {i//batch_size + 1}")
+            
+            vecs = embedder.embed(texts, batch_size=batch_size)
+            hashes = [candidates[iid] for iid in batch_ids]
+            idx.add_items(batch_ids, vecs, content_hashes=hashes, labels=["base"] * len(batch_ids))
+            
+            # Persist base embeddings to database for recovery
+            persist_success = 0
+            persist_fail = 0
+            for iid, vec, h in zip(batch_ids, vecs, hashes):
+                try:
+                    # Get tmdb_id and media_type from cached metadata (avoid re-query)
+                    if iid not in id_to_metadata:
+                        logger.debug(f"[BGE Persist] No metadata cached for id={iid}")
+                        persist_fail += 1
+                        continue
+                        
+                    tmdb_id, media_type = id_to_metadata[iid]
+                    # Serialize embedding
+                    import numpy as np
+                    vec_array = np.array(vec, dtype=np.float16)
+                    vec_bytes = vec_array.tobytes()
+                    
+                    # Validate embedding dimension
+                    if len(vec) != 384:
+                        logger.warning(f"[BGE Persist] Invalid embedding dim {len(vec)} for id={iid}")
+                        persist_fail += 1
+                        continue
+                    
+                    # Upsert BGEEmbedding
+                    existing = db.query(BGEEmbedding).filter_by(
+                        tmdb_id=tmdb_id, media_type=media_type
+                    ).first()
+                    
+                    if existing:
+                        existing.embedding_base = vec_bytes
+                        existing.hash_base = h
+                        existing.updated_at = utc_now()
+                    else:
+                        db.add(BGEEmbedding(
+                            tmdb_id=tmdb_id,
+                            media_type=media_type,
+                            embedding_base=vec_bytes,
+                            hash_base=h,
+                            model_name=model_name,
+                            embedding_dim=len(vec)
+                        ))
+                    persist_success += 1
+                except Exception as e:
+                    # Rollback failed transaction to allow subsequent queries
+                    db.rollback()
+                    logger.warning(f"[BGE Persist] Failed for id={iid}: {e}")
+                    persist_fail += 1
+            
+            # Commit batch
+            try:
+                db.commit()
+                logger.info(f"[BGE Persist] 💾 Batch {i//batch_size + 1}: Saved {persist_success}/{len(batch_ids)} to DB ({persist_fail} failed)")
+            except Exception as e:
+                logger.error(f"[BGE Persist] ❌ Commit failed for batch {i//batch_size + 1}: {e}")
+                db.rollback()
+                persist_fail += len(batch_ids)
+            
+            updated += len(batch_ids)
+
+        logger.info(f"[BGE] ✅ Base embeddings complete: {updated:,} vectors generated and saved")
+        
+        # Add/refresh labeled vectors (title/keywords/people/brands) and persist to DB
+        logger.info(f"[BGE] 🏷️  Starting labeled embeddings generation (title/keywords/people/brands)")
+        logger.info(f"[BGE] Processing {len(id_to_labels):,} items with labeled variants...")
+        
+        # Check existing labels and hashes to avoid duplicates
+        to_add_ids: List[int] = []
+        to_add_vecs: List[List[float]] = []
+        to_add_hashes: List[str] = []
+        to_add_labels: List[str] = []
+        
+        labeled_generated = 0
+        labeled_skipped = 0
+        
+        # Access current map
+        imap = (idx._id_map or {}).get("items", {})  # type: ignore[attr-defined]
+        
+        for idx_pos, (iid, label_map) in enumerate(id_to_labels.items()):
+            # Log progress every 1000 items
+            if idx_pos > 0 and idx_pos % 1000 == 0:
+                progress_pct = (idx_pos / len(id_to_labels)) * 100
+                logger.info(f"[BGE Labeled] 📊 Progress: {idx_pos:,}/{len(id_to_labels):,} ({progress_pct:.1f}%) - {labeled_generated:,} vectors generated, {labeled_skipped:,} skipped")
+            
+            existing = imap.get(str(iid)) if isinstance(imap, dict) else None
+            existing_entries = []
+            if isinstance(existing, dict):
+                existing_entries = existing.get("entries", []) or []
+            for lab, text in label_map.items():
+                h = hashlib.sha1(text.encode('utf-8')).hexdigest()
+                has_same = False
+                for e in existing_entries:
+                    if e.get("label") == lab and e.get("hash") == h:
+                        has_same = True
+                        break
+                if has_same:
+                    labeled_skipped += 1
+                    continue
+                    
+                # Compute embedding
+                vec = embedder.embed([text], batch_size=1)[0]
+                labeled_generated += 1
+                
+                # Queue for FAISS
+                to_add_ids.append(iid)
+                to_add_hashes.append(h)
+                to_add_labels.append(lab)
+                to_add_vecs.append(vec)
+                
+                # Persist labeled embedding to database
+                try:
+                    # Get tmdb_id and media_type from cached metadata (avoid re-query)
+                    if iid not in id_to_metadata:
+                        logger.debug(f"[BGE Persist] No metadata cached for labeled embedding id={iid}")
+                        continue
+                        
+                    tmdb_id, media_type = id_to_metadata[iid]
+                    import numpy as np
+                    vec_array = np.array(vec, dtype=np.float16)
+                    vec_bytes = vec_array.tobytes()
+                    
+                    # Validate embedding dimension
+                    if len(vec) != 384:
+                        logger.warning(f"[BGE Persist] Invalid {lab} embedding dim {len(vec)} for id={iid}")
+                        continue
+                    
+                    # Update corresponding field in BGEEmbedding
+                    bge_row = db.query(BGEEmbedding).filter_by(
+                        tmdb_id=tmdb_id, media_type=media_type
+                    ).first()
+                    
+                    if bge_row:
+                        if lab == "title":
+                            bge_row.embedding_title = vec_bytes
+                            bge_row.hash_title = h
+                        elif lab == "keywords":
+                            bge_row.embedding_keywords = vec_bytes
+                            bge_row.hash_keywords = h
+                        elif lab == "people":
+                            bge_row.embedding_people = vec_bytes
+                            bge_row.hash_people = h
+                        elif lab == "brands":
+                            bge_row.embedding_brands = vec_bytes
+                            bge_row.hash_brands = h
+                        bge_row.updated_at = utc_now()
+                    else:
+                        logger.debug(f"[BGE Persist] No BGEEmbedding row for tmdb_id={tmdb_id}, skipping {lab}")
+                except Exception as e:
+                    # Rollback failed transaction to allow subsequent queries
+                    db.rollback()
+                    logger.warning(f"[BGE Persist] Failed labeled embedding id={iid}, label={lab}: {e}")
+                
+                if len(to_add_ids) >= 256:
+                    idx.add_items(to_add_ids, to_add_vecs, content_hashes=to_add_hashes, labels=to_add_labels)
+                    try:
+                        db.commit()
+                        logger.info(f"[BGE Persist] 💾 Labeled batch: {len(to_add_ids)} vectors saved to DB")
+                    except Exception as e:
+                        logger.error(f"[BGE Persist] ❌ Commit failed for labeled batch: {e}")
+                        db.rollback()
+                    to_add_ids, to_add_vecs, to_add_hashes, to_add_labels = [], [], [], []
+        
+        if to_add_ids:
+            idx.add_items(to_add_ids, to_add_vecs, content_hashes=to_add_hashes, labels=to_add_labels)
+            try:
+                db.commit()
+                logger.info(f"[BGE Persist] 💾 Final labeled batch: {len(to_add_ids)} vectors saved to DB")
+            except Exception as e:
+                logger.error(f"[BGE Persist] ❌ Final commit failed: {e}")
+                db.rollback()
+
+        logger.info(f"[BGE] ✅ Labeled embeddings complete: {labeled_generated:,} vectors generated, {labeled_skipped:,} skipped (up-to-date)")
+        logger.info(f"[BGE] 🎉 Index build finished: {updated:,} base vectors + {labeled_generated:,} labeled vectors = {updated + labeled_generated:,} total")
+        logger.info(f"[BGE] Summary: {total:,} candidates | {updated:,} updated | {total - updated:,} unchanged")
+        # Auto-enable runtime flag via Redis, so retrieval can use it without env change
+        try:
+            r = get_redis_sync()
+            r.set("settings:global:ai_bge_index_enabled", "true")
+            r.set("settings:global:ai_bge_last_build", str(int(time.time())))
+            r.set("settings:global:ai_bge_index_size", str(total))
+        except Exception:
+            pass
+        return {"updated": updated, "skipped": total - updated, "total": total}
+    except Exception as e:
+        logger.error(f"build_bge_index_topN failed: {e}", exc_info=True)
+        raise
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=60, name="build_user_profile_vectors")
+def build_user_profile_vectors(self, user_id: int = 1, k: int = 3) -> dict:
+    """Compute 2-3 user profile vectors from recent watch history and store in Redis.
+
+    Stored under keys:
+      profile_vectors:{user_id} -> JSON list of vectors (each normalized list[float])
+    """
+    import numpy as np
+    from sqlalchemy import select
+    try:
+        # Gather recent history texts similar to FusionEngine
+        from app.services.trakt_client import TraktClient
+        from app.core import database
+        from app.models import MediaMetadata
+
+        trakt = TraktClient(user_id=user_id)
+        try:
+            history = asyncio.get_event_loop().run_until_complete(trakt.get_user_history(username="me", limit=50))
+        except Exception:
+            history = []
+
+        texts: List[str] = []
+        # Lightweight profile summary (top genres/keywords/languages)
+        from collections import Counter
+        genres_ctr: Counter = Counter()
+        keywords_ctr: Counter = Counter()
+        lang_ctr: Counter = Counter()
+        async def _gather():
+            # get_async_session() is a generator, need to get session from it
+            session_gen = database.get_async_session()
+            session = await anext(session_gen)
+            try:
+                for item in history[:30]:
+                    ids = (item.get("movie") or item.get("show") or {}).get("ids", {})
+                    tid = ids.get("trakt")
+                    if not tid:
+                        continue
+                    stmt = select(MediaMetadata).where(MediaMetadata.trakt_id == tid)
+                    res = await session.execute(stmt)
+                    meta = res.scalar_one_or_none()
+                    if meta and meta.overview:
+                        try:
+                            import json as _json
+                            genres = _json.loads(meta.genres or "[]")
+                            kws = _json.loads(meta.keywords or "[]")
+                            for g in genres:
+                                genres_ctr[str(g).lower()] += 1
+                            for kw in kws:
+                                keywords_ctr[str(kw).lower()] += 1
+                            if meta.language:
+                                lang_ctr[str(meta.language).lower()] += 1
+                            genre_text = " ".join(genres)
+                        except Exception:
+                            genre_text = ""
+                        texts.append(f"{meta.title} {meta.overview} {genre_text}")
+            finally:
+                await session.close()
+
+        # Run async gather in a temporary loop (Celery context)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_gather())
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+        if not texts:
+            return {"profiles": 0}
+
+        # Embed and cluster
+        embedder = BGEEmbedder(model_name=settings.ai_bge_model_name)
+        vecs = embedder.embed(texts, batch_size=32)
+        arr = np.array(vecs, dtype="float32")
+        n = min(max(2, k), max(2, arr.shape[0] // 5) if arr.shape[0] >= 10 else 2)
+        # k-means via numpy simple iteration (avoid extra deps)
+        rng = np.random.default_rng(42)
+        centers = arr[rng.choice(arr.shape[0], size=n, replace=False)]
+        for _ in range(10):
+            # assign
+            dists = ((arr[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            labels = dists.argmin(axis=1)
+            # update
+            for i in range(n):
+                mask = labels == i
+                if mask.any():
+                    centers[i] = arr[mask].mean(axis=0)
+        # normalize centers
+        norms = np.linalg.norm(centers, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        centers = centers / norms
+
+        # Store in Redis
+        try:
+            r = get_redis_sync()
+            import json as _json
+            r.set(f"profile_vectors:{user_id}", _json.dumps(centers.tolist()))
+            # Mark runtime readiness for profile vectors
+            r.set("settings:global:ai_profile_vectors_ready", "true")
+            r.set("settings:global:ai_profile_vectors_last_build", str(int(time.time())))
+            # Store compact profile summary for judge context
+            summary = {
+                "top_genres": [g for g, _ in genres_ctr.most_common(8)],
+                "top_keywords": [k for k, _ in keywords_ctr.most_common(12)],
+                "top_languages": [l for l, _ in lang_ctr.most_common(3)],
+            }
+            r.set(f"profile_summary:{user_id}", _json.dumps(summary))
+        except Exception:
+            pass
+        return {"profiles": int(n)}
+    except Exception as e:
+        logger.error(f"build_user_profile_vectors failed: {e}", exc_info=True)
+        raise
+
+
+@shared_task(bind=True, max_retries=2, default_retry_delay=120, name="generate_user_text_profile")
+def generate_user_text_profile(self, user_id: int = 1) -> dict:
+    """Generate UserTextProfile using LLM analysis of watch history and ratings.
+    
+    Creates a 2-5 sentence narrative summary of user preferences that can be used
+    in LLM prompts for phase labeling, module reranking, and predictions.
+    
+    This task is designed to run lazily (on-demand) or via nightly maintenance
+    for users without existing profiles.
+    """
+    import json as _json
+    import httpx
+    from collections import Counter
+    from app.models import UserTextProfile, MediaMetadata
+    from app.services.trakt_client import TraktClient
+    
+    db = SessionLocal()
+    try:
+        # Check if profile already exists and is recent (< 7 days old)
+        existing = db.query(UserTextProfile).filter_by(user_id=user_id).first()
+        if existing:
+            age_days = (utc_now() - existing.updated_at).days
+            if age_days < 7:
+                logger.info(f"[UserTextProfile] Skipping generation for user {user_id}: profile is {age_days} days old")
+                return {"status": "skipped", "reason": "profile_recent"}
+        
+        logger.info(f"[UserTextProfile] Generating profile for user {user_id}...")
+        
+        # Fetch watch history from Trakt
+        trakt = TraktClient(user_id=user_id)
+        try:
+            history = asyncio.run(trakt.get_user_history(username="me", limit=100))
+        except Exception as e:
+            logger.warning(f"[UserTextProfile] Failed to fetch Trakt history: {e}")
+            history = []
+        
+        if not history or len(history) < 5:
+            logger.warning(f"[UserTextProfile] Insufficient watch history for user {user_id} ({len(history)} items)")
+            return {"status": "skipped", "reason": "insufficient_history"}
+        
+        # Gather metadata and stats
+        genres_ctr = Counter()
+        keywords_ctr = Counter()
+        languages_ctr = Counter()
+        decades_ctr = Counter()
+        rating_avg = 0.0
+        rating_count = 0
+        sample_titles = []
+        
+        for item in history[:50]:
+            ids = (item.get("movie") or item.get("show") or {}).get("ids", {})
+            tid = ids.get("trakt")
+            if not tid:
+                continue
+            
+            meta = db.query(MediaMetadata).filter_by(trakt_id=tid).first()
+            if meta:
+                # Track titles
+                if len(sample_titles) < 15:
+                    sample_titles.append(meta.title)
+                
+                # Track genres
+                try:
+                    genres = _json.loads(meta.genres or "[]")
+                    for g in genres:
+                        genres_ctr[str(g).lower()] += 1
+                except Exception:
+                    pass
+                
+                # Track keywords
+                try:
+                    kws = _json.loads(meta.keywords or "[]")
+                    for kw in kws:
+                        keywords_ctr[str(kw).lower()] += 1
+                except Exception:
+                    pass
+                
+                # Track language
+                if meta.language:
+                    languages_ctr[str(meta.language).lower()] += 1
+                
+                # Track decade
+                if meta.year:
+                    decade = (meta.year // 10) * 10
+                    decades_ctr[decade] += 1
+                
+                # Track rating (if available)
+                if hasattr(item, 'rating') and item.get('rating'):
+                    rating_avg += float(item['rating'])
+                    rating_count += 1
+        
+        if rating_count > 0:
+            rating_avg /= rating_count
+        
+        # Build context for LLM
+        top_genres = [g for g, _ in genres_ctr.most_common(5)]
+        top_keywords = [k for k, _ in keywords_ctr.most_common(8)]
+        top_languages = [l for l, _ in languages_ctr.most_common(2)]
+        top_decades = sorted([d for d, _ in decades_ctr.most_common(3)])
+        
+        context = {
+            "total_watched": len(history),
+            "sample_titles": sample_titles[:10],
+            "top_genres": top_genres,
+            "top_keywords": top_keywords,
+            "top_languages": top_languages,
+            "top_decades": top_decades,
+            "avg_rating": round(rating_avg, 1) if rating_count > 0 else None
+        }
+        
+        # Generate summary with LLM
+        prompt = f"""Based on a user's watch history, create a concise 2-5 sentence profile describing their viewing preferences.
+
+Watch History Summary:
+- Total watched: {context['total_watched']} items
+- Sample titles: {', '.join(context['sample_titles'])}
+- Top genres: {', '.join(context['top_genres'])}
+- Common themes/keywords: {', '.join(context['top_keywords'])}
+- Primary languages: {', '.join(context['top_languages']) if context['top_languages'] else 'English'}
+- Preferred decades: {', '.join(map(str, context['top_decades']))}
+{f"- Average rating given: {context['avg_rating']}/10" if context['avg_rating'] else ""}
+
+Write a natural, conversational profile (2-5 sentences) that captures:
+1. Their core genre preferences and any cross-genre patterns
+2. Notable thematic interests or recurring elements
+3. Viewing style (e.g., cult classics, mainstream hits, foreign cinema, specific eras)
+
+Be specific and use examples from their actual watch history. Avoid generic statements.
+
+Profile:"""
+        
+        # Call LLM via async wrapper
+        async def _call_llm():
+            try:
+                logger.info(f"[UserTextProfile] Generating profile for user {user_id}, prompt length: {len(prompt)}")
+                timeout = httpx.Timeout(60.0, connect=5.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
+                    payload = {
+                        "model": "phi3.5:3.8b-mini-instruct-q4_K_M",
+                        "prompt": prompt,
+                        "stream": False,
+                        "options": {"temperature": 0.7, "num_ctx": 4096},
+                        "keep_alive": "24h"
+                    }
+                    resp = await client.post("http://ollama:11434/api/generate", json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    raw = data.get("response", "").strip()
+                    
+                    # Clean up response
+                    if raw:
+                        # Remove any leading "Profile:" labels
+                        if raw.lower().startswith("profile:"):
+                            raw = raw[8:].strip()
+                        logger.info(f"[UserTextProfile] Generated for user {user_id}: length={len(raw)}, preview={raw[:100]}")
+                        return raw  # No artificial cap
+            except httpx.TimeoutException as e:
+                logger.error(f"[UserTextProfile] LLM timeout (60s) for user {user_id}: {e}")
+                return None
+            except Exception as e:
+                logger.error(f"[UserTextProfile] LLM generation failed for user {user_id}: {type(e).__name__}: {e}")
+                return None
+        
+        summary_text = asyncio.run(_call_llm())
+        
+        # Fallback if LLM fails
+        if not summary_text or len(summary_text) < 20:
+            logger.warning(f"[UserTextProfile] Using fallback profile generation")
+            genre_str = ", ".join(top_genres[:3]) if top_genres else "various genres"
+            decade_str = f"{top_decades[0]}s-{top_decades[-1]}s" if len(top_decades) > 1 else f"{top_decades[0]}s" if top_decades else "various eras"
+            
+            summary_text = f"This user enjoys {genre_str} from the {decade_str}. "
+            if top_keywords:
+                summary_text += f"They gravitate toward content featuring {', '.join(top_keywords[:4])}. "
+            if len(sample_titles) >= 5:
+                summary_text += f"Recent favorites include {sample_titles[0]} and {sample_titles[1]}."
+        
+        # Extract tags from keywords and genres
+        tags = list(set(top_genres[:5] + top_keywords[:8]))
+        tags_json = _json.dumps(tags)
+        
+        # Store or update profile
+        if existing:
+            existing.summary_text = summary_text
+            existing.tags_json = tags_json
+            existing.updated_at = utc_now()
+            logger.info(f"[UserTextProfile] Updated profile for user {user_id}")
+        else:
+            profile = UserTextProfile(
+                user_id=user_id,
+                summary_text=summary_text,
+                tags_json=tags_json,
+                created_at=utc_now(),
+                updated_at=utc_now()
+            )
+            db.add(profile)
+            logger.info(f"[UserTextProfile] Created new profile for user {user_id}")
+        
+        db.commit()
+        
+        return {
+            "status": "success",
+            "summary_length": len(summary_text),
+            "tags_count": len(tags),
+            "watch_history_items": len(history)
+        }
+        
+    except Exception as e:
+        db.rollback()
+        msg = extract_error_message(e)
+        logger.error(f"[UserTextProfile] Generation failed for user {user_id}: {msg}")
+        if self.request.retries < self.max_retries:
+            raise self.retry(countdown=120 * (2 ** self.request.retries))
+        raise
+    finally:
+        db.close()
+
 
 @shared_task(bind=True, max_retries=3)
 def send_user_notification(self, user_id: int, message: str):

@@ -225,32 +225,55 @@ def generate_list_poster(
             reverse=True
         )
         
-        # Get top N items with posters
+        # Get top N items with posters - fetch from MediaMetadata DB
+        from app.core.database import SessionLocal
+        from app.models import MediaMetadata
+        
         poster_images = []
         all_genres = []
         
-        for item in sorted_items[:max_items * 2]:  # Fetch more in case some fail
-            if len(poster_images) >= max_items:
-                break
-            
-            poster_path = item.get('poster_path')
-            if not poster_path:
-                continue
-            
-            img = download_poster_image(poster_path)
-            if img:
-                poster_images.append(img)
-            
-            # Collect genres for theme detection
-            genres_str = item.get('genres', '[]')
-            if isinstance(genres_str, str):
-                try:
-                    genres = json.loads(genres_str)
-                    all_genres.extend(genres)
-                except:
-                    pass
-            elif isinstance(genres_str, list):
-                all_genres.extend(genres_str)
+        db = SessionLocal()
+        try:
+            for item in sorted_items[:max_items * 2]:  # Fetch more in case some fail
+                if len(poster_images) >= max_items:
+                    break
+                
+                # Try to get poster_path from the item dict first (for AI lists)
+                poster_path = item.get('poster_path')
+                
+                # If not in dict, query MediaMetadata by tmdb_id (for custom/manual lists)
+                if not poster_path:
+                    tmdb_id = item.get('tmdb_id') or (item.get('ids', {}).get('tmdb'))
+                    if tmdb_id:
+                        try:
+                            metadata = db.query(MediaMetadata).filter(
+                                MediaMetadata.tmdb_id == int(tmdb_id)
+                            ).first()
+                            if metadata and metadata.poster_path:
+                                poster_path = metadata.poster_path
+                        except Exception as e:
+                            logger.debug(f"Failed to query metadata for tmdb_id {tmdb_id}: {e}")
+                            continue
+                
+                if not poster_path:
+                    continue
+                
+                img = download_poster_image(poster_path)
+                if img:
+                    poster_images.append(img)
+                
+                # Collect genres for theme detection (inside the loop!)
+                genres_str = item.get('genres', '[]')
+                if isinstance(genres_str, str):
+                    try:
+                        genres = json.loads(genres_str)
+                        all_genres.extend(genres)
+                    except:
+                        pass
+                elif isinstance(genres_str, list):
+                    all_genres.extend(genres_str)
+        finally:
+            db.close()
         
         if not poster_images:
             logger.warning(f"No poster images available for list {list_id}")

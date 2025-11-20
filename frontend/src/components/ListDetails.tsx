@@ -2,7 +2,6 @@ import React from "react";
 import { api } from "../hooks/useApi";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 import { formatLocalDate } from "../utils/date";
-import HoverInfoCard from "./HoverInfoCard";
 
 type Item = {
   id: number;
@@ -297,19 +296,21 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
           {items.map(it => {
             const comps = parseExplanation(it.explanation)?.components || parseExplanation(it.explanation) || {};
             const entries = Object.entries(comps).filter(([,v])=> typeof v === 'number' && v > 0).sort((a:any,b:any)=> b[1]-a[1]).slice(0,3);
+            // Use tmdb_id for item navigation
+            const handleItemClick = () => {
+              if (!it.tmdb_id) {
+                console.error('Item missing tmdb_id:', it);
+                return;
+              }
+              window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
+            };
             return (
-              <HoverInfoCard
-                key={it.id}
-                traktId={it.trakt_id}
-                mediaType={it.media_type}
-                fallbackInfo={{
-                  title: it.title,
-                  media_type: it.media_type
-                }}
-              >
-                <div className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl transition-all duration-300 overflow-hidden">
-                  {/* Poster */}
-                  <div className="relative aspect-[2/3] bg-gradient-to-br from-indigo-900/50 to-purple-900/50 overflow-hidden">
+                <div key={it.id} className="group bg-white/10 backdrop-blur-lg border border-white/20 rounded-xl shadow-lg hover:bg-white/15 hover:shadow-2xl hover:ring-2 hover:ring-purple-500 transition-all duration-300 overflow-hidden">
+                  {/* Poster - clickable */}
+                  <div 
+                    onClick={handleItemClick}
+                    className="relative aspect-[2/3] bg-gradient-to-br from-indigo-900/50 to-purple-900/50 overflow-hidden cursor-pointer"
+                  >
                     {it.poster_url ? (
                       <img 
                         src={it.poster_url} 
@@ -336,14 +337,17 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                   
                   {/* Content */}
                   <div className="p-3">
-                    <h4 className="font-semibold text-white text-sm line-clamp-2 mb-2">
+                    <h4 
+                      onClick={handleItemClick}
+                      className="font-semibold text-white text-sm line-clamp-2 mb-2 cursor-pointer hover:text-purple-300 transition-colors"
+                    >
                       {it.title || `#${it.trakt_id}`}
                   </h4>
                   
                   {/* Rating buttons */}
                   <div className="flex gap-2 mb-2">
                     <button 
-                      onClick={() => handleRating(it.trakt_id, it.media_type, 1)}
+                      onClick={(e) => { e.stopPropagation(); handleRating(it.trakt_id, it.media_type, 1); }}
                       className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all min-h-[44px] ${
                         userRatings[it.trakt_id] === 1 
                           ? 'bg-emerald-500 text-white' 
@@ -354,7 +358,7 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                       👍
                     </button>
                     <button 
-                      onClick={() => handleRating(it.trakt_id, it.media_type, -1)}
+                      onClick={(e) => { e.stopPropagation(); handleRating(it.trakt_id, it.media_type, -1); }}
                       className={`flex-1 py-2 rounded-lg text-sm font-medium transition-all min-h-[44px] ${
                         userRatings[it.trakt_id] === -1 
                           ? 'bg-red-500 text-white' 
@@ -382,7 +386,13 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                       </div>
                       {/* Details popover */}
                       <div className="relative group">
-                        <button className="px-2 py-1 text-xs rounded-md bg-white/10 text-white/80 hover:bg-white/20 border border-white/20" title="Why this?">Why</button>
+                        <button 
+                          onClick={(e) => e.stopPropagation()}
+                          className="px-2 py-1 text-xs rounded-md bg-white/10 text-white/80 hover:bg-white/20 border border-white/20" 
+                          title="Why this?"
+                        >
+                          Why
+                        </button>
                         <div className="absolute right-0 mt-2 hidden group-hover:block z-20 w-60 p-3 rounded-xl bg-black/80 text-white/90 border border-white/20 shadow-xl">
                           <div className="text-xs font-semibold mb-1">Why this recommendation</div>
                           <ul className="space-y-1">
@@ -399,7 +409,6 @@ export default function ListDetails({ listId, title, onBack }: { listId: number;
                   )}
                 </div>
               </div>
-              </HoverInfoCard>
             );
           })}
         </div>

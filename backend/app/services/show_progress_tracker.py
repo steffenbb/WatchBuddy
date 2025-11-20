@@ -152,7 +152,7 @@ class ShowProgressTracker:
             total_episodes_watched = len(episodes)
             
             # Calculate days since last watch
-            days_since_watch = (utc_now().replace(tzinfo=None) - last_episode.watched_at).days
+            days_since_watch = (datetime.utcnow() - last_episode.watched_at).days
             
             # Try to get show info from persistent_candidates
             show_info = db.query(PersistentCandidate).filter(

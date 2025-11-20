@@ -115,8 +115,8 @@ class DynamicListService:
             logger.warning(f"[DynamicList] sync_dynamic_lists_impl failed: {e}")
 
     def get_candidates(self, db: Session) -> List[PersistentCandidate]:
-        """Return all candidates with a Trakt ID."""
-        return db.query(PersistentCandidate).filter(PersistentCandidate.trakt_id.isnot(None)).all()
+        """Return all candidates."""
+        return db.query(PersistentCandidate).all()
 
     def _cand_to_dict(self, c: PersistentCandidate) -> Dict[str, Any]:
         genres: Optional[List[str]] = None

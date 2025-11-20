@@ -7,3 +7,4 @@ from . import ratings
 from . import metadata
 from . import chatlists
 from . import ai_lists
+from . import items

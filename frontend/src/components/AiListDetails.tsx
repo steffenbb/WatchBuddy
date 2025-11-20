@@ -2,7 +2,6 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { RefreshCw, ThumbsUp, ThumbsDown, Eye, EyeOff } from 'lucide-react';
 import { listAiListItems, refreshAiList } from '../api/aiLists';
 import { toast } from '../utils/toast';
-import HoverInfoCard from './HoverInfoCard';
 import { api } from '../hooks/useApi';
 
 interface AiListItem {
@@ -145,13 +144,32 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
     return filtered;
   }, [items, hideWatched, sortBy]);
 
+  // Lock body scroll when modal is open
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  // Handle escape key
+  useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
       <div className="relative w-full max-w-5xl bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-4 md:p-6 overflow-hidden">
-        <div className="flex items-center justify-between mb-4 gap-3">
-          <h3 className="text-xl md:text-2xl font-bold text-white truncate overflow-hidden text-ellipsis whitespace-nowrap flex-shrink min-w-0">{title}</h3>
-          <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-3">
+          <h3 className="text-xl md:text-2xl font-bold text-white break-words w-full sm:w-auto">{title}</h3>
+          <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
             <button 
               onClick={() => setHideWatched(!hideWatched)} 
               className={`px-3 py-2 rounded-lg text-white text-sm border border-white/20 ${hideWatched ? "bg-indigo-500/30" : "bg-white/10 hover:bg-white/20"}`}
@@ -199,20 +217,20 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
           </div>
         ) : (
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 max-h-[70vh] overflow-auto pr-1">
-            {filteredAndSorted.map((it, idx) => (
-              <HoverInfoCard
-                key={`${it.tmdb_id}-${it.rank}`}
-                tmdbId={it.tmdb_id}
-                traktId={it.trakt_id}
-                mediaType={it.media_type}
-                fallbackInfo={{
-                  title: it.title,
-                  media_type: it.media_type
-                }}
-              >
-                <div className="relative group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:bg-white/10 transition">
+            {filteredAndSorted.map((it, idx) => {
+              const handleItemClick = () => {
+                if (it.tmdb_id) {
+                  window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
+                }
+              };
+              return (
+                <div 
+                  key={`${it.tmdb_id}-${it.rank}`}
+                  className="relative group bg-white/5 border border-white/10 rounded-xl overflow-hidden hover:bg-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer"
+                  onClick={handleItemClick}
+                >
                   {it.poster_url ? (
-                    <img src={it.poster_url} alt={it.title || ''} className="w-full h-48 object-cover" />
+                    <img src={it.poster_url} alt={it.title || ''} className="w-full h-48 object-cover" loading="lazy" />
                   ) : (
                     <div className="w-full h-48 bg-white/5 flex items-center justify-center text-white/50">No poster</div>
                   )}
@@ -220,14 +238,14 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
                   {/* Rating buttons */}
                   <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                     <button
-                      onClick={() => it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, true)}
+                      onClick={(e) => { e.stopPropagation(); it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, true); }}
                       className={`p-1.5 rounded-lg backdrop-blur-sm ${it.trakt_id && userRatings[it.trakt_id] === 1 ? 'bg-green-500/80 text-white' : 'bg-black/50 hover:bg-green-500/80 text-white'}`}
                       aria-label="Like"
                     >
                       <ThumbsUp size={12} />
                     </button>
                     <button
-                      onClick={() => it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, false)}
+                      onClick={(e) => { e.stopPropagation(); it.trakt_id && it.media_type && handleRate(it.trakt_id, it.media_type, false); }}
                       className={`p-1.5 rounded-lg backdrop-blur-sm ${it.trakt_id && userRatings[it.trakt_id] === -1 ? 'bg-red-500/80 text-white' : 'bg-black/50 hover:bg-red-500/80 text-white'}`}
                       aria-label="Dislike"
                     >
@@ -247,8 +265,8 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
                     )}
                   </div>
                 </div>
-              </HoverInfoCard>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

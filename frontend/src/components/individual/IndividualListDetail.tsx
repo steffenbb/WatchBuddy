@@ -1,14 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { addItemsToIndividualList, getIndividualList, removeItemFromIndividualList, reorderIndividualList, searchIndividualList, syncIndividualListToTrakt } from "../../api/individualLists";
-import SearchModal from "./SearchModal";
 import SuggestionsSidebar from "./SuggestionsSidebar";
 import { useToast } from "../ToastProvider";
-import HoverInfoCard from "../HoverInfoCard";
 
 export default function IndividualListDetail({ listId, onBack }: { listId: number; onBack: () => void }) {
   const [list, setList] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
-  const [showSearch, setShowSearch] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const { addToast } = useToast();
 
@@ -67,15 +64,14 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
   }
 
   return (
-    <div className="grid lg:grid-cols-3 gap-4 p-2 md:p-0 overflow-hidden">
-      <div className="lg:col-span-2 space-y-3 min-w-0">
+    <div className="grid lg:grid-cols-3 gap-4 p-2 md:p-0 max-w-full overflow-x-hidden">
+      <div className="lg:col-span-2 space-y-3 min-w-0 max-w-full">
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
           <div className="flex items-center gap-2 flex-shrink-0 min-w-0">
             <button onClick={onBack} className="px-3 py-2 rounded-lg bg-white/15 text-white hover:bg-white/25 text-sm md:text-base flex-shrink-0">← Back</button>
             <h2 className="text-white font-bold text-lg md:text-xl truncate min-w-0">{list?.name || "List"}</h2>
           </div>
           <div className="flex gap-2 w-full sm:w-auto flex-shrink-0">
-            <button onClick={() => setShowSearch(true)} className="flex-1 sm:flex-none px-3 py-2 rounded-lg bg-white/15 text-white hover:bg-white/25 text-sm md:text-base">Add</button>
             <button 
               onClick={handleSync} 
               disabled={syncing}
@@ -91,20 +87,19 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
         ) : list.items?.length === 0 ? (
           <div className="text-white/60 text-center py-8">This list is empty. Click "Add" to search for movies and shows!</div>
         ) : (
-          <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-3 max-w-full">
-            {list.items?.map((item: any) => (
-              <HoverInfoCard
-                key={item.id}
-                tmdbId={item.tmdb_id}
-                mediaType={item.media_type}
-                fallbackInfo={{
-                  title: item.title,
-                  media_type: item.media_type,
-                  release_date: item.year ? `${item.year}-01-01` : null
-                }}
-              >
-                <div className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 overflow-hidden">
-                  <div className="shrink-0 w-16">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-3 max-w-full">
+            {list.items?.map((item: any) => {
+              const handleItemClick = () => {
+                if (item.tmdb_id) {
+                  window.location.hash = `item/${item.media_type}/${item.tmdb_id}`;
+                }
+              };
+              return (
+                <div 
+                  key={item.id}
+                  className="bg-white/10 border border-white/20 rounded-2xl p-3 flex gap-3 min-w-0 max-w-full overflow-hidden hover:ring-2 hover:ring-purple-500 transition"
+                >
+                  <div className="shrink-0 w-16 cursor-pointer" onClick={handleItemClick}>
                     {item.poster_path ? (
                       <img
                         src={`https://image.tmdb.org/t/p/w154${item.poster_path}`}
@@ -119,16 +114,21 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
                     )}
                   </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-white font-semibold truncate">{item.title}</div>
+                    <div 
+                      className="text-white font-semibold truncate cursor-pointer hover:text-purple-300 transition-colors" 
+                      onClick={handleItemClick}
+                    >
+                      {item.title}
+                    </div>
                     <div className="text-white/70 text-xs">{item.media_type} · {item.year || '—'}</div>
                     {item.fit_score != null && (
                       <div className="text-xs text-white/70 mt-1"><span className="px-2 py-0.5 bg-emerald-500/20 rounded-full">fit {(item.fit_score*100).toFixed(0)}%</span></div>
                     )}
                   </div>
                   <div className="flex flex-col gap-2">
-                    <button onClick={() => moveItem(item.id, -1)} className="px-2 py-1 rounded-md bg-white/10 text-white hover:bg-white/20 text-xs">↑</button>
-                    <button onClick={() => moveItem(item.id, 1)} className="px-2 py-1 rounded-md bg-white/10 text-white hover:bg-white/20 text-xs">↓</button>
-                    <button onClick={async()=>{ 
+                    <button onClick={(e) => { e.stopPropagation(); moveItem(item.id, -1); }} className="px-2 py-1 rounded-md bg-white/10 text-white hover:bg-white/20 text-xs">↑</button>
+                    <button onClick={(e) => { e.stopPropagation(); moveItem(item.id, 1); }} className="px-2 py-1 rounded-md bg-white/10 text-white hover:bg-white/20 text-xs">↓</button>
+                    <button onClick={async(e)=>{ e.stopPropagation(); 
                     try {
                       await removeItemFromIndividualList(listId, item.id, 1); 
                       addToast({ message: `Removed ${item.title}`, type: "success" });
@@ -140,16 +140,14 @@ export default function IndividualListDetail({ listId, onBack }: { listId: numbe
                   }} className="px-2 py-1 rounded-md bg-red-500/80 text-white hover:bg-red-600 text-xs">×</button>
                 </div>
               </div>
-              </HoverInfoCard>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
       <div>
         <SuggestionsSidebar listId={listId} onAdded={load} />
       </div>
-
-      {showSearch && <SearchModal listId={listId} onClose={()=>setShowSearch(false)} onAdded={load} />}
     </div>
   );
 }

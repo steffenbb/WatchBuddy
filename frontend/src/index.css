@@ -119,4 +119,20 @@ body{
 		outline: none;
 		box-shadow: 0 0 0 3px rgba(168, 85, 247, 0.4);
 	}
+	
+	/* Slide-up animation for install prompt */
+	@keyframes slide-up {
+		from {
+			transform: translateY(100%);
+			opacity: 0;
+		}
+		to {
+			transform: translateY(0);
+			opacity: 1;
+		}
+	}
+	
+	.animate-slide-up {
+		animation: slide-up 0.3s ease-out;
+	}
 }

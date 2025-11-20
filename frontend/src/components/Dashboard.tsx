@@ -8,7 +8,7 @@ import ListDetails from "./ListDetails";
 import SuggestedLists from "./SuggestedLists";
 import AiListManager from "./AiListManager";
 import Settings from "./Settings";
-import HomePage from "./HomePage";
+import UnifiedHome from "./UnifiedHome";
 import { theme } from "../theme";
 import IndividualListManager from "./individual/IndividualListManager";
 import IndividualListDetail from "./individual/IndividualListDetail";
@@ -17,17 +17,31 @@ import EditListModal from "./EditListModal";
 import { toast } from "../utils/toast";
 import PageTransition from "./PageTransition";
 import PhaseTimeline from "./phases/PhaseTimeline";
-import Overview from "./Overview";
+import PairwiseTrainer from "./PairwiseTrainer";
+import ItemPage from "./ItemPage/ItemPage";
 
 import { StatusWidgets } from "./StatusWidgets";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 
 // URL routing utilities
-const getViewFromUrl = (): { view: string; listId?: number } => {
+const getViewFromUrl = (): { view: string; listId?: number; mediaType?: string; tmdbId?: number } => {
   const hash = window.location.hash.slice(1); // Remove #
   if (!hash) return { view: 'home' };
   if (hash === 'lists') return { view: 'lists' };
   if (hash === 'timeline') return { view: 'timeline' };
+  if (hash === 'trainer') return { view: 'trainer' };
+  
+  // Item page: #item/movie/550
+  if (hash.startsWith('item/')) {
+    const parts = hash.split('/');
+    if (parts.length === 3) {
+      return {
+        view: 'item',
+        mediaType: parts[1],
+        tmdbId: parseInt(parts[2])
+      };
+    }
+  }
   
   const [view, id] = hash.split('/');
   if (view === 'list' && id) {
@@ -52,9 +66,10 @@ const updateUrl = (view: string, listId?: number) => {
 export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNavigateHome?: (callback: () => void) => void }){
   const { account, loading: accountLoading } = useTraktAccount();
   const [lists, setLists] = useState<any[]>([]);
-  const [view, setView] = useState<"home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview">("home");
+  const [view, setView] = useState<"home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer"|"item">("home");
   const [selectedList, setSelectedList] = useState<{id:number; title:string}|null>(null);
   const [selectedIndividualListId, setSelectedIndividualListId] = useState<number|null>(null);
+  const [itemPageParams, setItemPageParams] = useState<{mediaType: string; tmdbId: number} | null>(null);
   const [editingId, setEditingId] = useState<number|null>(null);
   const [savingId, setSavingId] = useState<number|null>(null);
   const [editValues, setEditValues] = useState<Record<number, any>>({});
@@ -82,6 +97,8 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
         return 'bg-gradient-to-br from-violet-900 via-indigo-900 to-blue-900';
       case 'overview':
         return 'bg-gradient-to-br from-purple-900 via-fuchsia-900 to-pink-900';
+      case 'trainer':
+        return 'bg-gradient-to-br from-indigo-900 via-purple-900 to-violet-900';
       case 'create':
         return 'bg-gradient-to-br from-emerald-900 via-teal-900 to-cyan-900';
       case 'suggested':
@@ -94,7 +111,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
 
   // Initialize from URL on load
   useEffect(() => {
-    const { view: urlView, listId } = getViewFromUrl();
+    const { view: urlView, listId, mediaType, tmdbId } = getViewFromUrl();
     setView(urlView as any);
     
     if (urlView === 'listDetails' && listId) {
@@ -103,13 +120,15 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
       if (foundList) {
         setSelectedList({ id: foundList.id, title: foundList.title });
       }
+    } else if (urlView === 'item' && mediaType && tmdbId) {
+      setItemPageParams({ mediaType, tmdbId });
     }
   }, [lists]);
 
   // Listen for browser back/forward
   useEffect(() => {
     const handlePopState = () => {
-      const { view: urlView, listId } = getViewFromUrl();
+      const { view: urlView, listId, mediaType, tmdbId } = getViewFromUrl();
       setView(urlView as any);
       
       if (urlView === 'listDetails' && listId) {
@@ -120,14 +139,45 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
       } else {
         setSelectedList(null);
       }
+      
+      // Update itemPageParams for item view navigation
+      if (urlView === 'item' && mediaType && tmdbId) {
+        setItemPageParams({ mediaType, tmdbId });
+      } else if (urlView !== 'item') {
+        setItemPageParams(null);
+      }
     };
     
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, [lists]);
 
+  // Listen for hash changes (e.g., clicking similar items)
+  useEffect(() => {
+    const handleHashChange = () => {
+      const { view: urlView, listId, mediaType, tmdbId } = getViewFromUrl();
+      setView(urlView as any);
+      
+      if (urlView === 'listDetails' && listId) {
+        const foundList = lists.find(l => l.id === listId);
+        if (foundList) {
+          setSelectedList({ id: foundList.id, title: foundList.title });
+        }
+      } else if (urlView === 'item' && mediaType && tmdbId) {
+        // Update itemPageParams to trigger ItemPage re-render
+        setItemPageParams({ mediaType, tmdbId });
+      } else {
+        setSelectedList(null);
+        setItemPageParams(null);
+      }
+    };
+    
+    window.addEventListener('hashchange', handleHashChange);
+    return () => window.removeEventListener('hashchange', handleHashChange);
+  }, [lists]);
+
   // Helper function to change view and update URL
-  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview", listId?: number, listTitle?: string) => {
+  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer", listId?: number, listTitle?: string) => {
     setView(newView);
     if (newView === 'listDetails' && listId && listTitle) {
       setSelectedList({ id: listId, title: listTitle });
@@ -193,7 +243,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
           {view === "home" && (
             <PageTransition key="home">
               <div className="px-4">
-                <HomePage />
+                <UnifiedHome />
               </div>
             </PageTransition>
           )}
@@ -355,9 +405,20 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
           </PageTransition>
         )}
 
-        {view === "overview" && (
-          <PageTransition key="overview">
-            <Overview />
+        {view === "trainer" && (
+          <PageTransition key="trainer">
+            <div className="px-4">
+              <PairwiseTrainer />
+            </div>
+          </PageTransition>
+        )}
+
+        {view === "item" && itemPageParams && (
+          <PageTransition key={`item-${itemPageParams.tmdbId}`}>
+            <ItemPage 
+              mediaType={itemPageParams.mediaType} 
+              tmdbId={itemPageParams.tmdbId}
+            />
           </PageTransition>
         )}
         </AnimatePresence>

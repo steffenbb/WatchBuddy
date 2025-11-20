@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import config from "../config.json";
 import { NotificationLog } from './NotificationLog';
+import GlobalSearch from './GlobalSearch/GlobalSearch';
 
 function HealthIndicator() {
   const [healthy, setHealthy] = useState<boolean | null>(null);
@@ -41,6 +42,7 @@ export default function Header({ onLogoClick }: { onLogoClick?: () => void }){
       {/* Minimal top-right header bar with only health + notifications */}
       <header className="sticky top-0 z-40 w-max ml-auto mt-2 mr-2 bg-white/10 backdrop-blur-lg rounded-bl-3xl shadow-2xl border border-white/20 p-2 sm:p-3 transition-all">
         <div className="flex items-center gap-2 sm:gap-3">
+          <GlobalSearch />
           <HealthIndicator />
           <button
             onClick={() => setShowNotifications(true)}

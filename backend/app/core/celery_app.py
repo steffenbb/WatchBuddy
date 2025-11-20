@@ -83,6 +83,7 @@ celery_app.conf.update(
         # Phase detection and watch history (maintenance queue - low priority)
         'app.services.tasks.compute_user_phases_task': {'queue': 'maintenance'},
         'app.services.tasks.sync_user_watch_history_task': {'queue': 'maintenance'},
+        'compress_user_history': {'queue': 'maintenance'},  # History compression via LLM
     },
 
     # Memory management
@@ -145,6 +146,30 @@ celery_app.conf.update(
             "task": "app.services.tasks.sync_user_watch_history_task",
             "schedule": 60 * 60 * 24,  # daily
             "kwargs": {"user_id": 1, "full_sync": True}
+        },
+        # Build user profile vectors (2-3 centroids) daily
+        "build-user-profile-vectors": {
+            "task": "build_user_profile_vectors",
+            "schedule": 60 * 60 * 24,  # daily
+            "kwargs": {"user_id": 1}
+        },
+        # Generate user text profiles (LLM-based summaries) daily for users without profiles
+        "generate-user-text-profiles": {
+            "task": "generate_user_text_profile",
+            "schedule": 60 * 60 * 24,  # daily
+            "kwargs": {"user_id": 1}
+        },
+        # Nightly BGE secondary index builder (additive, safe when disabled)
+        "build-bge-index-nightly": {
+            "task": "build_bge_index_topN",
+            "schedule": 60 * 60 * 24,  # daily
+            "kwargs": {"top_n": getattr(settings, "ai_bge_topn_nightly", 50000)}
+        },
+        # Daily history compression (persona generation via phi3:mini)
+        "compress-history-daily": {
+            "task": "compress_user_history",
+            "schedule": 60 * 60 * 24,  # daily at midnight (timezone-aware)
+            "kwargs": {"user_id": 1, "force_rebuild": False}
         },
     },
     timezone=_get_celery_timezone(),

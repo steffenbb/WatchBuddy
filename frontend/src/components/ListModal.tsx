@@ -2,7 +2,6 @@ import React from "react";
 import { X, RefreshCw, ThumbsUp, ThumbsDown, Filter, Eye, EyeOff } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { api } from "../hooks/useApi";
-import HoverInfoCard from "./HoverInfoCard";
 
 interface ListModalProps {
   listId: number;
@@ -11,6 +10,10 @@ interface ListModalProps {
 }
 
 export default function ListModal({ listId, title, onClose }: ListModalProps) {
+  // Log title to ensure it's passed correctly
+  React.useEffect(() => {
+    console.log('[ListModal] Opening with title:', title, 'listId:', listId);
+  }, [title, listId]);
   const [items, setItems] = React.useState<any[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [syncing, setSyncing] = React.useState(false);
@@ -127,6 +130,25 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
     return filtered;
   }, [items, hideWatched, sortBy]);
 
+  // Lock body scroll when modal is open
+  React.useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
+  // Handle escape key
+  React.useEffect(() => {
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onClose();
+      }
+    };
+    document.addEventListener('keydown', handleEscape);
+    return () => document.removeEventListener('keydown', handleEscape);
+  }, [onClose]);
+
   return (
     <motion.div 
       initial={{ opacity: 0 }}
@@ -144,9 +166,9 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
         className="relative w-full h-full md:h-auto md:max-w-6xl md:max-h-[90vh] md:rounded-3xl overflow-hidden border-0 md:border md:border-white/20 bg-gradient-to-br from-slate-900 via-indigo-950 to-purple-950 shadow-2xl" 
         onClick={(e)=>e.stopPropagation()}
       >
-        <div className="sticky top-0 z-10 flex items-center justify-between gap-3 p-3 md:p-4 border-b border-white/10 bg-black/30 backdrop-blur">
-          <h2 className="text-white font-semibold truncate pr-2 text-sm md:text-base">{title}</h2>
-          <div className="flex items-center gap-2">
+        <div className="sticky top-0 z-10 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 sm:gap-3 p-3 md:p-4 border-b border-white/10 bg-black/30 backdrop-blur">
+          <h2 className="text-white font-semibold w-full sm:flex-1 sm:truncate text-sm md:text-base break-words line-clamp-2 sm:line-clamp-1">{title}</h2>
+          <div className="flex items-center gap-2 flex-shrink-0 w-full sm:w-auto justify-end">
             <button 
               onClick={() => setHideWatched(!hideWatched)} 
               className={`px-2 md:px-3 py-2 rounded-lg text-white text-xs md:text-sm border border-white/20 ${hideWatched ? "bg-indigo-500/30" : "bg-white/10 hover:bg-white/20"}`}
@@ -190,26 +212,24 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                 // Get user rating from state (trakt_id is the key)
                 const userRating = userRatings[it.trakt_id] || 0;
                 
+                const handleItemClick = () => {
+                  if (it.tmdb_id) {
+                    window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
+                  }
+                };
+                
                 return (
-                  <HoverInfoCard
+                  <motion.div 
                     key={idx}
-                    tmdbId={it.tmdb_id}
-                    traktId={it.trakt_id}
-                    mediaType={it.media_type}
-                    fallbackInfo={{
-                      title: it.title,
-                      media_type: it.media_type
-                    }}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: idx * 0.02, duration: 0.2 }}
+                    className="relative group rounded-xl overflow-hidden bg-white/5 border border-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer"
+                    onClick={handleItemClick}
                   >
-                    <motion.div 
-                      initial={{ opacity: 0, scale: 0.9 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      transition={{ delay: idx * 0.02, duration: 0.2 }}
-                      className="relative group rounded-xl overflow-hidden bg-white/5 border border-white/10"
-                    >
                       <div className="aspect-[2/3] w-full bg-slate-900">
                         {src ? (
-                          <img src={src} alt={it.title || "Item"} className="w-full h-full object-cover" />
+                          <img src={src} alt={it.title || "Item"} className="w-full h-full object-cover" loading="lazy" />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-white/40 text-xs">No poster</div>
                         )}
@@ -225,14 +245,14 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                       {/* Rating buttons */}
                       <div className="absolute top-2 right-2 flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
-                          onClick={() => handleRate(it.id, it.trakt_id, it.media_type, true)}
+                          onClick={(e) => { e.stopPropagation(); handleRate(it.id, it.trakt_id, it.media_type, true); }}
                           className={`p-1.5 rounded-lg backdrop-blur-sm ${userRating === 1 ? 'bg-green-500/80 text-white' : 'bg-black/50 hover:bg-green-500/80 text-white'}`}
                           aria-label="Like"
                         >
                           <ThumbsUp size={12} />
                         </button>
                         <button
-                          onClick={() => handleRate(it.id, it.trakt_id, it.media_type, false)}
+                          onClick={(e) => { e.stopPropagation(); handleRate(it.id, it.trakt_id, it.media_type, false); }}
                           className={`p-1.5 rounded-lg backdrop-blur-sm ${userRating === -1 ? 'bg-red-500/80 text-white' : 'bg-black/50 hover:bg-red-500/80 text-white'}`}
                           aria-label="Dislike"
                         >
@@ -242,7 +262,6 @@ export default function ListModal({ listId, title, onClose }: ListModalProps) {
                       
                       <div className="p-2 text-xs text-white/80 truncate">{it.title || it.original_title || "Untitled"}</div>
                     </motion.div>
-                  </HoverInfoCard>
                 );
               })}
             </div>

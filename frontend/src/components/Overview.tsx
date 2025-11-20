@@ -344,8 +344,14 @@ function InvestmentTrackerModule({ data }: { data: any }) {
           <div className="relative">
             <div ref={forgotScrollerRef} className="overflow-x-auto pb-2 -mx-1">
               <div className="flex gap-3 px-1 snap-x snap-mandatory">
-                {forgotList.map((item: any, idx: number) => (
-                  <div key={`forgot-${item.trakt_id || idx}`} className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative">
+                {forgotList.map((item: any, idx: number) => {
+                  const handleItemClick = () => {
+                    if (item.tmdb_id) {
+                      window.location.hash = `item/${item.media_type || 'show'}/${item.tmdb_id}`;
+                    }
+                  };
+                  return (
+                  <div key={`forgot-${item.trakt_id || idx}`} className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative cursor-pointer hover:ring-2 hover:ring-purple-500 transition" onClick={handleItemClick}>
                     {/* Add to Individual List */}
                     {item.tmdb_id && (
                       <div className="absolute top-2 left-2">
@@ -364,7 +370,7 @@ function InvestmentTrackerModule({ data }: { data: any }) {
                       </div>
                     )}
                     {item.poster_path ? (
-                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-40 object-cover rounded mb-2" />
+                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-40 object-cover rounded mb-2" loading="lazy" />
                     ) : (
                       <div className="w-full h-40 mb-2 rounded bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center text-gray-400 text-xs">No poster</div>
                     )}
@@ -372,7 +378,8 @@ function InvestmentTrackerModule({ data }: { data: any }) {
                     <p className="text-xs text-gray-400 mt-0.5">{nextEpisodeLabel(item)}</p>
                     <p className="text-xs text-amber-300 mt-1">Paused {daysSince(item.last_watched_at)} days</p>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -395,10 +402,16 @@ function InvestmentTrackerModule({ data }: { data: any }) {
               <div className="flex gap-3 px-1 snap-x snap-mandatory">
                 {continueList.map((item: any, idx: number) => {
                   const since = daysSince(item.last_watched_at);
+                  const handleItemClick = () => {
+                    if (item.tmdb_id) {
+                      window.location.hash = `item/${item.media_type || 'show'}/${item.tmdb_id}`;
+                    }
+                  };
                   return (
                     <div
                       key={`${item.trakt_id || idx}`}
-                      className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative"
+                      className="min-w-[11rem] max-w-[11rem] snap-start bg-gray-900/50 rounded-lg p-3 relative cursor-pointer hover:ring-2 hover:ring-purple-500 transition"
+                      onClick={handleItemClick}
                     >
                       {/* Add to Individual List */}
                       {item.tmdb_id && (
@@ -511,6 +524,12 @@ function RecommendationsModule({ data, type }: { data: any; type: string }) {
                 <span className="text-xs font-semibold text-purple-400">{Math.round(item.score * 100)}%</span>
               </div>
             )}
+            
+            {item.rationale && (
+              <div className="mt-2 text-xs text-purple-300/80 italic leading-relaxed">
+                {item.rationale}
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -594,7 +613,7 @@ function SeeAllContinuations({
                 {sorted.map((item, idx) => (
                   <div key={`all-${item.trakt_id || idx}`} className="bg-gray-800/60 border border-gray-700 rounded-lg p-3">
                     {item.poster_path ? (
-                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-44 object-cover rounded mb-2" />
+                      <img src={`https://image.tmdb.org/t/p/w185${item.poster_path}`} alt={item.title} className="w-full h-44 object-cover rounded mb-2" loading="lazy" />
                     ) : (
                       <div className="w-full h-44 mb-2 rounded bg-gradient-to-br from-gray-700 to-gray-800 flex items-center justify-center text-gray-400 text-xs">No poster</div>
                     )}

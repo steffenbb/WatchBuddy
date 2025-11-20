@@ -64,7 +64,7 @@ export default function ListCard({ id, title, listType, posterPath, itemLimit, o
     >
       <div className="aspect-[2/3] w-full bg-gradient-to-br from-slate-900 to-slate-800">
         {imageUrl ? (
-          <img src={imageUrl} alt={title} className="w-full h-full object-cover" />
+          <img src={imageUrl} alt={title} className="w-full h-full object-cover" loading="lazy" />
         ) : (
           <div className="w-full h-full flex items-center justify-center text-white/40 text-sm">
             No poster yet

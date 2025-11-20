@@ -32,6 +32,79 @@ OBSCURITY_MAP = {
 }
 
 
+# Genre/style aliases that should be detected BEFORE spaCy NER to avoid misclassification
+# NOTE: Multi-genre styles (like 'buddy cop') use pipe-separated list for hybrid genres
+GENRE_STYLE_ALIASES = {
+    # Classic hybrid subgenres (require multiple genre matches)
+    "romantic comedy": "Romance|Comedy",
+    "romcom": "Romance|Comedy",
+    "rom-com": "Romance|Comedy",
+    "action comedy": "Action|Comedy",
+    "buddy cop": "Action|Comedy|Crime",
+    "cop comedy": "Action|Comedy|Crime",
+    "action thriller": "Action|Thriller",
+    "sci-fi horror": "Science Fiction|Horror",
+    "sci-fi thriller": "Science Fiction|Thriller",
+    "horror comedy": "Horror|Comedy",
+    "dark comedy": "Comedy|Drama",
+    "black comedy": "Comedy|Drama",
+    "crime drama": "Crime|Drama",
+    "crime thriller": "Crime|Thriller",
+    "heist": "Crime|Thriller|Action",
+    "heist film": "Crime|Thriller|Action",
+    "sports drama": "Drama|Sport",
+    "war drama": "War|Drama",
+    "historical drama": "History|Drama",
+    "period drama": "History|Drama",
+    "biographical drama": "Biography|Drama",
+    "biopic": "Biography|Drama",
+    "teen comedy": "Comedy|Drama",
+    "coming of age": "Drama|Comedy",
+    "coming-of-age": "Drama|Comedy",
+    "fantasy adventure": "Fantasy|Adventure",
+    "fantasy epic": "Fantasy|Adventure|Drama",
+    "epic fantasy": "Fantasy|Adventure|Drama",
+    "disaster film": "Action|Thriller|Drama",
+    "disaster movie": "Action|Thriller|Drama",
+    "monster movie": "Horror|Action",
+    "creature feature": "Horror|Action",
+    "zombie": "Horror|Thriller",
+    "zombie film": "Horror|Thriller",
+    "vampire": "Horror|Fantasy",
+    "martial arts": "Action|Crime",
+    "kung fu": "Action|Crime",
+    "western": "Western",
+    "space western": "Western|Science Fiction",
+    "neo-noir": "Crime|Thriller|Mystery",
+    "tech thriller": "Thriller|Science Fiction",
+    "techno-thriller": "Thriller|Science Fiction",
+    "conspiracy thriller": "Thriller|Mystery",
+    
+    # Single-genre style markers
+    "found footage": "Horror",
+    "mockumentary": "Comedy",
+    "anthology": "Drama",
+    "road trip": "Adventure|Comedy",
+    "road movie": "Adventure|Drama",
+    "whodunit": "Mystery|Crime",
+    "slasher": "Horror|Thriller",
+    "giallo": "Horror|Thriller",
+    "space opera": "Science Fiction|Adventure",
+    "cyberpunk": "Science Fiction|Thriller",
+    "steampunk": "Science Fiction|Adventure",
+    "sword and sorcery": "Fantasy|Adventure",
+    "superhero": "Action|Adventure",
+    "courtroom drama": "Drama|Crime",
+    "legal drama": "Drama|Crime",
+    "medical drama": "Drama",
+    "legal thriller": "Thriller|Crime",
+    "psychological thriller": "Thriller|Mystery",
+    "psychological horror": "Horror|Thriller",
+    "political thriller": "Thriller|Drama",
+    "spy thriller": "Thriller|Action",
+    "espionage": "Thriller|Action",
+}
+
 def _extract_years(text: str) -> Tuple[List[int], List[int]]:
     """Extract explicit years and year ranges from text with various patterns."""
     # Extract all 4-digit years
@@ -92,6 +165,31 @@ def _extract_years(text: str) -> Tuple[List[int], List[int]]:
     
     return years, ranges
 
+
+def _preprocess_genre_styles(text: str) -> Tuple[str, List[str]]:
+    """Extract genre/style patterns from text before spaCy processing to prevent misclassification.
+    
+    Returns:
+        Tuple of (cleaned_text, extracted_genres)
+    """
+    extracted_genres = []
+    cleaned = text
+    
+    for pattern, genre_str in GENRE_STYLE_ALIASES.items():
+        # Case-insensitive search for genre/style patterns
+        if re.search(r"\b" + re.escape(pattern) + r"\b", text, re.IGNORECASE):
+            # Handle multi-genre patterns (pipe-separated)
+            if "|" in genre_str:
+                extracted_genres.extend(genre_str.split("|"))
+            else:
+                extracted_genres.append(genre_str)
+            # Remove the pattern to prevent spaCy from misclassifying it
+            cleaned = re.sub(r"\b" + re.escape(pattern) + r"\b", "", cleaned, flags=re.IGNORECASE)
+    
+    # Clean up extra whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    
+    return cleaned, extracted_genres
 
 def _extract_seed_titles(text: str) -> List[str]:
     """Capture seed titles with various patterns and case-insensitive matching.
@@ -364,55 +462,120 @@ def _synonyms(word: str) -> Set[str]:
     s: Set[str] = {word}
     
     # Manual genre synonym mappings (more reliable than WordNet for film genres)
+    # Massively expanded for comprehensive coverage of subgenres, moods, styles, and international terms
     genre_synonyms = {
-        'sci-fi': {'science fiction', 'scifi', 'sf'},
-        'science fiction': {'sci-fi', 'scifi', 'sf'},
-        'rom-com': {'romantic comedy', 'romcom'},
-        'romantic comedy': {'rom-com', 'romcom'},
-        'thriller': {'suspense', 'suspenseful'},
-        'suspense': {'thriller', 'suspenseful'},
-        'horror': {'scary', 'terror', 'frightening', 'spooky'},
-        'scary': {'horror', 'terror', 'frightening', 'spooky'},
-        'comedy': {'funny', 'humorous', 'comedic'},
-        'funny': {'comedy', 'humorous', 'comedic'},
-        'action': {'explosive', 'adrenaline'},
-        'drama': {'dramatic', 'serious'},
-        'documentary': {'doc', 'docu', 'non-fiction'},
-        'animated': {'animation', 'cartoon', 'anime'},
-        'animation': {'animated', 'cartoon', 'anime'},
-        'fantasy': {'magical', 'mystical'},
-        'mystery': {'detective', 'whodunit', 'crime'},
-        'detective': {'mystery', 'whodunit', 'crime'},
-        'western': {'cowboy', 'spaghetti western'},
-        'war': {'military', 'combat', 'battlefield'},
-        'musical': {'music', 'song and dance'},
-        'biography': {'biopic', 'biographical', 'bio'},
-        'biopic': {'biography', 'biographical', 'bio'},
-        'historical': {'period', 'period piece', 'history'},
-        'period': {'historical', 'period piece', 'history'},
-        'noir': {'film noir', 'neo-noir', 'dark'},
-        'family': {'kids', 'children', 'family-friendly'},
-        'kids': {'family', 'children', 'family-friendly'},
-        'adventure': {'adventurous', 'quest'},
-        'romantic': {'romance', 'love story', 'love'},
-        'romance': {'romantic', 'love story', 'love'},
-        'psychological': {'mind-bending', 'mental', 'cerebral'},
-        'dark': {'grim', 'noir', 'bleak', 'gritty'},
-        'gritty': {'dark', 'grim', 'raw', 'realistic'},
-        'indie': {'independent', 'art house', 'arthouse'},
-        'independent': {'indie', 'art house', 'arthouse'},
-        'cult': {'cult classic', 'underground'},
-        'superhero': {'comic book', 'marvel', 'dc'},
-        'heist': {'caper', 'robbery', 'con'},
-        'zombie': {'undead', 'walking dead'},
-        'vampire': {'dracula', 'bloodsucker'},
-        'alien': {'extraterrestrial', 'et', 'ufo'},
-        'disaster': {'catastrophe', 'apocalypse', 'end of the world'},
-        'survival': {'post-apocalyptic', 'dystopian'},
-        'dystopian': {'post-apocalyptic', 'survival', 'bleak future'},
-        'cyberpunk': {'cyber', 'futuristic', 'tech noir'},
-        'time travel': {'time-travel', 'temporal'},
-        'epic': {'grand', 'sweeping', 'large-scale'},
+        # Core genres
+        'sci-fi': {'science fiction', 'scifi', 'sf', 'speculative fiction'},
+        'science fiction': {'sci-fi', 'scifi', 'sf', 'speculative fiction'},
+        'rom-com': {'romantic comedy', 'romcom', 'love comedy'},
+        'romantic comedy': {'rom-com', 'romcom', 'love comedy'},
+        'thriller': {'suspense', 'suspenseful', 'edge of your seat', 'nail-biting', 'tense'},
+        'suspense': {'thriller', 'suspenseful', 'tense', 'gripping'},
+        'horror': {'scary', 'terror', 'frightening', 'spooky', 'creepy', 'terrifying', 'nightmare'},
+        'scary': {'horror', 'terror', 'frightening', 'spooky', 'creepy'},
+        'comedy': {'funny', 'humorous', 'comedic', 'hilarious', 'laugh-out-loud', 'lol'},
+        'funny': {'comedy', 'humorous', 'comedic', 'hilarious'},
+        'action': {'explosive', 'adrenaline', 'high-octane', 'intense', 'fast-paced'},
+        'drama': {'dramatic', 'serious', 'emotional', 'moving', 'poignant'},
+        'documentary': {'doc', 'docu', 'non-fiction', 'factual', 'real-life'},
+        'animated': {'animation', 'cartoon', 'anime', 'cgi', 'stop-motion'},
+        'animation': {'animated', 'cartoon', 'anime', 'cgi'},
+        'fantasy': {'magical', 'mystical', 'enchanted', 'mythical', 'fairy tale'},
+        'mystery': {'detective', 'whodunit', 'crime', 'puzzle', 'sleuth'},
+        'detective': {'mystery', 'whodunit', 'crime', 'investigator', 'sleuth'},
+        'western': {'cowboy', 'spaghetti western', 'frontier', 'wild west', 'oater'},
+        'war': {'military', 'combat', 'battlefield', 'soldier', 'wartime'},
+        'musical': {'music', 'song and dance', 'broadway', 'singalong'},
+        'biography': {'biopic', 'biographical', 'bio', 'life story', 'true story'},
+        'biopic': {'biography', 'biographical', 'bio', 'life story'},
+        'historical': {'period', 'period piece', 'history', 'costume drama', 'heritage'},
+        'period': {'historical', 'period piece', 'history', 'costume drama'},
+        'noir': {'film noir', 'neo-noir', 'dark', 'shadowy', 'moody'},
+        'family': {'kids', 'children', 'family-friendly', 'all ages', 'wholesome'},
+        'kids': {'family', 'children', 'family-friendly', 'youth'},
+        'adventure': {'adventurous', 'quest', 'journey', 'expedition', 'exploration'},
+        'romantic': {'romance', 'love story', 'love', 'passion', 'relationship'},
+        'romance': {'romantic', 'love story', 'love', 'passion'},
+        
+        # Mood & atmosphere
+        'psychological': {'mind-bending', 'mental', 'cerebral', 'psyche', 'twisted'},
+        'dark': {'grim', 'noir', 'bleak', 'gritty', 'somber', 'moody'},
+        'gritty': {'dark', 'grim', 'raw', 'realistic', 'harsh', 'brutal'},
+        'uplifting': {'feel-good', 'heartwarming', 'inspiring', 'positive', 'hopeful'},
+        'feel-good': {'uplifting', 'heartwarming', 'inspiring', 'wholesome'},
+        'emotional': {'moving', 'touching', 'poignant', 'tearjerker', 'heart-wrenching'},
+        'intense': {'gripping', 'powerful', 'visceral', 'raw', 'compelling'},
+        'lighthearted': {'light', 'breezy', 'fluffy', 'easy-watching', 'casual'},
+        'thought-provoking': {'intellectual', 'cerebral', 'philosophical', 'deep', 'meaningful'},
+        'whimsical': {'quirky', 'offbeat', 'eccentric', 'playful', 'fanciful'},
+        'quirky': {'whimsical', 'offbeat', 'eccentric', 'unusual', 'idiosyncratic'},
+        'atmospheric': {'moody', 'ambient', 'immersive', 'evocative'},
+        
+        # Production & style
+        'indie': {'independent', 'art house', 'arthouse', 'low-budget'},
+        'independent': {'indie', 'art house', 'arthouse', 'auteur'},
+        'cult': {'cult classic', 'underground', 'niche', 'devoted following'},
+        'blockbuster': {'big-budget', 'tentpole', 'major release', 'studio film'},
+        'arthouse': {'art film', 'artistic', 'auteur', 'experimental', 'avant-garde'},
+        'experimental': {'avant-garde', 'unconventional', 'innovative', 'boundary-pushing'},
+        'slow-burn': {'slow-paced', 'deliberate', 'meditative', 'contemplative'},
+        'fast-paced': {'action-packed', 'rapid', 'quick', 'energetic', 'brisk'},
+        
+        # Subgenres
+        'superhero': {'comic book', 'marvel', 'dc', 'caped crusader', 'vigilante'},
+        'heist': {'caper', 'robbery', 'con', 'theft', 'crime'},
+        'zombie': {'undead', 'walking dead', 'infected', 'apocalypse'},
+        'vampire': {'dracula', 'bloodsucker', 'nosferatu', 'fang'},
+        'alien': {'extraterrestrial', 'et', 'ufo', 'space invader'},
+        'disaster': {'catastrophe', 'apocalypse', 'end of the world', 'calamity'},
+        'survival': {'post-apocalyptic', 'dystopian', 'wilderness', 'endurance'},
+        'dystopian': {'post-apocalyptic', 'survival', 'bleak future', 'totalitarian'},
+        'utopian': {'idealistic', 'perfect world', 'paradise'},
+        'cyberpunk': {'cyber', 'futuristic', 'tech noir', 'neon', 'hacker'},
+        'steampunk': {'victorian sci-fi', 'retro-futuristic', 'clockwork'},
+        'time travel': {'time-travel', 'temporal', 'time loop', 'paradox'},
+        'parallel universe': {'multiverse', 'alternate reality', 'dimension'},
+        'space opera': {'galactic', 'star wars', 'epic sci-fi'},
+        'slasher': {'serial killer', 'masked killer', 'stalk-and-slash'},
+        'found footage': {'pov', 'mockumentary', 'handheld'},
+        'body horror': {'grotesque', 'transformation', 'visceral horror'},
+        'creature feature': {'monster', 'beast', 'kaiju'},
+        'giallo': {'italian thriller', 'stylized murder'},
+        'wuxia': {'martial arts', 'chinese swordplay', 'kung fu epic'},
+        'samurai': {'chambara', 'japanese sword', 'bushido'},
+        'spaghetti western': {'italian western', 'leone'},
+        'neo-noir': {'modern noir', 'contemporary noir', 'crime thriller'},
+        'techno-thriller': {'tech thriller', 'cyber thriller', 'technology'},
+        'legal thriller': {'courtroom', 'lawyer', 'trial'},
+        'medical thriller': {'hospital', 'doctor', 'outbreak'},
+        'political thriller': {'conspiracy', 'espionage', 'government'},
+        'spy': {'espionage', 'secret agent', 'intelligence', 'james bond', '007'},
+        'espionage': {'spy', 'secret agent', 'intelligence', 'covert'},
+        
+        # International
+        'bollywood': {'indian', 'hindi cinema', 'masala'},
+        'anime': {'japanese animation', 'manga adaptation'},
+        'k-drama': {'korean drama', 'kdrama', 'hallyu'},
+        'j-horror': {'japanese horror', 'asian horror'},
+        'french new wave': {'nouvelle vague', 'godard'},
+        'giallo': {'italian thriller', 'horror-thriller'},
+        
+        # Audience & rating
+        'mature': {'adult', 'r-rated', 'explicit', 'graphic'},
+        'pg': {'family-friendly', 'all ages', 'clean'},
+        'edgy': {'provocative', 'controversial', 'boundary-pushing', 'daring'},
+        'mainstream': {'popular', 'commercial', 'wide-appeal', 'accessible'},
+        'obscure': {'unknown', 'rare', 'hard to find', 'hidden', 'underground'},
+        
+        # Era & style
+        'classic': {'old', 'vintage', 'golden age', 'timeless'},
+        'modern': {'contemporary', 'current', 'recent', 'new'},
+        'retro': {'throwback', 'nostalgic', 'vintage-style', 'period'},
+        'epic': {'grand', 'sweeping', 'large-scale', 'monumental', 'spectacular'},
+        'minimalist': {'sparse', 'simple', 'stripped-down', 'austere'},
+        'surreal': {'dreamlike', 'bizarre', 'absurd', 'kafkaesque'},
+        'satirical': {'satire', 'parody', 'spoof', 'mockery'},
+        'parody': {'spoof', 'satire', 'mockery', 'send-up'},
     }
     
     word_lower = word.lower()
@@ -455,21 +618,66 @@ def _extract_bool(text: str, key: str) -> Optional[bool]:
 def _extract_networks(text: str) -> List[str]:
     """Extract TV networks/streaming services from prompt with case-insensitive matching."""
     networks_map = {
-        "hbo": "HBO", "hbo max": "Max", "netflix": "Netflix", "amazon": "Amazon", "prime video": "Amazon",
-        "prime": "Amazon", "disney": "Disney+", "disney+": "Disney+", "disney plus": "Disney+",
+        # Major streaming platforms
+        "netflix": "Netflix", "amazon": "Amazon", "prime video": "Amazon", "prime": "Amazon",
+        "disney": "Disney+", "disney+": "Disney+", "disney plus": "Disney+",
         "apple tv": "Apple TV+", "apple tv+": "Apple TV+", "apple": "Apple TV+",
-        "hulu": "Hulu", "paramount": "Paramount+", "paramount+": "Paramount+", "paramount plus": "Paramount+",
+        "hulu": "Hulu", "max": "Max", "hbo max": "Max", "hbo": "HBO",
+        "paramount": "Paramount+", "paramount+": "Paramount+", "paramount plus": "Paramount+",
         "peacock": "Peacock", "showtime": "Showtime", "starz": "STARZ",
-        "amc": "AMC", "fx": "FX", "fxx": "FXX", "nbc": "NBC", "cbs": "CBS", "abc": "ABC",
-        "cw": "The CW", "the cw": "The CW", "fox": "FOX", "bbc": "BBC", "itv": "ITV", 
-        "channel 4": "Channel 4", "sky": "Sky", "mtv": "MTV", 
-        "comedy central": "Comedy Central", "cartoon network": "Cartoon Network",
-        "nickelodeon": "Nickelodeon", "discovery": "Discovery", "history": "History Channel",
-        "history channel": "History Channel", "national geographic": "National Geographic",
-        "nat geo": "National Geographic", "espn": "ESPN", "syfy": "Syfy", "sci-fi channel": "Syfy",
-        "usa network": "USA Network", "usa": "USA Network", "tnt": "TNT", "tbs": "TBS", 
-        "bravo": "Bravo", "adult swim": "Adult Swim", "crunchyroll": "Crunchyroll", 
-        "max": "Max", "hulu": "Hulu", "showtime": "Showtime",
+        "crunchyroll": "Crunchyroll", "funimation": "Crunchyroll",
+        
+        # Premium cable
+        "amc": "AMC", "amc+": "AMC+", "fx": "FX", "fxx": "FXX", "fxm": "FXM",
+        "showtime": "Showtime", "cinemax": "Cinemax", "epix": "EPIX", "mgm+": "MGM+",
+        
+        # Broadcast networks (US)
+        "nbc": "NBC", "cbs": "CBS", "abc": "ABC", "fox": "FOX", 
+        "cw": "The CW", "the cw": "The CW", "pbs": "PBS",
+        
+        # Cable networks (US)
+        "usa": "USA Network", "usa network": "USA Network", "tnt": "TNT", "tbs": "TBS",
+        "bravo": "Bravo", "e!": "E!", "vh1": "VH1", "mtv": "MTV", "bet": "BET",
+        "comedy central": "Comedy Central", "adult swim": "Adult Swim",
+        "cartoon network": "Cartoon Network", "nickelodeon": "Nickelodeon",
+        "disney channel": "Disney Channel", "nick": "Nickelodeon",
+        "syfy": "Syfy", "sci-fi channel": "Syfy", "sci fi": "Syfy",
+        "lifetime": "Lifetime", "hallmark": "Hallmark", "hallmark channel": "Hallmark Channel",
+        "tlc": "TLC", "hgtv": "HGTV", "food network": "Food Network",
+        "discovery": "Discovery", "discovery+": "Discovery+", "animal planet": "Animal Planet",
+        "history": "History Channel", "history channel": "History Channel",
+        "national geographic": "National Geographic", "nat geo": "National Geographic",
+        "espn": "ESPN", "espn+": "ESPN+", "nfl network": "NFL Network",
+        
+        # International (UK)
+        "bbc": "BBC", "bbc one": "BBC One", "bbc two": "BBC Two", "bbc three": "BBC Three",
+        "itv": "ITV", "channel 4": "Channel 4", "channel four": "Channel 4",
+        "sky": "Sky", "sky atlantic": "Sky Atlantic", "sky one": "Sky One",
+        "britbox": "BritBox", "all4": "All 4",
+        
+        # International (Other)
+        "arte": "ARTE", "ard": "ARD", "zdf": "ZDF",  # Germany
+        "tf1": "TF1", "france 2": "France 2", "canal+": "Canal+",  # France
+        "rai": "RAI", "mediaset": "Mediaset",  # Italy
+        "rtve": "RTVE", "antena 3": "Antena 3",  # Spain
+        "nos": "NOS", "rtl": "RTL",  # Netherlands
+        "dr": "DR", "tv2": "TV2", "nrk": "NRK", "svt": "SVT", "yle": "YLE",  # Nordic
+        "cbc": "CBC", "ctv": "CTV", "global": "Global TV",  # Canada
+        "abc australia": "ABC Australia", "sbs": "SBS",  # Australia
+        "tvnz": "TVNZ", "three": "Three",  # New Zealand
+        "nhk": "NHK", "fuji tv": "Fuji TV", "tbs japan": "TBS Japan",  # Japan
+        "kbs": "KBS", "mbc": "MBC", "sbs korea": "SBS",  # Korea
+        "tvb": "TVB", "atv": "ATV",  # Hong Kong
+        
+        # Niche & genre-specific
+        "shudder": "Shudder", "tubi": "Tubi", "pluto tv": "Pluto TV", "roku": "Roku Channel",
+        "freevee": "Freevee", "plex": "Plex", "vudu": "Vudu",
+        "criterion": "Criterion Channel", "mubi": "MUBI", "kanopy": "Kanopy",
+        "acorn tv": "Acorn TV", "sundance": "Sundance Now", "ifc": "IFC",
+        "amc+": "AMC+", "allblk": "ALLBLK", "bet+": "BET+",
+        "hallmark movies now": "Hallmark Movies Now",
+        "curiositystream": "CuriosityStream", "magellan tv": "MagellanTV",
+        "wwe network": "WWE Network", "dazn": "DAZN",
     }
     found_networks = []
     text_lower = text.lower()
@@ -642,17 +850,56 @@ def _extract_rating_qualifiers(text: str) -> List[str]:
     qualifiers = []
     text_lower = text.lower()
     
-    # Quality patterns
+    # Quality patterns - comprehensive coverage of reception, awards, and popularity
     quality_patterns = {
-        'highly_rated': [r'\bhighly rated\b', r'\bhigh rating\b', r'\btop rated\b', r'\bwell rated\b'],
-        'critically_acclaimed': [r'\bcritically acclaimed\b', r'\bacclaimed\b', r'\bcritically praised\b', 
-                                r'\bcritical favorite\b', r'\bcritical darling\b'],
-        'cult_classic': [r'\bcult classic\b', r'\bcult favorite\b', r'\bcult film\b', r'\bcult following\b'],
-        'award_winning': [r'\baward winning\b', r'\baward-winning\b', r'\boscar winning\b', 
-                         r'\bemmy winning\b', r'\bprize winning\b'],
-        'underrated': [r'\bunderrated\b', r'\bunder-rated\b', r'\bunder the radar\b', r'\bhidden gem\b'],
-        'popular': [r'\bpopular\b', r'\bfamous\b', r'\bwell known\b', r'\bmainstream\b'],
-        'obscure': [r'\bobscure\b', r'\bunknown\b', r'\brare\b', r'\bhard to find\b'],
+        # Critical reception
+        'highly_rated': [r'\bhighly rated\b', r'\bhigh rating\b', r'\btop rated\b', r'\bwell rated\b',
+                        r'\bhigh score\b', r'\bgreat reviews\b', r'\bpositive reviews\b'],
+        'critically_acclaimed': [r'\bcritically acclaimed\b', r'\bacclaimed\b', r'\bcritically praised\b',
+                                r'\bcritical favorite\b', r'\bcritical darling\b', r'\bcritically loved\b',
+                                r'\bcritical success\b', r'\buniversally praised\b'],
+        'masterpiece': [r'\bmasterpiece\b', r'\bmagnum opus\b', r'\btour de force\b', r'\blandmark film\b'],
+        'classic': [r'\bclassic\b', r'\btimeless\b', r'\binstitution\b', r'\biconic\b',
+                   r'\bdefining film\b', r'\bessential viewing\b'],
+        
+        # Audience reception
+        'cult_classic': [r'\bcult classic\b', r'\bcult favorite\b', r'\bcult film\b', r'\bcult following\b',
+                        r'\bcult hit\b', r'\bcult status\b'],
+        'fan_favorite': [r'\bfan favorite\b', r'\bfan favourite\b', r'\bbeloved\b', r'\bfans love\b',
+                        r'\bcrowd pleaser\b', r'\baudience favorite\b'],
+        'sleeper_hit': [r'\bsleeper hit\b', r'\bsleeper\b', r'\bsurprise hit\b', r'\bunexpected success\b'],
+        'box_office_hit': [r'\bbox office hit\b', r'\bbox office success\b', r'\bblockbuster\b',
+                          r'\bcommercial success\b', r'\bsmash hit\b', r'\bhuge hit\b'],
+        
+        # Awards & recognition
+        'award_winning': [r'\baward winning\b', r'\baward-winning\b', r'\baward winner\b'],
+        'oscar_winning': [r'\boscar winning\b', r'\boscar winner\b', r'\bacademy award\b',
+                         r'\boscar nominated\b', r'\bacademy award nominated\b'],
+        'emmy_winning': [r'\bemmy winning\b', r'\bemmy winner\b', r'\bemmy nominated\b'],
+        'golden_globe': [r'\bgolden globe\b', r'\bglobe winner\b', r'\bglobe nominated\b'],
+        'cannes': [r'\bcannes\b', r'\bpalme d\'or\b', r'\bcannes winner\b'],
+        'sundance': [r'\bsundance\b', r'\bsundance winner\b', r'\bsundance award\b'],
+        'bafta': [r'\bbafta\b', r'\bbritish academy\b', r'\bbafta winner\b'],
+        
+        # Discovery & popularity
+        'underrated': [r'\bunderrated\b', r'\bunder-rated\b', r'\bunder the radar\b',
+                      r'\bhidden gem\b', r'\boverlooked\b', r'\bunderappreciated\b',
+                      r'\bslept on\b', r'\bdeserves more attention\b'],
+        'overrated': [r'\boverrated\b', r'\bover-rated\b', r'\boverhyped\b', r'\bhyped\b'],
+        'popular': [r'\bpopular\b', r'\bfamous\b', r'\bwell known\b', r'\bmainstream\b',
+                   r'\beveryone knows\b', r'\beveryone\'s seen\b', r'\biconic\b'],
+        'obscure': [r'\bobscure\b', r'\bunknown\b', r'\brare\b', r'\bhard to find\b',
+                   r'\blittle known\b', r'\bdeeply obscure\b', r'\bresurfaced\b'],
+        'controversial': [r'\bcontroversial\b', r'\bdivisive\b', r'\bpolarizing\b',
+                         r'\blove it or hate it\b', r'\bmarmite\b'],
+        
+        # Quality descriptors
+        'influential': [r'\binfluential\b', r'\bgroundbreaking\b', r'\bseminal\b',
+                       r'\bgame-changing\b', r'\brevolutionary\b', r'\btrailblazing\b'],
+        'must_watch': [r'\bmust watch\b', r'\bmust-watch\b', r'\bmust see\b', r'\bmust-see\b',
+                      r'\bessential\b', r'\bcan\'t miss\b', r'\bdon\'t miss\b'],
+        'binge_worthy': [r'\bbinge worthy\b', r'\bbinge-worthy\b', r'\baddictive\b',
+                        r'\bcan\'t stop watching\b', r'\bone more episode\b'],
     }
     
     for qualifier, patterns in quality_patterns.items():
@@ -689,10 +936,98 @@ def _extract_studios(text: str, entities: Dict[str, List[str]]) -> List[str]:
                         studios.append(org)
     
     # Also include direct org entity matches that are known studios
-    known_studios = ['Marvel Studios', 'Disney', 'Pixar', 'Warner Bros', 'Universal Pictures', 
-                    'Paramount Pictures', 'Sony Pictures', 'A24', 'Miramax', 'DreamWorks', 
-                    'Lucasfilm', 'Studio Ghibli', 'Blumhouse Productions', 'Legendary Pictures',
-                    'Netflix', 'Amazon Studios', 'Apple TV+', 'HBO']
+    # Massively expanded to cover Hollywood majors, independents, international, and streaming originals
+    known_studios = [
+        # Major Hollywood Studios (The Big Five + Legacy)
+        'Warner Bros', 'Warner Bros.', 'Warner Brothers', 'WB', 'Warner Bros. Pictures',
+        'Universal Pictures', 'Universal Studios', 'Universal',
+        'Paramount Pictures', 'Paramount', 'Paramount Global',
+        'Sony Pictures', 'Columbia Pictures', 'TriStar Pictures', 'Sony',
+        'Walt Disney Pictures', 'Disney', 'Walt Disney Studios',
+        '20th Century Studios', '20th Century Fox', 'Fox', 'Twentieth Century',
+        'MGM', 'Metro-Goldwyn-Mayer', 'United Artists',
+        'Lionsgate', 'Lions Gate Entertainment', 'Summit Entertainment',
+        
+        # Disney Family
+        'Pixar', 'Pixar Animation Studios', 'Marvel Studios', 'Marvel Entertainment',
+        'Lucasfilm', 'Star Wars', 'Walt Disney Animation Studios',
+        '20th Century Animation', 'Searchlight Pictures', 'Fox Searchlight',
+        'Touchstone Pictures', 'Hollywood Pictures', 'Miramax',
+        
+        # Warner Bros Family
+        'DC Films', 'DC Studios', 'DC Entertainment', 'New Line Cinema',
+        'Castle Rock Entertainment', 'HBO Films', 'HBO Max', 'Max Original',
+        
+        # Universal Family
+        'DreamWorks', 'DreamWorks Animation', 'DreamWorks Pictures',
+        'Illumination Entertainment', 'Illumination', 'Focus Features',
+        'Working Title Films', 'Blumhouse Productions', 'Blumhouse',
+        
+        # Paramount Family  
+        'Paramount Animation', 'Paramount Vantage', 'Paramount Classics',
+        'Nickelodeon Movies', 'MTV Films',
+        
+        # Sony Family
+        'Sony Pictures Animation', 'Screen Gems', 'Sony Pictures Classics',
+        'Stage 6 Films', 'TriStar', 'Columbia',
+        
+        # Major Independents
+        'A24', 'Neon', 'Annapurna Pictures', 'Legendary Pictures', 'Legendary Entertainment',
+        'Amblin Entertainment', 'Amblin', 'Imagine Entertainment',
+        'Bad Robot Productions', 'Bad Robot', 'Plan B Entertainment', 'Plan B',
+        'Scott Free Productions', 'Scott Free', 'Jerry Bruckheimer Films',
+        'Skydance Media', 'Skydance', 'STX Entertainment', 'STXfilms',
+        'Relativity Media', 'The Weinstein Company', 'Dimension Films',
+        'FilmNation Entertainment', 'Bold Films', 'Participant Media',
+        'Bleecker Street', 'Magnolia Pictures', 'IFC Films', 'Roadside Attractions',
+        'Open Road Films', 'Vertical Entertainment', 'Gravitas Ventures',
+        
+        # Horror & Genre Specialists
+        'Blumhouse', 'Blumhouse Productions', 'New Line Cinema',
+        'Hammer Film Productions', 'Hammer Films', 'Troma Entertainment', 'Troma',
+        'Full Moon Features', 'Asylum', 'The Asylum', 'Screen Gems',
+        'Dark Castle Entertainment', 'Ghost House Pictures',
+        
+        # Animation Studios
+        'Pixar', 'DreamWorks Animation', 'Illumination', 'Sony Pictures Animation',
+        'Blue Sky Studios', 'Laika', 'Aardman Animations', 'Studio Ghibli',
+        'Walt Disney Animation', 'Warner Bros. Animation', 'Cartoon Network Studios',
+        'Nickelodeon Animation', 'Adult Swim Productions',
+        
+        # International (Europe)
+        'Studio Canal', 'StudioCanal', 'Working Title', 'Film4 Productions', 'Film4',
+        'BBC Films', 'Constantin Film', 'Tobis Film', 'Senator Film',
+        'EuropaCorp', 'Pathé', 'Gaumont', 'MK2', 'Wild Bunch',
+        'Medusa Film', 'Filmax', 'Atresmedia Cine',
+        
+        # International (Asia)
+        'Studio Ghibli', 'Toho', 'Toei Animation', 'Madhouse', 'Bones', 'Kyoto Animation',
+        'Production I.G', 'Sunrise', 'Pierrot', 'Ufotable', 'A-1 Pictures',
+        'CJ Entertainment', 'Showbox', 'Next Entertainment World', 'NEW',
+        'Golden Harvest', 'Shaw Brothers', 'Media Asia', 'Bona Film Group',
+        'Dharma Productions', 'Yash Raj Films', 'Red Chillies Entertainment',
+        'Eros International', 'Reliance Entertainment',
+        
+        # Streaming Originals
+        'Netflix', 'Netflix Studios', 'Amazon Studios', 'Amazon MGM Studios',
+        'Apple TV+', 'Apple Original Films', 'Apple Studios',
+        'Hulu Original', 'Disney+ Original', 'Paramount+ Original',
+        'Max Original', 'HBO Max Original', 'HBO Films', 'HBO Entertainment',
+        'Peacock Original', 'Apple TV+ Studios',
+        
+        # TV Production Companies
+        'HBO', 'Showtime', 'FX Productions', 'AMC Studios',
+        'NBC Universal Television', 'CBS Studios', 'ABC Studios', 'Fox 21',
+        'Warner Bros. Television', 'Sony Pictures Television',
+        'Legendary Television', 'Bad Robot TV',
+        
+        # Notable Production Companies
+        'Carolco Pictures', 'Orion Pictures', 'Cannon Films', 'The Cannon Group',
+        'Republic Pictures', 'RKO Pictures', 'Selznick International Pictures',
+        'Morgan Creek Productions', 'Silver Pictures', 'Village Roadshow Pictures',
+        'Regency Enterprises', 'Alcon Entertainment', 'Millennium Films',
+        'Voltage Pictures', 'Mandate Pictures', 'Phoenix Pictures',
+    ]
     
     for studio in known_studios:
         if studio in entities.get("ORG", []) and studio not in studios:
@@ -736,6 +1071,103 @@ def _extract_seasonal_keywords(text: str) -> List[str]:
     return detected
 
 
+def _generate_title_with_llm(prompt: str, filters: dict) -> str:
+    """
+    Generate a creative, concise title using LLM based on user prompt and extracted filters.
+    Falls back to rule-based title if LLM fails.
+    
+    Args:
+        prompt: Original user prompt
+        filters: Extracted filters dict
+    
+    Returns:
+        Generated title (max 60 chars) or None if failed
+    """
+    try:
+        import httpx
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        # Build context from filters for LLM
+        filter_context = []
+        if filters.get("genres"):
+            filter_context.append(f"Genres: {', '.join(filters['genres'][:3])}")
+        if filters.get("languages"):
+            filter_context.append(f"Languages: {', '.join(filters['languages'])}")
+        if filters.get("media_type"):
+            filter_context.append(f"Type: {filters['media_type']}")
+        if filters.get("tone"):
+            filter_context.append(f"Mood: {', '.join(filters['tone'])}")
+        if filters.get("year_range"):
+            yr = filters['year_range']
+            if len(yr) == 2:
+                filter_context.append(f"Era: {yr[0]}-{yr[1]}")
+        if filters.get("seed_titles"):
+            filter_context.append(f"Similar to: {', '.join(filters['seed_titles'][:2])}")
+        
+        context_str = " | ".join(filter_context) if filter_context else "general recommendations"
+        
+        llm_prompt = f"""Generate a short, catchy title (maximum 60 characters) for a movie/TV recommendation list based on this user request:
+
+User Request: "{prompt[:150]}"
+Extracted Context: {context_str}
+
+**CRITICAL: Return ONLY the title text. No quotes, no explanations, no extra text. Maximum 60 characters.**
+
+Examples of good titles:
+- Dark Sci-Fi Thrillers
+- Cozy Winter Rom-Coms
+- Mind-Bending 90s Cinema
+- Japanese Horror Classics
+- Feel-Good Family Adventures
+
+**Output the title now:**
+"""
+        
+        with httpx.Client() as client:
+            resp = client.post(
+                "http://ollama:11434/api/generate",
+                json={
+                    "model": "phi3.5:3.8b-mini-instruct-q4_K_M",  # Match the model pulled by ollama-init
+                    "prompt": llm_prompt,
+                    "options": {"temperature": 0.7, "num_predict": 30, "num_ctx": 4096},
+                    "stream": False,
+                    "keep_alive": "24h",
+                },
+                timeout=30.0,
+            )
+        
+        if resp.status_code == 200:
+            data = resp.json()
+            title = data.get("response", "").strip()
+            
+            # Clean up the response
+            # Remove quotes if present
+            title = title.strip('"\'""„"')
+            # Remove common prefixes
+            for prefix in ["Title:", "List:", "Here's", "Here is"]:
+                if title.lower().startswith(prefix.lower()):
+                    title = title[len(prefix):].strip().lstrip(":")
+            
+            # Validate length and content
+            if title and 5 <= len(title) <= 80:
+                # Truncate if needed
+                if len(title) > 60:
+                    title = title[:57] + "..."
+                logger.info(f"[PARSE] LLM generated title: '{title}'")
+                return title
+            else:
+                logger.warning(f"[PARSE] LLM returned invalid title (length={len(title)}): '{title[:100]}'")
+        else:
+            logger.warning(f"[PARSE] LLM request failed with status {resp.status_code}")
+    
+    except Exception as e:
+        logger.warning(f"[PARSE] LLM title generation failed: {e}")
+    
+    # Return None to trigger fallback
+    return None
+
+
 def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, Any]:
     """Parse user prompt to extract all filters, entities, and metadata.
     
@@ -745,12 +1177,18 @@ def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, 
     import logging
     logger = logging.getLogger(__name__)
     
-    # Step 1: Extract entities from ORIGINAL prompt (preserves capitalization)
+    # Step 0: Pre-process to extract genre/style patterns BEFORE spaCy NER
+    # This prevents misclassification (e.g., "found footage" as PERSON)
+    cleaned_prompt, pre_extracted_genres = _preprocess_genre_styles(prompt)
+    if pre_extracted_genres:
+        logger.info(f"[PARSE] Pre-extracted genres/styles: {pre_extracted_genres}")
+    
+    # Step 1: Extract entities from CLEANED prompt (preserves capitalization but removes genre patterns)
     logger.info(f"[PARSE] Processing prompt: {prompt[:100]}")
-    entities = _extract_entities(prompt)
+    entities = _extract_entities(cleaned_prompt)
     logger.info(f"[PARSE] Extracted entities: {entities}")
     
-    # Step 2: Normalize prompt (converts to lowercase for matching)
+    # Step 2: Normalize prompt (converts to lowercase for matching) - use ORIGINAL prompt for full context
     normalized = normalize_prompt(prompt)
     logger.info(f"[PARSE] Normalized prompt: {normalized[:100]}")
     
@@ -759,6 +1197,14 @@ def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, 
     # Genres with aggressive synonym expansion and case-insensitive matching
     genres = []
     seen = set()
+    
+    # Add pre-extracted genres first (from genre/style patterns)
+    for g in pre_extracted_genres:
+        if g not in seen:
+            genres.append(g)
+            seen.add(g)
+            logger.info(f"[PARSE] Added pre-extracted genre: {g}")
+    
     for g in genres_avail:
         gl = g.lower()
         
@@ -896,6 +1342,33 @@ def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, 
     
     # NEW: Extract actors, studios, decades, rating qualifiers
     actors = _extract_actors(normalized, entities)
+    
+    # CRITICAL FIX: Remove seed titles from actors list
+    # spaCy often misidentifies show/movie titles as PERSON entities (e.g., "Midsomer Murders", "Karen Pirie", "21 Jump Street")
+    # Filter out any actor that matches a seed title (case-insensitive) OR contains seed title words
+    if actors and seeds:
+        seed_lower = {s.lower() for s in seeds}
+        # Also create set of seed words to catch partial matches like "Jump Street" from "21 Jump Street"
+        seed_words = set()
+        for s in seeds:
+            seed_words.update(word.lower() for word in s.split() if len(word) > 2)
+        
+        filtered_actors = []
+        for a in actors:
+            a_lower = a.lower()
+            # Skip if actor name matches seed title exactly
+            if a_lower in seed_lower:
+                logger.debug(f"[PARSE] Filtered actor '{a}' (exact match with seed)")
+                continue
+            # Skip if actor name is a substring match of seed words (e.g., "Jump Street" in "21 Jump Street")
+            if any(word in a_lower for word in seed_words if len(word) > 3):
+                logger.debug(f"[PARSE] Filtered actor '{a}' (word match with seed: {seed_words})")
+                continue
+            filtered_actors.append(a)
+        
+        actors = filtered_actors
+        logger.debug(f"[PARSE] Filtered actors (removed seed titles): {actors}")
+    
     logger.info(f"[PARSE] Extracted actors: {actors}")
     
     studios = _extract_studios(normalized, entities)
@@ -916,6 +1389,18 @@ def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, 
     # Quoted phrases as must-have snippets
     quoted = re.findall(r'"([^"]+)"|\'([^\']+)\'', prompt)
     phrases = [q[0] or q[1] for q in quoted if (q[0] or q[1])]
+    
+    # CRITICAL: Extract ALL subgenre/style patterns from GENRE_STYLE_ALIASES
+    # This ensures patterns like "buddy cop", "romantic comedy", "action thriller" are captured as phrases
+    # and get strong phrase_bonus scoring (now 0.15 weight for chat lists)
+    for style_pattern in GENRE_STYLE_ALIASES.keys():
+        escaped_pattern = re.escape(style_pattern)
+        pattern = r'\b' + escaped_pattern.replace(r'\ ', r'\s+').replace(r'\-', r'[-\s]?') + r'\b'
+        if re.search(pattern, normalized, re.IGNORECASE):
+            clean = style_pattern.lower().strip()
+            if clean not in [p.lower() for p in phrases]:
+                phrases.append(clean)
+                logger.info(f"[PARSE] Extracted subgenre/style phrase: {clean}")
     
     # CRITICAL: Extract ALL themes, fusions, and multi-word moods from moods_themes_map.py
     # This ensures ANY label from our curated lists is recognized and enforced via hard-inclusion
@@ -988,57 +1473,122 @@ def parse_prompt(prompt: str, default_obscurity: str = "balanced") -> Dict[str, 
     elif any(t in normalized for t in ["fusion", *FUSIONS]):
         ltype = "fusion"
 
-    # Suggested title - build from most relevant prompt elements
-    suggested_title = None
-    title_parts = []
+    # Build filters dict for LLM title generation
+    filters_for_title = {
+        "genres": genres,
+        "languages": languages,
+        "media_type": media_type,
+        "tone": tone_keywords,
+        "year_range": year_range,
+        "seed_titles": seeds,
+        "actors": actors,
+        "directors": directors,
+        "creators": creators,
+        "studios": studios,
+        "networks": networks,
+        "entities": entities,
+        "seasonal": seasonal_keywords,
+    }
     
-    # Priority 1: Seed titles (most specific)
-    if seeds:
-        title_parts.append(f"Like {seeds[0].title()}")
+    # Try LLM-based title generation first
+    suggested_title = _generate_title_with_llm(prompt, filters_for_title)
     
-    # Priority 2: Actors/Directors/Creators
-    elif entities["PERSON"]:
-        title_parts.append(f"{entities['PERSON'][0]} Films")
-    
-    # Priority 3: Tone keywords
-    elif tone_keywords:
-        title_parts.append(tone_keywords[0].title())
-    
-    # Priority 4: Genres
-    elif genres:
-        if len(genres) == 1:
+    # Fallback to rule-based title generation if LLM fails
+    if not suggested_title:
+        logger.info("[PARSE] Using rule-based title generation (LLM fallback)")
+        title_parts = []
+        
+        # Priority 1: Seasonal/Holiday keywords (very specific and timely)
+        if seasonal_keywords:
+            # Capitalize first letter: christmas -> Christmas
+            title_parts.append(seasonal_keywords[0].capitalize())
+        
+        # Priority 2: Seed titles (most specific)
+        if seeds:
+            # If we have seasonal, add "Like X" after it
+            if title_parts:
+                title_parts.append(f"Movies Like {seeds[0].title()}")
+            else:
+                title_parts.append(f"Like {seeds[0].title()}")
+        
+        # Priority 3: Actors/Directors/Creators/Studios/Networks
+        elif actors:
+            title_parts.append(f"{actors[0].title()} Movies")
+        elif directors:
+            title_parts.append(f"{directors[0].title()} Films")
+        elif creators:
+            title_parts.append(f"{creators[0].title()} Shows")
+        elif studios:
+            title_parts.append(f"{studios[0]} Films")
+        elif networks:
+            title_parts.append(f"{networks[0]} Shows")
+        elif entities["PERSON"]:
+            title_parts.append(f"{entities['PERSON'][0]} Films")
+        elif entities["ORG"]:
+            title_parts.append(f"{entities['ORG'][0]} Picks")
+        
+        # Priority 4: Tone keywords (mood/atmosphere)
+        elif tone_keywords:
+            title_parts.append(tone_keywords[0].title())
+        
+        # Priority 5: Genres
+        elif genres:
+            if len(genres) == 1:
+                title_parts.append(genres[0].title())
+            else:
+                title_parts.append(f"{genres[0].title()} & {genres[1].title()}")
+        
+        # Priority 6: Media type (if not already added via actors/directors/etc)
+        if media_type and not seeds and not any(word in " ".join(title_parts).lower() for word in ["movies", "shows", "films"]):
+            if media_type == "movie":
+                title_parts.append("Movies")
+            else:
+                title_parts.append("Shows")
+        
+        # Priority 7: Add tone/mood if we have other elements but no tone yet
+        # Check for both exact match and word stems (romantic/romance, thrilling/thriller, etc.)
+        title_lower = " ".join(title_parts).lower()
+        has_tone = False
+        for t in tone_keywords:
+            t_lower = t.lower()
+            # Check for exact match or word stem match (remove common suffixes)
+            t_stem = t_lower.rstrip('ic').rstrip('al').rstrip('ing').rstrip('ed')
+            if t_lower in title_lower or t_stem in title_lower:
+                has_tone = True
+                break
+        if title_parts and tone_keywords and not has_tone:
+            # Add first tone that's not already mentioned
+            title_parts.append(tone_keywords[0].title())
+        
+        # Priority 8: Add genre if we have seasonal/actors but no genre yet
+        # Check for both exact match and word stems to avoid duplicates
+        has_genre = False
+        for g in genres:
+            g_lower = g.lower()
+            g_stem = g_lower.rstrip('ic').rstrip('al').rstrip('ing').rstrip('ed').rstrip('e')
+            if g_lower in title_lower or g_stem in title_lower:
+                has_genre = True
+                break
+        if (seasonal_keywords or actors or directors) and genres and not has_genre:
             title_parts.append(genres[0].title())
+        
+        # Priority 9: Add year range if specified
+        if year_range and len(year_range) == 2:
+            if year_range[0] > 1900 and year_range[1] < 3000:
+                title_parts.append(f"({year_range[0]}-{year_range[1]})")
+            elif year_range[0] > 1900:
+                title_parts.append(f"(Since {year_range[0]})")
+        elif years:
+            title_parts.append(f"({years[0]}s)")
+        
+        # Construct final title
+        if title_parts:
+            suggested_title = " ".join(title_parts)
+            # Limit length
+            if len(suggested_title) > 60:
+                suggested_title = suggested_title[:57] + "..."
         else:
-            title_parts.append(f"{genres[0].title()} & {genres[1].title()}")
-    
-    # Priority 5: Media type
-    if media_type and not seeds:
-        if media_type == "movie":
-            title_parts.append("Movies")
-        else:
-            title_parts.append("Shows")
-    
-    # Priority 6: Add tone/mood if we have other elements
-    if title_parts and tone_keywords and not any(t in str(title_parts) for t in tone_keywords):
-        title_parts.append(tone_keywords[0].title())
-    
-    # Priority 7: Add year range if specified
-    if year_range and len(year_range) == 2:
-        if year_range[0] > 1900 and year_range[1] < 3000:
-            title_parts.append(f"({year_range[0]}-{year_range[1]})")
-        elif year_range[0] > 1900:
-            title_parts.append(f"(Since {year_range[0]})")
-    elif years:
-        title_parts.append(f"({years[0]}s)")
-    
-    # Construct final title
-    if title_parts:
-        suggested_title = " ".join(title_parts)
-        # Limit length
-        if len(suggested_title) > 60:
-            suggested_title = suggested_title[:57] + "..."
-    else:
-        suggested_title = "AI Picks"
+            suggested_title = "AI Picks"
 
     filters = {
         "genres": genres or None,

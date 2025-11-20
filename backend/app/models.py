@@ -18,7 +18,6 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     created_at = Column(DateTime, default=utc_now)
-    # ... other fields ...
 
 class ListItem(Base):
     __tablename__ = "list_items"
@@ -545,5 +544,141 @@ class TrendingIngestionQueue(Base):
         UniqueConstraint('tmdb_id', 'media_type', 'source_list', name='uq_trending_queue_item'),
         Index('ix_trending_queue_status_priority', 'status', 'priority'),
         {'comment': 'Queue for targeted ingestion of trending/upcoming TMDB items'}
+    )
+
+
+class ItemLLMProfile(Base):
+    """Unified, compact item profile for LLM consumption (AI lists only).
+
+    Lazy-generated from PersistentCandidate/MediaMetadata on demand, then cached.
+    Kept separate from MediaMetadata to avoid altering existing structures.
+    """
+    __tablename__ = "item_llm_profiles"
+
+    id = Column(Integer, primary_key=True)
+    candidate_id = Column(Integer, ForeignKey("persistent_candidates.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    profile_json = Column(Text, nullable=False)  # JSON dict with compact fields
+    profile_text = Column(Text, nullable=True)   # Ultra-compact textual summary for prompts
+    version = Column(Integer, default=1, index=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+    created_at = Column(DateTime, default=utc_now, index=True)
+
+    __table_args__ = (
+        {'comment': 'LLM-ready item profiles for AI list ranking (lazy filled)'}
+    )
+
+
+class BGEEmbedding(Base):
+    """BGE (BAAI/bge-small-en-v1.5) embeddings for multi-vector semantic search.
+    
+    Stores 5 embeddings per item for different aspects:
+    - base: Full metadata (overview + genres + keywords)
+    - title: Title-only emphasis
+    - keywords: Keywords focus
+    - people: Cast/crew focus
+    - brands: Production companies/networks focus
+    
+    Separate from PersistentCandidate.embedding (MiniLM) to enable dual-index architecture.
+    """
+    __tablename__ = "bge_embeddings"
+    
+    id = Column(Integer, primary_key=True)
+    tmdb_id = Column(Integer, nullable=False, index=True)
+    media_type = Column(String, nullable=False, index=True)  # 'movie' or 'show'
+    
+    # Multi-vector embeddings (384-dim each, stored as LargeBinary serialized numpy arrays)
+    embedding_base = Column(LargeBinary, nullable=False)  # Full metadata
+    embedding_title = Column(LargeBinary, nullable=True)  # Title-only
+    embedding_keywords = Column(LargeBinary, nullable=True)  # Keywords
+    embedding_people = Column(LargeBinary, nullable=True)  # Cast/crew
+    embedding_brands = Column(LargeBinary, nullable=True)  # Production companies/networks
+    
+    # Content hashes for staleness detection (SHA1 hex)
+    hash_base = Column(String(40), nullable=False)
+    hash_title = Column(String(40), nullable=True)
+    hash_keywords = Column(String(40), nullable=True)
+    hash_people = Column(String(40), nullable=True)
+    hash_brands = Column(String(40), nullable=True)
+    
+    # Metadata
+    model_name = Column(String, default="BAAI/bge-small-en-v1.5")
+    embedding_dim = Column(Integer, default=384)
+    created_at = Column(DateTime, default=utc_now, index=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    
+    __table_args__ = (
+        UniqueConstraint('tmdb_id', 'media_type', name='uq_bge_embeddings_tmdb_media'),
+        Index('ix_bge_embeddings_updated', 'updated_at'),
+        {'comment': 'BGE multi-vector embeddings for secondary FAISS index'}
+    )
+
+
+class UserTextProfile(Base):
+    """Textual user preference profile for LLM prompts (AI lists only).
+
+    Derived from Trakt history and ratings; stored separately to avoid altering existing models.
+    """
+    __tablename__ = "user_text_profiles"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    summary_text = Column(Text, nullable=False)  # 2–5 sentence narrative summary
+    tags_json = Column(Text, nullable=True)      # JSON array of compact tags/keywords
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now, index=True)
+    created_at = Column(DateTime, default=utc_now, index=True)
+
+    __table_args__ = (
+        {'comment': 'Textual user preference summaries for LLM ranking (lazy filled)'}
+    )
+
+
+class PairwiseTrainingSession(Base):
+    """Training session for pairwise preference learning.
+    
+    Tracks a user's training session with context (prompt, filters) and completion status.
+    Used to group pairwise judgments and enable session-based analytics.
+    """
+    __tablename__ = "pairwise_training_sessions"
+    
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    prompt = Column(Text, nullable=False)  # User query/intent for this session
+    filters_json = Column(Text, nullable=True)  # JSON-encoded filter dict
+    list_type = Column(String, nullable=False, default="chat", index=True)  # chat, mood, theme, etc.
+    candidate_pool_snapshot = Column(Text, nullable=True)  # JSON array of candidate IDs in this session
+    total_pairs = Column(Integer, default=0)  # Total pairs to judge
+    completed_pairs = Column(Integer, default=0, index=True)  # Pairs judged so far
+    status = Column(String, default="active", index=True)  # active, completed, abandoned
+    started_at = Column(DateTime, default=utc_now, index=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=utc_now, onupdate=utc_now)
+    
+    __table_args__ = (
+        {'comment': 'Pairwise preference training sessions for user feedback'}
+    )
+
+
+class PairwiseJudgment(Base):
+    """Individual pairwise preference judgment from user.
+    
+    Records user choice between two candidates in a training session.
+    Used to update user preference vectors and improve recommendations.
+    """
+    __tablename__ = "pairwise_judgments"
+    
+    id = Column(Integer, primary_key=True)
+    session_id = Column(Integer, ForeignKey("pairwise_training_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    candidate_a_id = Column(Integer, nullable=False)  # Persistent candidate ID or trakt_id
+    candidate_b_id = Column(Integer, nullable=False)  # Persistent candidate ID or trakt_id
+    winner = Column(String, nullable=False)  # 'a', 'b', or 'skip'
+    confidence = Column(Float, nullable=True)  # Optional: user confidence (0.0-1.0)
+    response_time_ms = Column(Integer, nullable=True)  # Time taken to judge (milliseconds)
+    explanation = Column(Text, nullable=True)  # Optional: user explanation for choice
+    created_at = Column(DateTime, default=utc_now, index=True)
+    
+    __table_args__ = (
+        Index('ix_pairwise_judgments_session_user', 'session_id', 'user_id'),
+        {'comment': 'Individual pairwise preference judgments from users'}
     )
 

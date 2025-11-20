@@ -4,13 +4,19 @@ from fastapi.middleware.gzip import GZipMiddleware
 import os
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import init_db
+from starlette.requests import Request
+from starlette.responses import Response
 
-from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists, individual_lists, maintenance, phases, overview
+from app.api import lists, settings, status, trakt_auth, suggested, ratings, metadata, chatlists, ai_lists, individual_lists, maintenance, phases, overview, items, search
 from app.api.chat_prompt import router as chat_prompt_router
 from app.api.available_genres_languages import router as genres_languages_router
 from app.api.recommendations import router as recommendations_router
 from app.api.notifications import router as notifications_router
 from app.api.metadata_options import router as metadata_options_router
+from app.api.pairwise import router as pairwise_router
+from app.api.feature_flags import router as feature_flags_router
+from app.api.metrics_api import router as metrics_api_router
+from app.api.telemetry import router as telemetry_router
 
 
 app = FastAPI(title="WatchBuddy API", version="1.0.0")
@@ -43,6 +49,8 @@ app.include_router(metadata.router, prefix="/api/metadata", tags=["Metadata"])
 app.include_router(chatlists.router, prefix="/api/chatlists", tags=["Chat Lists"])
 app.include_router(ai_lists.router, prefix="/api/ai", tags=["AI Lists"])
 app.include_router(individual_lists.router, prefix="/api", tags=["Individual Lists"])
+app.include_router(items.router, prefix="/api/items", tags=["Items"])
+app.include_router(search.router, prefix="/api", tags=["Search"])
 
 # Optional: Recommendations and Notifications if present
 app.include_router(recommendations_router, prefix="/api/recommendations", tags=["Recommendations"])
@@ -50,6 +58,10 @@ app.include_router(notifications_router, prefix="/api/notifications", tags=["Not
 app.include_router(maintenance.router, prefix="/api/maintenance", tags=["Maintenance"])
 app.include_router(phases.router, tags=["Phases"])
 app.include_router(overview.router, prefix="/api", tags=["Overview"])
+app.include_router(pairwise_router, prefix="/api/pairwise", tags=["Pairwise Training"])
+app.include_router(feature_flags_router, prefix="/api", tags=["Feature Flags"])
+app.include_router(metrics_api_router, prefix="/api", tags=["Metrics"])
+app.include_router(telemetry_router, prefix="/api/telemetry", tags=["Telemetry"])
 
 # Serve generated list posters as static files (ensure directory exists)
 POSTERS_DIR = "/app/data/posters"
@@ -59,6 +71,20 @@ except Exception:
     pass
 if os.path.isdir(POSTERS_DIR):
     app.mount("/posters", StaticFiles(directory=POSTERS_DIR), name="posters")
+
+
+# Ensure list posters are not cached by clients
+@app.middleware("http")
+async def no_cache_posters(request: Request, call_next):
+    response: Response = await call_next(request)
+    try:
+        path = request.url.path or ""
+        if path.startswith("/posters/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+    except Exception:
+        pass
+    return response
 
 
 @app.on_event("startup")
@@ -110,6 +136,17 @@ async def startup_event():
                 try:
                     from app.services.ai_engine.embeddings import EmbeddingService
                     EmbeddingService().encode_text("warmup")
+                except Exception:
+                    pass
+                # Warm Cross-Encoder reranker (ensures model is available)
+                try:
+                    from app.services.ai_engine.cross_encoder_reranker import CrossEncoderReranker
+                    ce = CrossEncoderReranker()
+                    ce.ensure()
+                    try:
+                        _ = ce.score("warmup", ["warmup"], batch_size=1)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             except Exception:

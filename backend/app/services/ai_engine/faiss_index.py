@@ -17,6 +17,7 @@ import numpy as np
 import faiss
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 
@@ -81,13 +82,41 @@ def train_build_hnsw(embeddings: np.ndarray, trakt_ids: List[int], dim: int):
     # Add all vectors (HNSW builds incrementally, no separate training)
     index.add(embeddings_normalized)
     
-    # Save index
-    faiss.write_index(index, str(INDEX_FILE))
+    # Save index with atomic write pattern to prevent corruption
+    # Write to temp files first, then atomically rename to final location
+    import fcntl
     
-    # Save mapping (use trakt_id now instead of tmdb_id for better coverage)
-    mapping = {int(i): int(trakt_ids[i]) for i in range(len(trakt_ids))}
-    with open(MAPPING_FILE, "w") as f:
-        json.dump(mapping, f)
+    LOCK_FILE = DATA_DIR / "faiss_index.lock"
+    INDEX_TEMP = DATA_DIR / "faiss_index.bin.tmp"
+    MAPPING_TEMP = DATA_DIR / "faiss_map.json.tmp"
+    
+    with open(LOCK_FILE, 'w') as lock_f:
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)  # Exclusive lock - blocks all readers/writers
+        try:
+            # Write to temp files first
+            faiss.write_index(index, str(INDEX_TEMP))
+            
+            # Save mapping (use trakt_id now instead of tmdb_id for better coverage)
+            mapping = {int(i): int(trakt_ids[i]) for i in range(len(trakt_ids))}
+            with open(MAPPING_TEMP, "w") as f:
+                json.dump(mapping, f)
+                f.flush()
+                os.fsync(f.fileno())  # Force write to disk
+            
+            # Atomic rename (overwrites existing files atomically)
+            INDEX_TEMP.rename(INDEX_FILE)
+            MAPPING_TEMP.rename(MAPPING_FILE)
+            
+            logger.info(f"[FAISS] ✅ Index files written atomically")
+        except Exception as e:
+            # Clean up temp files on error
+            if INDEX_TEMP.exists():
+                INDEX_TEMP.unlink()
+            if MAPPING_TEMP.exists():
+                MAPPING_TEMP.unlink()
+            raise e
+        finally:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
     
     logger.info(f"[FAISS] ✅ HNSW index and mapping saved to {INDEX_FILE} and {MAPPING_FILE}")
     logger.info(f"[FAISS] Index stats: {len(trakt_ids)} vectors, M={HNSW_M}, efSearch will be {HNSW_EF_SEARCH}")
@@ -178,24 +207,58 @@ def load_index() -> Tuple[faiss.IndexHNSWFlat, Dict[int, int]]:
     """
     Load FAISS HNSW index and mapping from disk.
     If index files are missing, attempts to rebuild from database embeddings.
+    Uses a lock file to prevent concurrent reads that corrupt FAISS's internal file operations.
     """
     global _INDEX_CACHE, _MAP_CACHE
     if _INDEX_CACHE is not None and _MAP_CACHE is not None:
         return _INDEX_CACHE, _MAP_CACHE
+    
     # Check if index exists, rebuild if missing
     if not INDEX_FILE.exists() or not MAPPING_FILE.exists():
         logger.warning("[FAISS] Index files not found, attempting rebuild...")
         if not _rebuild_index_from_db():
             raise FileNotFoundError(f"FAISS index not found at {INDEX_FILE} and rebuild failed")
     
-    index = faiss.read_index(str(INDEX_FILE))
+    # Use a separate lock file to coordinate access across processes
+    # FAISS's C++ code does its own file I/O, so we need a dedicated lock file
+    import fcntl
+    import time
+    
+    LOCK_FILE = DATA_DIR / "faiss_index.lock"
+    max_retries = 5
+    retry_delay = 0.3
+    
+    index = None
+    for attempt in range(max_retries):
+        try:
+            # Acquire shared lock on lock file (multiple readers OK, blocks writers)
+            with open(LOCK_FILE, 'w') as lock_f:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_SH)
+                try:
+                    # Now safe to read - FAISS will do its own file operations
+                    index = faiss.read_index(str(INDEX_FILE))
+                    logger.debug(f"[FAISS] Successfully loaded index with {index.ntotal} vectors")
+                    break
+                finally:
+                    fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+        except (OSError, RuntimeError) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"[FAISS] Read attempt {attempt+1}/{max_retries} failed: {e}, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+                retry_delay *= 1.5  # Exponential backoff
+            else:
+                logger.error(f"[FAISS] Failed to read index after {max_retries} attempts: {e}")
+                raise RuntimeError(f"FAISS index load failed after {max_retries} attempts") from e
+    
+    if index is None:
+        raise RuntimeError("FAISS index load failed - index is None after all attempts")
     
     # Set efSearch for query-time quality/speed tradeoff
     if hasattr(index, 'hnsw'):
         index.hnsw.efSearch = HNSW_EF_SEARCH
         logger.debug(f"[FAISS] Set efSearch={HNSW_EF_SEARCH} for queries")
     
-    # Load mapping with corruption fallback
+    # Load mapping with corruption fallback (also protected by lock)
     try:
         with open(MAPPING_FILE) as f:
             mapping = json.load(f)
@@ -209,6 +272,7 @@ def load_index() -> Tuple[faiss.IndexHNSWFlat, Dict[int, int]]:
         # Retry loading freshly rebuilt files
         with open(MAPPING_FILE) as f:
             mapping = json.load(f)
+    
     mapping = {int(k): int(v) for k, v in mapping.items()}
     _INDEX_CACHE = index
     _MAP_CACHE = mapping
@@ -290,10 +354,35 @@ def add_to_index(embeddings: np.ndarray, trakt_ids: List[int], dim: int) -> bool
         for i, trakt_id in enumerate(trakt_ids):
             mapping[current_size + i] = int(trakt_id)
         
-        # Save updated index and mapping
-        faiss.write_index(index, str(INDEX_FILE))
-        with open(MAPPING_FILE, "w") as f:
-            json.dump(mapping, f)
+        # Save updated index and mapping with atomic write pattern
+        import fcntl
+        import os
+        LOCK_FILE = DATA_DIR / "faiss_index.lock"
+        INDEX_TEMP = DATA_DIR / "faiss_index.bin.tmp"
+        MAPPING_TEMP = DATA_DIR / "faiss_map.json.tmp"
+        
+        with open(LOCK_FILE, 'w') as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)  # Exclusive lock - blocks all readers/writers
+            try:
+                # Write to temp files first
+                faiss.write_index(index, str(INDEX_TEMP))
+                with open(MAPPING_TEMP, "w") as f:
+                    json.dump(mapping, f)
+                    f.flush()
+                    os.fsync(f.fileno())  # Force write to disk
+                
+                # Atomic rename
+                INDEX_TEMP.rename(INDEX_FILE)
+                MAPPING_TEMP.rename(MAPPING_FILE)
+            except Exception as e:
+                # Clean up temp files on error
+                if INDEX_TEMP.exists():
+                    INDEX_TEMP.unlink()
+                if MAPPING_TEMP.exists():
+                    MAPPING_TEMP.unlink()
+                raise e
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
         
         # Clear cache to force reload with new data
         global _INDEX_CACHE, _MAP_CACHE

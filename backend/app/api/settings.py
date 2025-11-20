@@ -146,7 +146,7 @@ async def get_settings_status():
     
     tmdb_key = await r.get(REDIS_SETTINGS_PREFIX + "tmdb_api_key")
     return {
-        "subscription": True,  # placeholder for now
+        "subscription": True,
         "trakt_configured": trakt_configured,
         "tmdb_configured": bool(tmdb_key),
     }
