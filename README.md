@@ -4,6 +4,8 @@
 
 WatchBuddy is a smart recommendation system that syncs with your Trakt watch history to suggest movies and TV shows tailored to your taste. Create custom SmartLists based on mood, genre, language, and more - all running locally with zero configuration.
 
+Check Wiki for quick fixes: https://github.com/steffenbb/WatchBuddy/wiki
+
 ---
 
 ## ✨ Features
