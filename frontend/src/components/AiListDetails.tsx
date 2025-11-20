@@ -32,9 +32,11 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
     async function load(){
       try{
         setLoading(true); setError(null);
+        console.log('Loading AI list items for ID:', aiListId);
         const data = await listAiListItems(aiListId);
+        console.log('AI list items received:', data);
         if (mounted) {
-          setItems(data || []);
+          setItems(Array.isArray(data) ? data : (data?.items || []));
           
           // Fetch user ratings
           try {
@@ -52,6 +54,7 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
           }
         }
       }catch(e:any){
+        console.error('Error loading AI list items:', e);
         const errorMsg = e?.message || 'Failed to load AI list items';
         setError(errorMsg);
         if (mounted) toast.error(errorMsg);
@@ -164,11 +167,11 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
   }, [onClose]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 overflow-hidden">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative w-full max-w-5xl bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-4 md:p-6 overflow-hidden">
-        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-3">
-          <h3 className="text-xl md:text-2xl font-bold text-white break-words w-full sm:w-auto">{title}</h3>
+      <div className="relative w-full max-w-5xl bg-white/10 backdrop-blur-xl border border-white/20 rounded-2xl shadow-2xl p-4 md:p-6 max-h-[90vh] overflow-y-auto">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-3 min-w-0">
+          <h3 className="text-xl md:text-2xl font-bold text-white break-words min-w-0 flex-1">{title}</h3>
           <div className="flex items-center gap-2 flex-shrink-0 flex-wrap">
             <button 
               onClick={() => setHideWatched(!hideWatched)} 
@@ -216,10 +219,11 @@ export default function AiListDetails({ aiListId, title, onClose }: { aiListId: 
             {hideWatched && items.length > 0 ? "All items watched" : "No items yet."}
           </div>
         ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4 max-h-[70vh] overflow-auto pr-1">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
             {filteredAndSorted.map((it, idx) => {
               const handleItemClick = () => {
                 if (it.tmdb_id) {
+                  // Navigate to item page - this will push to history
                   window.location.hash = `item/${it.media_type}/${it.tmdb_id}`;
                 }
               };

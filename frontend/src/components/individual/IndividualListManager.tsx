@@ -82,7 +82,7 @@ export default function IndividualListManager({ onOpenList }: { onOpenList: (id:
           ) : lists.length === 0 ? (
             <div className="text-white/60 text-center py-8">No watch lists yet. Create one above to get started!</div>
           ) : (
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {lists.map((l) => (
                 <ListCard
                   key={l.id}

@@ -63,7 +63,7 @@ export default function SuggestionsSidebar({ listId, onAdded }: { listId: number
               }
             };
             return (
-              <div key={`${s.media_type}:${s.tmdb_id}`} className="flex gap-2 items-start p-2 rounded-lg bg-white/5 border border-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer" onClick={handleItemClick}>
+              <div key={`${s.media_type}:${s.tmdb_id}`} className="flex gap-2 items-start p-2 rounded-lg bg-white/5 border border-white/10 hover:ring-2 hover:ring-purple-500 transition cursor-pointer min-w-0 overflow-hidden" onClick={handleItemClick}>
                 {/* Poster thumbnail */}
                 {s.poster_path ? (
                   <img
@@ -73,18 +73,18 @@ export default function SuggestionsSidebar({ listId, onAdded }: { listId: number
                     loading="lazy"
                   />
                 ) : (
-                  <div className="w-[46px] h-[69px] rounded-md bg-white/10 border border-white/10 flex items-center justify-center text-white/30 text-xs flex-shrink-0">No image</div>
+                  <div className="w-[46px] h-[69px] rounded-md bg-white/10 border border-white/10 flex items-center justify-center text-white/30 text-xs flex-shrink-0 text-center px-1">No image</div>
                 )}
-                <div className="flex-1 min-w-0">
-                  <div className="text-white text-sm font-semibold truncate hover:text-purple-300 transition-colors">{s.title}</div>
-                  <div className="text-white/70 text-xs">{s.media_type} · {s.year || '—'}</div>
-                  <div className="text-xs text-white/70 mt-1 flex gap-1 flex-wrap">
-                    {s.is_high_fit && <span className="px-2 py-0.5 bg-emerald-500/30 rounded-full">high fit</span>}
-                    {s.fit_score != null && <span className="px-2 py-0.5 bg-emerald-500/20 rounded-full">fit {(s.fit_score*100).toFixed(0)}%</span>}
-                    {s.similarity_score != null && <span className="px-2 py-0.5 bg-indigo-500/20 rounded-full">sim {(s.similarity_score*100).toFixed(0)}%</span>}
+                <div className="flex-1 min-w-0 overflow-hidden">
+                  <div className="text-white text-sm font-semibold break-words line-clamp-2 hover:text-purple-300 transition-colors">{s.title}</div>
+                  <div className="text-white/70 text-xs truncate">{s.media_type} · {s.year || '—'}</div>
+                  <div className="text-xs text-white/70 mt-1 flex gap-1 flex-wrap overflow-hidden">
+                    {s.is_high_fit && <span className="px-2 py-0.5 bg-emerald-500/30 rounded-full whitespace-nowrap">high fit</span>}
+                    {s.fit_score != null && <span className="px-2 py-0.5 bg-emerald-500/20 rounded-full whitespace-nowrap">fit {(s.fit_score*100).toFixed(0)}%</span>}
+                    {s.similarity_score != null && <span className="px-2 py-0.5 bg-indigo-500/20 rounded-full whitespace-nowrap">sim {(s.similarity_score*100).toFixed(0)}%</span>}
                   </div>
                 </div>
-                <button onClick={(e) => { e.stopPropagation(); addOne(s); }} className="px-2 py-1 rounded-md bg-white/15 text-white hover:bg-white/25 text-xs">Add</button>
+                <button onClick={(e) => { e.stopPropagation(); addOne(s); }} className="px-2 py-1 rounded-md bg-white/15 text-white hover:bg-white/25 text-xs flex-shrink-0 whitespace-nowrap">Add</button>
               </div>
             );
           })}

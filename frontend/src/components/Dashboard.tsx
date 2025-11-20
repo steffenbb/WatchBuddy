@@ -7,6 +7,7 @@ import ListCard from "./ListCard";
 import ListDetails from "./ListDetails";
 import SuggestedLists from "./SuggestedLists";
 import AiListManager from "./AiListManager";
+import AiListDetails from "./AiListDetails";
 import Settings from "./Settings";
 import UnifiedHome from "./UnifiedHome";
 import { theme } from "../theme";
@@ -23,13 +24,27 @@ import ItemPage from "./ItemPage/ItemPage";
 import { StatusWidgets } from "./StatusWidgets";
 import { useTraktAccount } from "../hooks/useTraktAccount";
 
-// URL routing utilities
-const getViewFromUrl = (): { view: string; listId?: number; mediaType?: string; tmdbId?: number } => {
+// Navigation history types
+type NavigationState = {
+  view: string;
+  listId?: number | string;
+  mediaType?: string;
+  tmdbId?: number;
+  listType?: 'smart' | 'ai' | 'individual';
+  timestamp: number;
+};
+
+// URL routing utilities with history support
+const getViewFromUrl = (): NavigationState => {
   const hash = window.location.hash.slice(1); // Remove #
-  if (!hash) return { view: 'home' };
-  if (hash === 'lists') return { view: 'lists' };
-  if (hash === 'timeline') return { view: 'timeline' };
-  if (hash === 'trainer') return { view: 'trainer' };
+  if (!hash) return { view: 'home', timestamp: Date.now() };
+  if (hash === 'lists') return { view: 'lists', listType: 'smart', timestamp: Date.now() };
+  if (hash === 'timeline') return { view: 'timeline', timestamp: Date.now() };
+  if (hash === 'trainer') return { view: 'trainer', timestamp: Date.now() };
+  if (hash === 'dynamic') return { view: 'dynamic', listType: 'ai', timestamp: Date.now() };
+  if (hash === 'myLists') return { view: 'myLists', listType: 'individual', timestamp: Date.now() };
+  if (hash === 'settings') return { view: 'settings', timestamp: Date.now() };
+  if (hash === 'status') return { view: 'status', timestamp: Date.now() };
   
   // Item page: #item/movie/550
   if (hash.startsWith('item/')) {
@@ -38,29 +53,55 @@ const getViewFromUrl = (): { view: string; listId?: number; mediaType?: string; 
       return {
         view: 'item',
         mediaType: parts[1],
-        tmdbId: parseInt(parts[2])
+        tmdbId: parseInt(parts[2]),
+        timestamp: Date.now()
       };
     }
   }
   
-  const [view, id] = hash.split('/');
-  if (view === 'list' && id) {
-    return { view: 'listDetails', listId: parseInt(id) };
+  // AI list details: #dynamic/uuid-string
+  if (hash.startsWith('dynamic/')) {
+    const parts = hash.split('/');
+    if (parts.length === 2) {
+      return { view: 'dynamic', listId: parts[1], listType: 'ai', timestamp: Date.now() };
+    }
   }
   
-  return { view: hash || 'home' };
+  // Individual list details: #myLists/123
+  if (hash.startsWith('myLists/')) {
+    const parts = hash.split('/');
+    if (parts.length === 2) {
+      return { view: 'myListDetails', listId: parseInt(parts[1]), listType: 'individual', timestamp: Date.now() };
+    }
+  }
+  
+  // SmartList details: #list/123
+  const [view, id] = hash.split('/');
+  if (view === 'list' && id) {
+    return { view: 'listDetails', listId: parseInt(id), listType: 'smart', timestamp: Date.now() };
+  }
+  
+  return { view: hash || 'home', timestamp: Date.now() };
 };
 
-const updateUrl = (view: string, listId?: number) => {
-  if (view === 'listDetails' && listId) {
-    window.location.hash = `list/${listId}`;
-  } else if (view === 'home') {
-    window.location.hash = '';
-  } else if (view === 'lists') {
-    window.location.hash = 'lists';
+const updateUrl = (state: Partial<NavigationState> & { view: string }) => {
+  let hash = '';
+  
+  if (state.view === 'home') {
+    hash = '';
+  } else if (state.view === 'item' && state.mediaType && state.tmdbId) {
+    hash = `item/${state.mediaType}/${state.tmdbId}`;
+  } else if (state.view === 'dynamic' && state.listId) {
+    hash = `dynamic/${state.listId}`;
+  } else if (state.view === 'myListDetails' && state.listId) {
+    hash = `myLists/${state.listId}`;
+  } else if (state.view === 'listDetails' && state.listId) {
+    hash = `list/${state.listId}`;
   } else {
-    window.location.hash = view;
+    hash = state.view;
   }
+  
+  window.location.hash = hash;
 };
 
 export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNavigateHome?: (callback: () => void) => void }){
@@ -75,10 +116,24 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
   const [editValues, setEditValues] = useState<Record<number, any>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showSuggestedModal, setShowSuggestedModal] = useState(false);
-  const [modalListId, setModalListId] = useState<number|null>(null);
+  const [modalListId, setModalListId] = useState<number|string|null>(null);
   const [modalListTitle, setModalListTitle] = useState<string>("");
   const [editListId, setEditListId] = useState<number|null>(null);
   const [editListTitle, setEditListTitle] = useState<string>("");
+  
+  // Navigation history stack
+  const [navigationHistory, setNavigationHistory] = useState<NavigationState[]>([]);
+
+  // Listen for AI list open events to capture title
+  useEffect(() => {
+    const handleAiListOpen = (e: any) => {
+      if (e.detail?.title) {
+        setModalListTitle(e.detail.title);
+      }
+    };
+    window.addEventListener('ai-list-open', handleAiListOpen);
+    return () => window.removeEventListener('ai-list-open', handleAiListOpen);
+  }, []);
 
   // Dynamic background based on current view
   const getBackgroundGradient = (currentView: string): string => {
@@ -109,41 +164,60 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
     }
   };
 
-  // Initialize from URL on load
+  // Initialize from URL on load and restore state
   useEffect(() => {
-    const { view: urlView, listId, mediaType, tmdbId } = getViewFromUrl();
-    setView(urlView as any);
+    const state = getViewFromUrl();
+    setView(state.view as any);
+    setNavigationHistory([state]);
     
-    if (urlView === 'listDetails' && listId) {
+    if (state.view === 'listDetails' && state.listId) {
       // Find the list to set selectedList
-      const foundList = lists.find(l => l.id === listId);
+      const foundList = lists.find(l => l.id === state.listId);
       if (foundList) {
         setSelectedList({ id: foundList.id, title: foundList.title });
       }
-    } else if (urlView === 'item' && mediaType && tmdbId) {
-      setItemPageParams({ mediaType, tmdbId });
+    } else if (state.view === 'dynamic' && state.listId) {
+      // AI list details - will open modal
+      setModalListId(state.listId);
+    } else if (state.view === 'myListDetails' && state.listId) {
+      setSelectedIndividualListId(typeof state.listId === 'number' ? state.listId : null);
+    } else if (state.view === 'item' && state.mediaType && state.tmdbId) {
+      setItemPageParams({ mediaType: state.mediaType, tmdbId: state.tmdbId });
     }
   }, [lists]);
 
   // Listen for browser back/forward
   useEffect(() => {
     const handlePopState = () => {
-      const { view: urlView, listId, mediaType, tmdbId } = getViewFromUrl();
-      setView(urlView as any);
+      const state = getViewFromUrl();
+      setView(state.view as any);
       
-      if (urlView === 'listDetails' && listId) {
-        const foundList = lists.find(l => l.id === listId);
+      // Restore appropriate state based on view
+      if (state.view === 'listDetails' && state.listId) {
+        const foundList = lists.find(l => l.id === state.listId);
         if (foundList) {
           setSelectedList({ id: foundList.id, title: foundList.title });
         }
-      } else {
+        setModalListId(null);
+        setSelectedIndividualListId(null);
+        setItemPageParams(null);
+      } else if (state.view === 'dynamic' && state.listId) {
+        setModalListId(state.listId);
         setSelectedList(null);
-      }
-      
-      // Update itemPageParams for item view navigation
-      if (urlView === 'item' && mediaType && tmdbId) {
-        setItemPageParams({ mediaType, tmdbId });
-      } else if (urlView !== 'item') {
+        setSelectedIndividualListId(null);
+        setItemPageParams(null);
+      } else if (state.view === 'myListDetails' && state.listId) {
+        setSelectedIndividualListId(typeof state.listId === 'number' ? state.listId : null);
+        setSelectedList(null);
+        setModalListId(null);
+        setItemPageParams(null);
+      } else if (state.view === 'item' && state.mediaType && state.tmdbId) {
+        setItemPageParams({ mediaType: state.mediaType, tmdbId: state.tmdbId });
+      } else {
+        // Clear all detail states
+        setSelectedList(null);
+        setModalListId(null);
+        setSelectedIndividualListId(null);
         setItemPageParams(null);
       }
     };
@@ -176,19 +250,51 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, [lists]);
 
-  // Helper function to change view and update URL
-  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer", listId?: number, listTitle?: string) => {
-    setView(newView);
-    if (newView === 'listDetails' && listId && listTitle) {
-      setSelectedList({ id: listId, title: listTitle });
-      updateUrl(newView, listId);
-    } else if (newView === 'myListDetails' && listId) {
-      setSelectedIndividualListId(listId);
-    } else {
+  // Helper function to change view and update URL with history tracking
+  const navigateTo = (state: Partial<NavigationState> & { view: string }) => {
+    const fullState: NavigationState = {
+      ...state,
+      timestamp: Date.now()
+    } as NavigationState;
+    
+    setNavigationHistory(prev => [...prev, fullState]);
+    setView(state.view as any);
+    updateUrl(fullState);
+    
+    // Update component state based on navigation
+    if (state.view === 'listDetails' && state.listId) {
+      const foundList = lists.find(l => l.id === state.listId);
+      if (foundList) {
+        setSelectedList({ id: foundList.id, title: foundList.title });
+      }
+      setModalListId(null);
+      setSelectedIndividualListId(null);
+      setItemPageParams(null);
+    } else if (state.view === 'dynamic') {
+      if (state.listId) {
+        setModalListId(state.listId);
+      }
       setSelectedList(null);
       setSelectedIndividualListId(null);
-      updateUrl(newView);
+      setItemPageParams(null);
+    } else if (state.view === 'myListDetails' && state.listId) {
+      setSelectedIndividualListId(typeof state.listId === 'number' ? state.listId : null);
+      setSelectedList(null);
+      setModalListId(null);
+      setItemPageParams(null);
+    } else if (state.view === 'item' && state.mediaType && state.tmdbId) {
+      setItemPageParams({ mediaType: state.mediaType, tmdbId: state.tmdbId });
+    } else {
+      setSelectedList(null);
+      setModalListId(null);
+      setSelectedIndividualListId(null);
+      setItemPageParams(null);
     }
+  };
+  
+  // Legacy changeView function for backward compatibility
+  const changeView = (newView: "home"|"lists"|"create"|"suggested"|"settings"|"listDetails"|"dynamic"|"myLists"|"myListDetails"|"status"|"timeline"|"overview"|"trainer", listId?: number, listTitle?: string) => {
+    navigateTo({ view: newView, listId });
   };
 
   // Register navigation callback with parent
@@ -285,7 +391,7 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                     }
                   }
                 }}
-                className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
+                className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4"
               >
                 {lists.map((l, idx) => (
                   <motion.div
@@ -301,7 +407,10 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
                       listType={l.list_type}
                       posterPath={l.poster_path}
                       itemLimit={l.item_limit}
-                      onOpen={(id, title)=>{ setModalListId(id); setModalListTitle(title); }}
+                      onOpen={(id, title)=>{ 
+                        setModalListTitle(title);
+                        navigateTo({ view: 'listDetails', listId: id, listType: 'smart' });
+                      }}
                       onSynced={()=>load()}
                       onEdit={(id)=>{ 
                         const list = lists.find(lst => lst.id === id);
@@ -318,24 +427,30 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
             )}
         </div>
             </PageTransition>
-        )}
+          )}
 
         {view === "listDetails" && selectedList && (
-          <PageTransition key="listDetails">
-            <ListDetails listId={selectedList.id} title={selectedList.title} onBack={()=>changeView('lists')} />
-          </PageTransition>
+          <ListModal
+            listId={selectedList.id}
+            title={selectedList.title}
+            onClose={() => {
+              window.history.back();
+            }}
+          />
         )}
         {view === "myLists" && (
           <PageTransition key="myLists">
             <div className="px-4">
-              <IndividualListManager onOpenList={(id:number)=>{ setSelectedIndividualListId(id); setView('myListDetails'); }} />
+              <IndividualListManager onOpenList={(id:number)=>{ 
+                navigateTo({ view: 'myListDetails', listId: id, listType: 'individual' });
+              }} />
             </div>
           </PageTransition>
         )}
         {view === "myListDetails" && selectedIndividualListId != null && (
           <PageTransition key={`myListDetails-${selectedIndividualListId}`}>
             <div className="px-4">
-              <IndividualListDetail listId={selectedIndividualListId} onBack={()=> setView('myLists')} />
+              <IndividualListDetail listId={selectedIndividualListId} onBack={()=> window.history.back()} />
             </div>
           </PageTransition>
         )}
@@ -474,9 +589,15 @@ export default function Dashboard({ onRegisterNavigateHome }: { onRegisterNaviga
         </div>
       )}
 
-      {/* List Details Modal */}
-      {modalListId != null && (
-        <ListModal listId={modalListId} title={modalListTitle} onClose={()=> setModalListId(null)} />
+      {/* AI List Details Modal - only for dynamic view with listId */}
+      {view === "dynamic" && modalListId != null && (
+        <AiListDetails
+          aiListId={String(modalListId)}
+          title={modalListTitle}
+          onClose={() => {
+            window.history.back();
+          }}
+        />
       )}
 
       {/* Edit List Modal */}
@@ -676,3 +797,4 @@ function EditPanel({ list, account, values, onChange, onCancel, onSave, saving }
     </div>
   );
 }
+

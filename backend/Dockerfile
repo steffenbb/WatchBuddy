@@ -4,7 +4,7 @@
 
 FROM python:3.11-slim AS builder
 WORKDIR /install
-COPY requirements.txt .
+COPY backend/requirements.txt .
 ENV PIP_DEFAULT_TIMEOUT=120
 RUN apt-get update && apt-get install -y build-essential gcc libpq-dev \
         && pip install --upgrade pip \
@@ -32,18 +32,19 @@ COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/pytho
 COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy bootstrap parts EARLY (rarely change, cached layer, each ~700MB for Docker Hub limit)
-COPY data/watchbuddy_bootstrap.part.00 /app/data/parts/
-COPY data/watchbuddy_bootstrap.part.01 /app/data/parts/
-COPY data/watchbuddy_bootstrap.part.02 /app/data/parts/
-COPY data/watchbuddy_bootstrap.part.03 /app/data/parts/
-COPY data/watchbuddy_bootstrap.part.04 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.00 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.01 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.02 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.03 /app/data/parts/
+COPY backend/data/watchbuddy_bootstrap.part.04 /app/data/parts/
 
 # Copy local sentence-transformers model files EARLY (rarely change, cached layer)
-COPY app/models_cache/all-MiniLM-L6-v2 /app/app/models_cache/all-MiniLM-L6-v2
+COPY backend/app/models_cache/all-MiniLM-L6-v2 /app/app/models_cache/all-MiniLM-L6-v2
 
 # Copy application code LATE (changes frequently, invalidates fewer layers above)
-COPY app /app/app
-COPY entrypoint.sh /app/entrypoint.sh
+COPY backend/app /app/app
+COPY backend/entrypoint.sh /app/entrypoint.sh
+COPY backend/*.py /app/
 RUN chmod +x /app/entrypoint.sh
 
 # Expose build metadata as labels and env

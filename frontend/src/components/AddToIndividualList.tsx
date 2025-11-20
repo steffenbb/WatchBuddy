@@ -114,7 +114,7 @@ export function AddToIndividualList({ item, buttonClassName }: { item: AddableIt
       </button>
 
       {open && (
-        <div className="absolute z-50 right-0 mt-2 w-64 bg-gray-950/95 backdrop-blur-sm border border-gray-700 rounded-lg shadow-xl">
+        <div className="absolute z-50 left-0 md:left-auto md:right-0 mt-2 w-64 max-w-[calc(100vw-2rem)] bg-gray-950/95 backdrop-blur-sm border border-gray-700 rounded-lg shadow-xl">
           <div className="px-3 py-2 text-xs text-gray-300 border-b border-gray-800">Add to list</div>
           <div className="max-h-64 overflow-auto">
             {loading ? (

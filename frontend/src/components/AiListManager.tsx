@@ -211,7 +211,7 @@ export default function AiListManager() {
 
       {/* Lists poster grid with animations */}
       <motion.div 
-        className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4"
+        className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4"
         initial="hidden"
         animate="visible"
         variants={{
@@ -243,61 +243,122 @@ export default function AiListManager() {
               }}
               className="relative group rounded-2xl overflow-hidden bg-white/5 border border-white/10 shadow-lg hover:shadow-2xl hover:shadow-purple-500/20"
             >
-              {/* Poster */}
-              <div className="aspect-[2/3] w-full bg-gradient-to-br from-slate-900 to-slate-800">
-                {posterPath ? (
-                  <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" loading="lazy" />
-                ) : (
-                  <div className="w-full h-full flex items-center justify-center text-white/40 text-sm px-2 text-center">
-                    {list.status === 'pending' || list.status === 'queued' || list.status === 'running' ? 'Generating...' : 'No poster yet'}
+              {/* Desktop: Vertical card with poster */}
+              <div className="hidden md:block">
+                {/* Poster */}
+                <div className="aspect-[2/3] w-full bg-gradient-to-br from-slate-900 to-slate-800">
+                  {posterPath ? (
+                    <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" loading="lazy" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-white/40 text-sm px-2 text-center">
+                      {list.status === 'pending' || list.status === 'queued' || list.status === 'running' ? 'Generating...' : 'No poster yet'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Gradient overlay */}
+                <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
+
+                {/* Status badge */}
+                <div className={`absolute top-2 left-2 px-2 py-1 rounded-md text-xs font-medium ${badgeClass}`}>{list.status}</div>
+
+                {/* Delete button - top right */}
+                <button
+                  aria-label="Delete"
+                  onClick={(e) => { e.stopPropagation(); handleDelete(list.id); }}
+                  disabled={loading}
+                  className="absolute top-2 right-2 p-1.5 rounded-lg bg-black/60 hover:bg-red-600/80 text-white backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-all active:scale-95"
+                >
+                  <Trash2 size={14} />
+                </button>
+
+                {/* Bottom bar with title and actions */}
+                <div className="absolute bottom-0 left-0 right-0 p-3 flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-white font-semibold truncate">{list.generated_title || list.prompt}</div>
+                    <div className="text-white/70 text-xs mt-0.5 truncate">{list.type}</div>
                   </div>
-                )}
+                  <div className="flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity ml-2">
+                    <button
+                      aria-label="View"
+                      disabled={list.status !== 'ready'}
+                      onClick={() => { 
+                        if (list.status === 'ready') { 
+                          window.dispatchEvent(new CustomEvent('ai-list-open', { detail: { id: list.id, title: list.generated_title || list.prompt } }));
+                          window.location.hash = `dynamic/${list.id}`; 
+                        } 
+                      }}
+                      className={`p-2 rounded-lg backdrop-blur-sm active:scale-95 transition-all ${list.status==='ready' ? 'bg-black/60 hover:bg-black/70 text-white' : 'bg-black/40 text-white/40 cursor-not-allowed'}`}
+                    >
+                      <Eye size={14} />
+                    </button>
+                    <button
+                      aria-label="Refresh"
+                      onClick={(e) => { e.stopPropagation(); handleRefresh(list.id); }}
+                      disabled={cooldown > 0 || loading}
+                      className={`p-2 rounded-lg backdrop-blur-sm active:scale-95 transition-all ${cooldown>0 || loading ? 'bg-black/40 text-white/40 cursor-not-allowed' : 'bg-black/60 hover:bg-black/70 text-white'}`}
+                    >
+                      {cooldown > 0 ? (
+                        <span className="text-xs">{cooldown}s</span>
+                      ) : (
+                        <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+                      )}
+                    </button>
+                  </div>
+                </div>
               </div>
 
-              {/* Gradient overlay */}
-              <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent opacity-80 group-hover:opacity-90 transition-opacity" />
-
-              {/* Status badge */}
-              <div className={`absolute top-2 left-2 px-2 py-1 rounded-md text-xs font-medium ${badgeClass}`}>{list.status}</div>
-
-              {/* Delete button - top right - Always visible on mobile, hover on desktop */}
-              <button
-                aria-label="Delete"
-                onClick={(e) => { e.stopPropagation(); handleDelete(list.id); }}
-                disabled={loading}
-                className="absolute top-2 right-2 p-2 rounded-lg bg-black/60 hover:bg-red-600/80 text-white backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[28px] md:min-h-[28px] md:p-1.5 md:opacity-0 md:group-hover:opacity-100 transition-all active:scale-95"
-              >
-                <Trash2 size={16} className="md:w-3.5 md:h-3.5" />
-              </button>
-
-              {/* Bottom bar with title and actions */}
-              <div className="absolute bottom-0 left-0 right-0 p-3 flex items-center justify-between">
-                <div className="flex-1 min-w-0">
-                  <div className="text-white font-semibold truncate">{list.generated_title || list.prompt}</div>
-                  <div className="text-white/70 text-xs mt-0.5 truncate">{list.type}</div>
+              {/* Mobile: Horizontal card */}
+              <div className="md:hidden flex gap-3 p-3">
+                {/* Small poster on left */}
+                <div className="w-24 h-36 flex-shrink-0 rounded-lg overflow-hidden bg-gradient-to-br from-slate-900 to-slate-800 relative">
+                  {posterPath ? (
+                    <img src={posterPath} alt={list.generated_title || list.prompt || 'AI List'} className="w-full h-full object-cover" loading="lazy" />
+                  ) : (
+                    <div className="w-full h-full flex items-center justify-center text-white/40 text-xs text-center px-1">
+                      {list.status === 'pending' || list.status === 'queued' || list.status === 'running' ? 'Generating...' : 'No poster'}
+                    </div>
+                  )}
+                  <div className={`absolute top-1 left-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${badgeClass}`}>{list.status}</div>
                 </div>
-                {/* Bottom buttons - Always visible on mobile, hover on desktop */}
-                <div className="flex items-center gap-1.5 md:opacity-0 md:group-hover:opacity-100 transition-opacity ml-2">
-                  <button
-                    aria-label="View"
-                    disabled={list.status !== 'ready'}
-                    onClick={() => { if (list.status === 'ready') { setOpenId(list.id); setOpenTitle(list.generated_title || list.prompt || 'AI List'); } }}
-                    className={`p-2 rounded-lg backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[32px] md:min-h-[32px] active:scale-95 transition-all ${list.status==='ready' ? 'bg-black/60 hover:bg-black/70 text-white' : 'bg-black/40 text-white/40 cursor-not-allowed'}`}
-                  >
-                    <Eye size={16} className="md:w-3.5 md:h-3.5" />
-                  </button>
-                  <button
-                    aria-label="Refresh"
-                    onClick={(e) => { e.stopPropagation(); handleRefresh(list.id); }}
-                    disabled={cooldown > 0 || loading}
-                    className={`p-2 rounded-lg backdrop-blur-sm min-w-[36px] min-h-[36px] md:min-w-[32px] md:min-h-[32px] active:scale-95 transition-all ${cooldown>0 || loading ? 'bg-black/40 text-white/40 cursor-not-allowed' : 'bg-black/60 hover:bg-black/70 text-white'}`}
-                  >
-                    {cooldown > 0 ? (
-                      <span className="text-xs">{cooldown}s</span>
-                    ) : (
-                      <RefreshCw size={16} className={`${loading ? "animate-spin" : ""} md:w-3.5 md:h-3.5`} />
-                    )}
-                  </button>
+
+                {/* Content on right */}
+                <div className="flex-1 min-w-0 flex flex-col justify-between">
+                  <div className="min-w-0">
+                    <div className="text-white font-semibold text-sm mb-1 line-clamp-2">{list.generated_title || list.prompt}</div>
+                    <div className="text-white/70 text-xs">{list.type}</div>
+                  </div>
+
+                  {/* Buttons */}
+                  <div className="flex gap-2 mt-2">
+                    <button
+                      disabled={list.status !== 'ready'}
+                      onClick={() => { 
+                        if (list.status === 'ready') { 
+                          window.dispatchEvent(new CustomEvent('ai-list-open', { detail: { id: list.id, title: list.generated_title || list.prompt } }));
+                          window.location.hash = `dynamic/${list.id}`; 
+                        } 
+                      }}
+                      className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors min-h-[44px] flex items-center justify-center gap-2 ${list.status==='ready' ? 'bg-purple-500/80 hover:bg-purple-600/80 text-white' : 'bg-white/10 text-white/40 cursor-not-allowed'}`}
+                    >
+                      <Eye size={16} />
+                      <span>View</span>
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleRefresh(list.id); }}
+                      disabled={cooldown > 0 || loading}
+                      className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors min-h-[44px] ${cooldown>0 || loading ? 'bg-white/10 text-white/40 cursor-not-allowed' : 'bg-white/20 hover:bg-white/30 text-white'}`}
+                    >
+                      {cooldown > 0 ? `${cooldown}s` : <RefreshCw size={16} className={loading ? "animate-spin" : ""} />}
+                    </button>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleDelete(list.id); }}
+                      disabled={loading}
+                      className="px-3 py-2 rounded-lg bg-red-500/80 hover:bg-red-600/80 text-white transition-colors min-h-[44px]"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </div>
                 </div>
               </div>
             </motion.div>
@@ -313,10 +374,6 @@ export default function AiListManager() {
           <h3 className="text-2xl font-bold text-white mb-2">No AI lists yet</h3>
           <p className="text-white/60">Create your first AI-powered list or generate 7 dynamic recommendations!</p>
         </div>
-      )}
-
-      {openId && (
-        <AiListDetails aiListId={openId} title={openTitle} onClose={() => setOpenId(null)} />
       )}
     </div>
   );

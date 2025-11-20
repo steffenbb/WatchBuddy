@@ -47,6 +47,15 @@ body{
 	.safe-area-inset-bottom {
 		padding-bottom: env(safe-area-inset-bottom);
 	}
+  
+	/* Hide scrollbar for carousel */
+	.scrollbar-hide {
+		-ms-overflow-style: none;
+		scrollbar-width: none;
+	}
+	.scrollbar-hide::-webkit-scrollbar {
+		display: none;
+	}
 }
 
 /* Micro-interactions and animations */
